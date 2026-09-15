@@ -1,0 +1,27 @@
+{
+  "name": "sadbox",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Supervisor for microVM AI-agent sandboxes",
+  "bin": { "sadbox": "./src/index.ts" },
+  "scripts": {
+    "start": "bun run src/index.ts serve",
+    "dev": "bun --watch run src/index.ts serve",
+    "setup": "bun run src/index.ts setup",
+    "build:image": "container build -t sadbox-worker:latest images/worker",
+    "compile": "bun build --compile --minify --sourcemap src/index.ts --outfile dist/sadbox",
+    "compile:darwin-arm64": "bun build --compile --minify --target=bun-darwin-arm64 src/index.ts --outfile dist/sadbox-darwin-arm64",
+    "compile:darwin-x64": "bun build --compile --minify --target=bun-darwin-x64 src/index.ts --outfile dist/sadbox-darwin-x64",
+    "compile:linux-arm64": "bun build --compile --minify --target=bun-linux-arm64 src/index.ts --outfile dist/sadbox-linux-arm64",
+    "compile:linux-x64": "bun build --compile --minify --target=bun-linux-x64 src/index.ts --outfile dist/sadbox-linux-x64",
+    "compile:all": "bun run compile:darwin-arm64 && bun run compile:darwin-x64 && bun run compile:linux-arm64 && bun run compile:linux-x64"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0"
+  },
+  "devDependencies": {
+    "bun-types": "^1.4.2",
+    "typescript": "^7.0.2"
+  }
+}
