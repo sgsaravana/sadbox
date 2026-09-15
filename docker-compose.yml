@@ -1,0 +1,23 @@
+# sadbox supervisor — compose packaging.
+# Functional today for the web UI/API; worker (microVM) creation from inside a
+# container requires a LINUX host with KVM and the future kvm driver
+# (docs/research/02). On macOS hosts run natively instead (README: Deploying).
+services:
+  sadbox:
+    image: ${SADBOX_IMAGE:-sadbox-app:latest}
+    build: .
+    ports:
+      - "7070:7070"
+    volumes:
+      - sadbox-data:/data
+    restart: unless-stopped
+    # Uncomment on a Linux host with KVM once the kvm driver ships —
+    # this is all Firecracker/Cloud Hypervisor need (no privileged mode):
+    # devices:
+    #   - /dev/kvm
+    #   - /dev/net/tun
+    # cap_add:
+    #   - NET_ADMIN
+
+volumes:
+  sadbox-data:

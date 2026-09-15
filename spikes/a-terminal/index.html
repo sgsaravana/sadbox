@@ -1,0 +1,45 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>spike-a terminal</title>
+<link rel="stylesheet" href="/xterm.css">
+<style>
+  html, body { height: 100%; margin: 0; background: #0b0b0f; }
+  #term { height: 100%; }
+  .xterm .xterm-viewport { background: #0b0b0f; }
+</style>
+<div id="term"></div>
+<script src="/xterm.js"></script>
+<script src="/addon-fit.js"></script>
+<script>
+  const term = new Terminal({
+    fontFamily: "SF Mono, Menlo, monospace",
+    fontSize: 13,
+    cursorBlink: true,
+    allowProposedApi: true,
+    theme: { background: "#0b0b0f" },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById("term"));
+  fit.fit();
+
+  const ws = new WebSocket(`ws://${location.host}/term?cols=${term.cols}&rows=${term.rows}`);
+  ws.binaryType = "arraybuffer";
+  const enc = new TextEncoder();
+
+  ws.onopen = () => term.focus();
+  ws.onmessage = (ev) => term.write(new Uint8Array(ev.data));
+  ws.onclose = (ev) =>
+    term.write(`\r\n\x1b[31m[disconnected: ${ev.reason || ev.code}]\x1b[0m\r\n`);
+
+  term.onData((d) => { if (ws.readyState === WebSocket.OPEN) ws.send(enc.encode(d)); });
+  term.onBinary((d) => {
+    if (ws.readyState === WebSocket.OPEN)
+      ws.send(Uint8Array.from(d, (c) => c.charCodeAt(0)));
+  });
+  term.onResize(({ cols, rows }) => {
+    if (ws.readyState === WebSocket.OPEN)
+      ws.send(JSON.stringify({ type: "resize", cols, rows }));
+  });
+  addEventListener("resize", () => fit.fit());
+</script>

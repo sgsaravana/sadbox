@@ -1,0 +1,31 @@
+name: release
+
+# Tag a version to publish binaries:  git tag v0.1.0 && git push --tags
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run compile:all
+      - name: Checksums
+        run: cd dist && shasum -a 256 sadbox-* > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/sadbox-darwin-arm64
+            dist/sadbox-darwin-x64
+            dist/sadbox-linux-arm64
+            dist/sadbox-linux-x64
+            dist/SHA256SUMS
+          generate_release_notes: true
