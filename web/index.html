@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sadbox</title>
+<link rel="stylesheet" href="/style.css">
+<body>
+  <header>
+    <h1>sadbox</h1>
+    <span class="sub">microVM sandboxes for AI agents</span>
+  </header>
+
+  <main>
+    <section>
+      <div class="section-head">
+        <h2>Workers</h2>
+        <button id="btn-new" class="primary">+ New worker</button>
+      </div>
+      <div id="workers" class="cards"></div>
+    </section>
+
+    <section id="create-panel" hidden>
+      <h2>New worker</h2>
+      <form id="create-form" class="panel">
+        <label>Name <input name="name" required placeholder="my-feature" pattern="[a-zA-Z0-9-]+"></label>
+        <label>Source folder
+          <span class="row input-with-btn">
+            <input name="sourcePath" required placeholder="/Users/you/Projects/repo">
+            <button type="button" id="btn-browse">Browse…</button>
+          </span>
+        </label>
+        <label>Extra apt packages <input name="apps" placeholder="python3, htop (optional)"></label>
+        <fieldset><legend>Secrets</legend><div id="create-secrets" class="checks"></div></fieldset>
+        <div class="row">
+          <button type="submit" class="primary">Create</button>
+          <button type="button" id="btn-cancel">Cancel</button>
+          <span id="create-status"></span>
+        </div>
+      </form>
+    </section>
+
+    <section>
+      <h2>Global secrets</h2>
+      <p class="empty">Shared secrets you can assign to any number of workers.
+        VM-specific secrets are managed per worker via its <em>Secrets…</em> button.</p>
+      <div class="panel">
+        <ul id="secrets"></ul>
+        <form id="secret-form" class="row">
+          <input name="name" required placeholder="ANTHROPIC_API_KEY" pattern="[A-Z][A-Z0-9_]*">
+          <input name="value" required type="password" placeholder="value (write-only)">
+          <button type="submit" class="primary">Add</button>
+        </form>
+      </div>
+    </section>
+  </main>
+  <dialog id="wsec">
+    <div class="picker-head">
+      <strong id="wsec-title">Worker secrets</strong>
+      <button type="button" id="wsec-close">✕</button>
+    </div>
+    <h3 class="wsec-h">VM-specific <span class="empty">— live only in this VM, destroyed with it</span></h3>
+    <ul id="wsec-own" class="wsec-list"></ul>
+    <form id="wsec-add" class="row">
+      <input name="name" required placeholder="MY_TOKEN" pattern="[A-Z][A-Z0-9_]*">
+      <input name="value" required type="password" placeholder="value (write-only)">
+      <button type="submit" class="primary">Add</button>
+    </form>
+    <h3 class="wsec-h">Assigned global secrets</h3>
+    <div id="wsec-globals" class="checks"></div>
+    <div class="row picker-foot">
+      <span id="wsec-status" class="empty"></span>
+      <button type="button" id="wsec-apply" class="primary">Apply globals</button>
+    </div>
+  </dialog>
+
+  <dialog id="picker">
+    <div class="picker-head">
+      <strong>Select source folder</strong>
+      <button type="button" id="picker-close">✕</button>
+    </div>
+    <div class="picker-path"><button type="button" id="picker-home" title="Home">⌂</button><span id="picker-current"></span></div>
+    <ul id="picker-list"></ul>
+    <div class="row picker-foot">
+      <span id="picker-hint" class="empty"></span>
+      <button type="button" id="picker-select" class="primary">Select this folder</button>
+    </div>
+  </dialog>
+  <script src="/app.js"></script>
+</body>
+</html>

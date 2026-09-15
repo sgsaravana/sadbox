@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>sadbox terminal</title>
+<link rel="stylesheet" href="/vendor/xterm.css">
+<style>
+  html, body { height: 100%; margin: 0; background: #0b0b0f; }
+  #term { height: 100%; }
+  .xterm .xterm-viewport { background: #0b0b0f; }
+  #bar { position: fixed; top: 8px; right: 12px; z-index: 9; font: 12px system-ui; }
+  #bar button { background: #1d2f57; color: #dbe4ff; border: 0; border-radius: 6px; padding: 4px 10px; cursor: pointer; display: none; }
+</style>
+<body>
+  <div id="bar"><button id="reconnect">reconnect</button></div>
+  <div id="term"></div>
+  <script src="/vendor/xterm.js"></script>
+  <script src="/vendor/addon-fit.js"></script>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const workerId = params.get("id");
+    const name = params.get("name") || workerId;
+    document.title = `${name} — sadbox`;
+
+    const term = new Terminal({
+      fontFamily: "SF Mono, Menlo, monospace",
+      fontSize: 13,
+      cursorBlink: true,
+      allowProposedApi: true,
+      theme: { background: "#0b0b0f" },
+    });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(document.getElementById("term"));
+    fit.fit();
+
+    const enc = new TextEncoder();
+    let ws;
+    function connect() {
+      document.getElementById("reconnect").style.display = "none";
+      ws = new WebSocket(`ws://${location.host}/workers/${workerId}/term?cols=${term.cols}&rows=${term.rows}`);
+      ws.binaryType = "arraybuffer";
+      ws.onopen = () => term.focus();
+      ws.onmessage = (ev) => term.write(new Uint8Array(ev.data));
+      ws.onclose = (ev) => {
+        term.write(`\r\n\x1b[31m[disconnected: ${ev.reason || ev.code}]\x1b[0m\r\n`);
+        document.getElementById("reconnect").style.display = "inline-block";
+      };
+    }
+    document.getElementById("reconnect").onclick = connect;
+    term.onData((d) => { if (ws?.readyState === WebSocket.OPEN) ws.send(enc.encode(d)); });
+    term.onBinary((d) => {
+      if (ws?.readyState === WebSocket.OPEN) ws.send(Uint8Array.from(d, (c) => c.charCodeAt(0)));
+    });
+    term.onResize(({ cols, rows }) => {
+      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "resize", cols, rows }));
+    });
+    addEventListener("resize", () => fit.fit());
+    connect();
+  </script>
+</body>
+</html>
