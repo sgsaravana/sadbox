@@ -4,7 +4,7 @@ import { join } from "path";
 import { config } from "../config";
 import { db, logEvent } from "../db";
 import { getDriver } from "../driver";
-import { branchFor, getWorker, refFor } from "./workers";
+import { branchFor, getProject, refFor } from "./projects";
 
 const driver = getDriver();
 
@@ -18,11 +18,11 @@ async function hostGit(repo: string, args: string[]) {
   return { code, out: out.trim(), err: err.trim() };
 }
 
-export async function syncWorker(id: string, opts?: { autocommit?: boolean }) {
-  const w = getWorker(id);
-  if (!w) throw new Error("worker not found");
-  const ref = refFor(w.name);
-  const branch = branchFor(w.name);
+export async function syncProject(id: string, opts?: { autocommit?: boolean }) {
+  const p = getProject(id);
+  if (!p) throw new Error("project not found");
+  const ref = refFor(p.name);
+  const branch = branchFor(p.name);
   const autocommit = opts?.autocommit ?? true;
 
   if (autocommit) {
@@ -38,7 +38,7 @@ export async function syncWorker(id: string, opts?: { autocommit?: boolean }) {
   if (tip.exitCode !== 0) throw new Error(`cannot resolve ${branch} in guest: ${tip.stderr}`);
   const tipSha = tip.stdout.trim();
 
-  const basis = w.last_synced_sha ?? w.base_sha;
+  const basis = p.last_synced_sha ?? p.base_sha;
   if (tipSha === basis) {
     return { upToDate: true, tip: tipSha, commits: "", diffstat: "" };
   }
@@ -53,20 +53,20 @@ export async function syncWorker(id: string, opts?: { autocommit?: boolean }) {
   await Bun.write(bundlePath, bundle.stdout);
   try {
     // + allows non-fast-forward updates if the agent rebased its branch
-    const fetch = await hostGit(w.source_path,
+    const fetch = await hostGit(p.source_path,
       ["fetch", bundlePath, `+${branch}:refs/remotes/${branch}`]);
     if (fetch.code !== 0) throw new Error(`host fetch failed: ${fetch.err}`);
   } finally {
     await Bun.file(bundlePath).delete().catch(() => {});
   }
 
-  db.query("UPDATE workers SET last_synced_sha = ? WHERE id = ?").run(tipSha, id);
+  db.query("UPDATE projects SET last_synced_sha = ? WHERE id = ?").run(tipSha, id);
   logEvent(id, "sync", `${basis?.slice(0, 7)}..${tipSha.slice(0, 7)} (${bundle.stdout.length} bytes)`);
 
-  const base = w.base_sha!;
-  const commits = await hostGit(w.source_path,
+  const base = p.base_sha!;
+  const commits = await hostGit(p.source_path,
     ["log", "--oneline", `${base}..refs/remotes/${branch}`]);
-  const diffstat = await hostGit(w.source_path,
+  const diffstat = await hostGit(p.source_path,
     ["diff", "--stat", `${base}...refs/remotes/${branch}`]);
   return {
     upToDate: false,
@@ -78,14 +78,14 @@ export async function syncWorker(id: string, opts?: { autocommit?: boolean }) {
   };
 }
 
-/** Preview without syncing: what has the worker committed since last sync? */
+/** Preview without syncing: what has the project committed since last sync? */
 export async function syncStatus(id: string) {
-  const w = getWorker(id);
-  if (!w) throw new Error("worker not found");
-  const r = await driver.exec(refFor(w.name), ["sh", "-c",
+  const p = getProject(id);
+  if (!p) throw new Error("project not found");
+  const r = await driver.exec(refFor(p.name), ["sh", "-c",
     `cd ${config.guestWorkdir} && ` +
     `echo "dirty=$(git status --porcelain | wc -l)" && ` +
-    `echo "ahead=$(git rev-list --count ${w.last_synced_sha ?? w.base_sha}..${branchFor(w.name)})"`,
+    `echo "ahead=$(git rev-list --count ${p.last_synced_sha ?? p.base_sha}..${branchFor(p.name)})"`,
   ]);
   const dirty = Number(/dirty=\s*(\d+)/.exec(r.stdout)?.[1] ?? 0);
   const ahead = Number(/ahead=\s*(\d+)/.exec(r.stdout)?.[1] ?? 0);

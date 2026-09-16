@@ -12,8 +12,8 @@ import styleCss from "../web/style.css" with { type: "file" };
 import xtermJs from "../node_modules/@xterm/xterm/lib/xterm.js" with { type: "file" };
 import xtermCss from "../node_modules/@xterm/xterm/css/xterm.css" with { type: "file" };
 import addonFitJs from "../node_modules/@xterm/addon-fit/lib/addon-fit.js" with { type: "file" };
-import workerDockerfile from "../images/worker/Dockerfile" with { type: "file" };
-import workerTmuxConf from "../images/worker/tmux.conf" with { type: "file" };
+import baseDockerfile from "../images/base/Dockerfile" with { type: "file" };
+import baseTmuxConf from "../images/base/tmux.conf" with { type: "file" };
 
 // route path -> [embedded file path, content-type]
 export const staticRoutes: Record<string, [string, string]> = {
@@ -26,8 +26,8 @@ export const staticRoutes: Record<string, [string, string]> = {
   "/vendor/addon-fit.js": [addonFitJs, "text/javascript"],
 };
 
-// build-context files for `container build` of the worker image (used by setup)
-export const workerImageFiles: Record<string, string> = {
-  Dockerfile: workerDockerfile,
-  "tmux.conf": workerTmuxConf,
+// build-context files for `container build` of the base image (used by setup)
+export const baseImageFiles: Record<string, string> = {
+  Dockerfile: baseDockerfile,
+  "tmux.conf": baseTmuxConf,
 };

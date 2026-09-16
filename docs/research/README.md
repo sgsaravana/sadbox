@@ -1,5 +1,10 @@
 # sadbox — Research Summary
 
+> **Terminology (2026-09-16):** a microVM instance is now a **project** (these
+> research docs predate the rename and say "worker"); the base VM image is the
+> **base image** (was "worker image"). See `00-requirements.md`.
+
+
 > Synthesized 2026-09-15 from seven parallel research threads. Each section links
 > to the full doc; read `00-requirements.md` first for scope and vocabulary.
 

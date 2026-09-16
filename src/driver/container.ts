@@ -1,9 +1,10 @@
 // Apple `container` CLI driver (macOS). Every recipe here was proven in
 // spikes/a-terminal and spikes/b-image — see their READMEs for the gotchas.
 import { config } from "../config";
-import type { ExecResult, TerminalHandle, WorkerDriver, WorkerInfo } from "./types";
+import type { ExecResult, TerminalHandle, ProjectDriver, ProjectInfo, ProjectStats } from "./types";
 
 const BIN = config.containerBin;
+const volname = (ref: string) => `${ref}-workdir`;
 
 async function run(args: string[], stdin?: Blob | Uint8Array): Promise<ExecResult> {
   const proc = Bun.spawn([BIN, ...args], {
@@ -20,23 +21,39 @@ async function run(args: string[], stdin?: Blob | Uint8Array): Promise<ExecResul
 }
 
 // inspect/list element shape (verified against container CLI 1.4.1):
-// { configuration: { id }, status: { state, networks: [{ ipv4Address }] } }
-function parseInfo(c: any): WorkerInfo | null {
+// { configuration: { id, resources: { cpus, memoryInBytes } },
+//   status: { state, networks: [{ ipv4Address }] } }
+function parseInfo(c: any): ProjectInfo | null {
   const ref = c?.configuration?.id;
   if (!ref) return null;
+  const res = c?.configuration?.resources;
   return {
     ref,
     state: c?.status?.state === "running" ? "running" : "stopped",
     address: (c?.status?.networks?.[0]?.ipv4Address as string | undefined)?.split("/")[0],
+    cpus: res?.cpus,
+    memoryLimitBytes: res?.memoryInBytes,
   };
 }
 
-export const containerDriver: WorkerDriver = {
+export const containerDriver: ProjectDriver = {
   name: "container",
   capabilities: { snapshot: false, sharedMount: true, routableIp: true },
 
-  async create(ref, image) {
-    const r = await run(["run", "--name", ref, "--detach", image]);
+  async create(ref, image, opts) {
+    const res: string[] = [];
+    if (opts?.cpus) res.push("--cpus", String(opts.cpus));
+    if (opts?.memoryMB) res.push("--memory", `${opts.memoryMB}M`);
+    if (opts?.diskGB) {
+      // sized volume mounted at the workdir caps the project's disk usage
+      // (the rootfs itself is thin-provisioned and can't be capped)
+      const vol = volname(ref);
+      await run(["volume", "delete", vol]); // clear any stale volume, ignore error
+      const v = await run(["volume", "create", "-s", `${opts.diskGB}G`, vol]);
+      if (v.exitCode !== 0) throw new Error(`volume create failed: ${v.stderr.trim()}`);
+      res.push("--mount", `type=volume,source=${vol},target=${config.guestWorkdir}`);
+    }
+    const r = await run(["run", "--name", ref, "--detach", ...res, image]);
     if (r.exitCode !== 0) throw new Error(`container run failed: ${r.stderr.trim()}`);
   },
 
@@ -46,6 +63,7 @@ export const containerDriver: WorkerDriver = {
     if (r.exitCode !== 0 && !/no such|not found/i.test(r.stderr)) {
       throw new Error(`container rm failed: ${r.stderr.trim()}`);
     }
+    await run(["volume", "delete", volname(ref)]); // best effort; ignore if none
   },
 
   async inspect(ref) {
@@ -67,9 +85,31 @@ export const containerDriver: WorkerDriver = {
       const j = JSON.parse(r.stdout) as any[];
       return j
         .map(parseInfo)
-        .filter((w): w is WorkerInfo => w !== null && w.ref !== "buildkit");
+        .filter((w): w is ProjectInfo => w !== null && w.ref !== "buildkit");
     } catch {
       return [];
+    }
+  },
+
+  async stats(ref): Promise<ProjectStats | null> {
+    const r = await run(["stats", "--no-stream", "--format", "json", ref]);
+    if (r.exitCode !== 0) return null;
+    try {
+      const j = JSON.parse(r.stdout);
+      const s = Array.isArray(j) ? j[0] : j;
+      if (!s) return null;
+      return {
+        cpuUsageUsec: s.cpuUsageUsec,
+        memoryUsageBytes: s.memoryUsageBytes,
+        memoryLimitBytes: s.memoryLimitBytes,
+        numProcesses: s.numProcesses,
+        networkRxBytes: s.networkRxBytes,
+        networkTxBytes: s.networkTxBytes,
+        blockReadBytes: s.blockReadBytes,
+        blockWriteBytes: s.blockWriteBytes,
+      };
+    } catch {
+      return null;
     }
   },
 

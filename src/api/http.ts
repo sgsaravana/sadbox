@@ -5,16 +5,17 @@ import { config } from "../config";
 import { staticRoutes } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
-import { assignSecrets, createGlobalSecret, createWorkerSecret, deleteSecret, injectSecrets, listGlobalSecrets, workerSecretView } from "../core/secrets";
-import { createWorker, destroyWorker, getWorker, refFor, workersWithLiveState } from "../core/workers";
-import { syncStatus, syncWorker } from "../core/sync";
+import { assignSecrets, createGlobalSecret, createProjectSecret, deleteSecret, injectSecrets, listGlobalSecrets, projectSecretView } from "../core/secrets";
+import { createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState } from "../core/projects";
+import { syncStatus, syncProject } from "../core/sync";
+import { getSettings, updateSettings } from "../core/settings";
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
 
 const err = (e: unknown, status = 400) => json({ error: String(e instanceof Error ? e.message : e) }, status);
 
-type TermConn = { workerId: string; cols: number; rows: number; term?: TerminalHandle };
+type TermConn = { projectId: string; cols: number; rows: number; term?: TerminalHandle };
 
 export function startServer() {
   const driver = getDriver();
@@ -27,55 +28,60 @@ export function startServer() {
       const url = new URL(req.url);
       const p = url.pathname;
 
-      // terminal websocket: /workers/:id/term?cols=N&rows=N
-      const termMatch = p.match(/^\/workers\/([\w-]+)\/term$/);
+      // terminal websocket: /projects/:id/term?cols=N&rows=N
+      const termMatch = p.match(/^\/projects\/([\w-]+)\/term$/);
       if (termMatch) {
         const cols = Math.max(2, Number(url.searchParams.get("cols")) || 80);
         const rows = Math.max(2, Number(url.searchParams.get("rows")) || 24);
-        if (server.upgrade(req, { data: { workerId: termMatch[1], cols, rows } })) return;
+        if (server.upgrade(req, { data: { projectId: termMatch[1], cols, rows } })) return;
         return new Response("upgrade failed", { status: 400 });
       }
 
       try {
-        if (p === "/api/workers" && req.method === "GET") {
-          return json(await workersWithLiveState());
+        if (p === "/api/projects" && req.method === "GET") {
+          return json(await projectsWithLiveState());
         }
-        if (p === "/api/workers" && req.method === "POST") {
+        if (p === "/api/projects" && req.method === "POST") {
           const b = await req.json();
-          return json(await createWorker({
-            name: b.name, sourcePath: b.sourcePath, apps: b.apps, secretIds: b.secretIds,
+          const git = b.git?.remote
+            ? { remote: String(b.git.remote).trim(), token: b.git.token ? String(b.git.token) : undefined }
+            : undefined;
+          return json(await createProject({
+            name: b.name, sourcePath: b.sourcePath, apps: b.apps, secretIds: b.secretIds, git,
           }), 201);
         }
-        let m = p.match(/^\/api\/workers\/([\w-]+)$/);
+        let m = p.match(/^\/api\/projects\/([\w-]+)$/);
         if (m && req.method === "DELETE") {
-          await destroyWorker(m[1]);
+          await destroyProject(m[1]);
           return json({ ok: true });
         }
-        m = p.match(/^\/api\/workers\/([\w-]+)\/secrets$/);
-        if (m && req.method === "GET") return json(workerSecretView(m[1]));
+        m = p.match(/^\/api\/projects\/([\w-]+)\/details$/);
+        if (m && req.method === "GET") return json(await projectDetails(m[1]));
+        m = p.match(/^\/api\/projects\/([\w-]+)\/secrets$/);
+        if (m && req.method === "GET") return json(projectSecretView(m[1]));
         if (m && req.method === "PUT") {          // assign globals
           const b = await req.json();
           assignSecrets(m[1], b.secretIds ?? []);
           await injectSecrets(m[1]);
-          return json(workerSecretView(m[1]));
+          return json(projectSecretView(m[1]));
         }
-        if (m && req.method === "POST") {         // create VM-specific secret
+        if (m && req.method === "POST") {         // create project-specific secret
           const b = await req.json();
-          const s = createWorkerSecret(m[1], b.name, b.value);
+          const s = createProjectSecret(m[1], b.name, b.value);
           try {
             await injectSecrets(m[1]);
           } catch (e) {
             await deleteSecret(s.id);             // keep create+inject atomic
             throw e;
           }
-          return json(workerSecretView(m[1]), 201);
+          return json(projectSecretView(m[1]), 201);
         }
-        m = p.match(/^\/api\/workers\/([\w-]+)\/sync$/);
+        m = p.match(/^\/api\/projects\/([\w-]+)\/sync$/);
         if (m && req.method === "POST") {
           const b = await req.json().catch(() => ({}));
-          return json(await syncWorker(m[1], { autocommit: b.autocommit ?? true }));
+          return json(await syncProject(m[1], { autocommit: b.autocommit ?? true }));
         }
-        m = p.match(/^\/api\/workers\/([\w-]+)\/sync\/status$/);
+        m = p.match(/^\/api\/projects\/([\w-]+)\/sync\/status$/);
         if (m && req.method === "GET") return json(await syncStatus(m[1]));
 
         // folder picker: list subdirectories of a host path
@@ -101,6 +107,14 @@ export function startServer() {
           });
         }
 
+        if (p === "/api/settings" && req.method === "GET") return json(getSettings());
+        if (p === "/api/settings" && req.method === "PUT") {
+          const b = await req.json();
+          return json(updateSettings({
+            defaultCpus: b.defaultCpus, defaultMemoryMB: b.defaultMemoryMB, defaultDiskGB: b.defaultDiskGB,
+          }));
+        }
+
         if (p === "/api/secrets" && req.method === "GET") return json(listGlobalSecrets());
         if (p === "/api/secrets" && req.method === "POST") {
           const b = await req.json();
@@ -122,10 +136,10 @@ export function startServer() {
 
     websocket: {
       open(ws) {
-        const w = getWorker(ws.data.workerId);
-        if (!w) { ws.close(4004, "worker not found"); return; }
+        const proj = getProject(ws.data.projectId);
+        if (!proj) { ws.close(4004, "project not found"); return; }
         const term = driver.terminal(
-          refFor(w.name),
+          refFor(proj.name),
           ["tmux", "new-session", "-A", "-s", config.tmuxSession],
           { cols: ws.data.cols, rows: ws.data.rows },
         );

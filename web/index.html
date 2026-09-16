@@ -5,71 +5,133 @@
 <title>sadbox</title>
 <link rel="stylesheet" href="/style.css">
 <body>
-  <header>
-    <h1>sadbox</h1>
-    <span class="sub">microVM sandboxes for AI agents</span>
-  </header>
-
-  <main>
-    <section>
-      <div class="section-head">
-        <h2>Workers</h2>
-        <button id="btn-new" class="primary">+ New worker</button>
+  <div class="shell">
+    <aside class="sidenav">
+      <div class="brand">
+        <span class="logo">▪</span>
+        <div><strong>SadBox</strong><span class="tag">Micro VM Agents</span></div>
       </div>
-      <div id="workers" class="cards"></div>
-    </section>
+      <nav>
+        <a href="#projects" class="nav-item" data-view="projects">
+          <span class="nav-ico">▦</span> Projects
+        </a>
+        <ul id="nav-projects" class="nav-tree"></ul>
+        <a href="#secrets" class="nav-item" data-view="secrets">
+          <span class="nav-ico">⚿</span> Secrets
+        </a>
+        <a href="#settings" class="nav-item nav-bottom" data-view="settings">
+          <span class="nav-ico">⚙</span> Settings
+        </a>
+      </nav>
+    </aside>
 
-    <section id="create-panel" hidden>
-      <h2>New worker</h2>
-      <form id="create-form" class="panel">
-        <label>Name <input name="name" required placeholder="my-feature" pattern="[a-zA-Z0-9-]+"></label>
-        <label>Source folder
-          <span class="row input-with-btn">
-            <input name="sourcePath" required placeholder="/Users/you/Projects/repo">
-            <button type="button" id="btn-browse">Browse…</button>
-          </span>
-        </label>
-        <label>Extra apt packages <input name="apps" placeholder="python3, htop (optional)"></label>
-        <fieldset><legend>Secrets</legend><div id="create-secrets" class="checks"></div></fieldset>
-        <div class="row">
-          <button type="submit" class="primary">Create</button>
-          <button type="button" id="btn-cancel">Cancel</button>
-          <span id="create-status"></span>
+    <main class="content">
+      <!-- PROJECTS VIEW -->
+      <section id="view-projects" class="view">
+        <div class="section-head">
+          <h1>Projects</h1>
+          <button id="btn-new" class="primary">+ New project</button>
         </div>
-      </form>
-    </section>
 
-    <section>
-      <h2>Global secrets</h2>
-      <p class="empty">Shared secrets you can assign to any number of workers.
-        VM-specific secrets are managed per worker via its <em>Secrets…</em> button.</p>
-      <div class="panel">
-        <ul id="secrets"></ul>
-        <form id="secret-form" class="row">
-          <input name="name" required placeholder="ANTHROPIC_API_KEY" pattern="[A-Z][A-Z0-9_]*">
-          <input name="value" required type="password" placeholder="value (write-only)">
-          <button type="submit" class="primary">Add</button>
+        <form id="create-form" class="panel create-panel" hidden>
+          <h2>New project</h2>
+          <label>Name <input name="name" required placeholder="my-feature" pattern="[a-zA-Z0-9-]+"></label>
+          <label>Source folder
+            <span class="row input-with-btn">
+              <input name="sourcePath" required placeholder="/Users/you/Projects/repo">
+              <button type="button" id="btn-browse">Browse…</button>
+            </span>
+          </label>
+          <label>Extra apt packages <input name="apps" placeholder="python3, htop (optional)"></label>
+
+          <fieldset class="git-setup">
+            <legend><label class="inline-check">
+              <input type="checkbox" id="git-toggle" name="gitEnabled"> Set up a git remote (optional)
+            </label></legend>
+            <div id="git-fields" hidden>
+              <label>Remote URL <input name="gitRemote" placeholder="https://github.com/you/repo.git"></label>
+              <label>Access token <input name="gitToken" type="password" placeholder="ghp_… (stored encrypted, write-only)"></label>
+              <p class="hint">The project's <code>origin</code> will point here and use this token to read/write.</p>
+            </div>
+          </fieldset>
+
+          <fieldset><legend>Global secrets</legend><div id="create-secrets" class="checks"></div></fieldset>
+          <div class="row">
+            <button type="submit" class="primary">Create</button>
+            <button type="button" id="btn-cancel">Cancel</button>
+            <span id="create-status"></span>
+          </div>
         </form>
-      </div>
-    </section>
-  </main>
-  <dialog id="wsec">
+
+        <div id="projects" class="cards"></div>
+      </section>
+
+      <!-- PROJECT DETAIL VIEW -->
+      <section id="view-detail" class="view" hidden>
+        <div class="section-head">
+          <div class="crumb"><a href="#projects">Projects</a> <span>/</span> <strong id="detail-name">…</strong></div>
+          <div class="row" id="detail-actions"></div>
+        </div>
+        <div id="detail-body"></div>
+      </section>
+
+      <!-- SETTINGS VIEW -->
+      <section id="view-settings" class="view" hidden>
+        <div class="section-head"><h1>Settings</h1></div>
+        <div class="panel">
+          <h2>Default VM resources</h2>
+          <p class="hint">Applied to every new project. Changing these does not affect existing projects.</p>
+          <form id="settings-form">
+            <div class="field-row">
+              <label>CPUs
+                <input name="defaultCpus" type="number" min="1" max="16" step="1" required></label>
+              <label>Memory (MB)
+                <input name="defaultMemoryMB" type="number" min="256" max="65536" step="256" required></label>
+              <label>Disk (GB)
+                <input name="defaultDiskGB" type="number" min="1" max="500" step="1" required></label>
+            </div>
+            <div class="row">
+              <button type="submit" class="primary">Save</button>
+              <span id="settings-status" class="hint"></span>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- SECRETS VIEW -->
+      <section id="view-secrets" class="view" hidden>
+        <div class="section-head"><h1>Global secrets</h1></div>
+        <p class="hint">Shared secrets you can assign to any number of projects.
+          Project-specific secrets are managed from each project's <em>Secrets…</em> button.</p>
+        <div class="panel">
+          <ul id="secrets"></ul>
+          <form id="secret-form" class="row">
+            <input name="name" required placeholder="ANTHROPIC_API_KEY" pattern="[A-Z][A-Z0-9_]*">
+            <input name="value" required type="password" placeholder="value (write-only)">
+            <button type="submit" class="primary">Add</button>
+          </form>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="psec">
     <div class="picker-head">
-      <strong id="wsec-title">Worker secrets</strong>
-      <button type="button" id="wsec-close">✕</button>
+      <strong id="psec-title">Project secrets</strong>
+      <button type="button" id="psec-close">✕</button>
     </div>
-    <h3 class="wsec-h">VM-specific <span class="empty">— live only in this VM, destroyed with it</span></h3>
-    <ul id="wsec-own" class="wsec-list"></ul>
-    <form id="wsec-add" class="row">
+    <h3 class="psec-h">Project-specific <span class="hint">— live only in this project, destroyed with it</span></h3>
+    <ul id="psec-own" class="psec-list"></ul>
+    <form id="psec-add" class="row">
       <input name="name" required placeholder="MY_TOKEN" pattern="[A-Z][A-Z0-9_]*">
       <input name="value" required type="password" placeholder="value (write-only)">
       <button type="submit" class="primary">Add</button>
     </form>
-    <h3 class="wsec-h">Assigned global secrets</h3>
-    <div id="wsec-globals" class="checks"></div>
+    <h3 class="psec-h">Assigned global secrets</h3>
+    <div id="psec-globals" class="checks"></div>
     <div class="row picker-foot">
-      <span id="wsec-status" class="empty"></span>
-      <button type="button" id="wsec-apply" class="primary">Apply globals</button>
+      <span id="psec-status" class="hint"></span>
+      <button type="button" id="psec-apply" class="primary">Apply globals</button>
     </div>
   </dialog>
 
@@ -81,7 +143,7 @@
     <div class="picker-path"><button type="button" id="picker-home" title="Home">⌂</button><span id="picker-current"></span></div>
     <ul id="picker-list"></ul>
     <div class="row picker-foot">
-      <span id="picker-hint" class="empty"></span>
+      <span id="picker-hint" class="hint"></span>
       <button type="button" id="picker-select" class="primary">Select this folder</button>
     </div>
   </dialog>

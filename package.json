@@ -8,7 +8,7 @@
     "start": "bun run src/index.ts serve",
     "dev": "bun --watch run src/index.ts serve",
     "setup": "bun run src/index.ts setup",
-    "build:image": "container build -t sadbox-worker:latest images/worker",
+    "build:image": "container build -t sadbox-base:latest images/base",
     "compile": "bun build --compile --minify --sourcemap src/index.ts --outfile dist/sadbox",
     "compile:darwin-arm64": "bun build --compile --minify --target=bun-darwin-arm64 src/index.ts --outfile dist/sadbox-darwin-arm64",
     "compile:darwin-x64": "bun build --compile --minify --target=bun-darwin-x64 src/index.ts --outfile dist/sadbox-darwin-x64",

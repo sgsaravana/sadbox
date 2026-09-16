@@ -1,4 +1,4 @@
-// WorkerDriver — the swappable boundary between the supervisor and a
+// ProjectDriver — the swappable boundary between the supervisor and a
 // virtualization backend (docs/research/01, decision #3).
 // Implementations: container.ts (Apple container CLI, macOS — done),
 // driver/kvm (Cloud Hypervisor REST, Linux — future).
@@ -9,10 +9,23 @@ export interface DriverCapabilities {
   routableIp: boolean;
 }
 
-export interface WorkerInfo {
+export interface ProjectInfo {
   ref: string;             // driver-native id (container name)
   state: "running" | "stopped" | "unknown";
   address?: string;        // guest IP if routable
+  cpus?: number;           // configured vCPUs
+  memoryLimitBytes?: number;
+}
+
+export interface ProjectStats {
+  cpuUsageUsec?: number;   // cumulative — sample twice for a percentage
+  memoryUsageBytes?: number;
+  memoryLimitBytes?: number;
+  numProcesses?: number;
+  networkRxBytes?: number;
+  networkTxBytes?: number;
+  blockReadBytes?: number;
+  blockWriteBytes?: number;
 }
 
 export interface ExecResult {
@@ -29,14 +42,16 @@ export interface TerminalHandle {
   onExit(cb: () => void): void;
 }
 
-export interface WorkerDriver {
+export interface ProjectDriver {
   readonly name: string;
   readonly capabilities: DriverCapabilities;
 
-  create(ref: string, image: string): Promise<void>;
+  create(ref: string, image: string, opts?: { cpus?: number; memoryMB?: number; diskGB?: number }): Promise<void>;
   destroy(ref: string): Promise<void>;
-  inspect(ref: string): Promise<WorkerInfo>;
-  list(): Promise<WorkerInfo[]>;
+  inspect(ref: string): Promise<ProjectInfo>;
+  list(): Promise<ProjectInfo[]>;
+  /** Live resource usage, or null if unavailable. */
+  stats(ref: string): Promise<ProjectStats | null>;
 
   /** Run a command in the guest, capture output. */
   exec(ref: string, cmd: string[], opts?: { user?: string }): Promise<ExecResult>;

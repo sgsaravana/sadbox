@@ -17,8 +17,8 @@
   <script src="/vendor/addon-fit.js"></script>
   <script>
     const params = new URLSearchParams(location.search);
-    const workerId = params.get("id");
-    const name = params.get("name") || workerId;
+    const projectId = params.get("id");
+    const name = params.get("name") || projectId;
     document.title = `${name} — sadbox`;
 
     const term = new Terminal({
@@ -37,7 +37,7 @@
     let ws;
     function connect() {
       document.getElementById("reconnect").style.display = "none";
-      ws = new WebSocket(`ws://${location.host}/workers/${workerId}/term?cols=${term.cols}&rows=${term.rows}`);
+      ws = new WebSocket(`ws://${location.host}/projects/${projectId}/term?cols=${term.cols}&rows=${term.rows}`);
       ws.binaryType = "arraybuffer";
       ws.onopen = () => term.focus();
       ws.onmessage = (ev) => term.write(new Uint8Array(ev.data));

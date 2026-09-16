@@ -9,9 +9,10 @@ export const config = {
   host: process.env.SADBOX_HOST ?? "localhost",
   // per-user state dir — works the same for a repo checkout or an installed binary
   dataDir: process.env.SADBOX_DATA ?? join(homedir(), ".sadbox"),
-  // built by `sadbox setup`; falls back to the spike image in a dev checkout
-  workerImage: process.env.SADBOX_WORKER_IMAGE ?? "sadbox-worker:latest",
-  workerImageFallback: "sadbox-worker:spike-b",
+  // base image every project VM boots from; built by `sadbox setup`.
+  // fallbacks keep older dev checkouts working until they rebuild.
+  baseImage: process.env.SADBOX_BASE_IMAGE ?? "sadbox-base:latest",
+  baseImageFallbacks: ["sadbox-worker:latest", "sadbox-worker:spike-b"],
   containerBin: process.env.SADBOX_CONTAINER_BIN ?? "container",
   guestUser: "agent",
   guestHome: "/home/agent",
