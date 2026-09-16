@@ -96,6 +96,26 @@
             </div>
           </form>
         </div>
+
+        <div class="panel" style="margin-top:16px">
+          <h2>Network allow / deny list</h2>
+          <p class="hint">Global egress rules applied to every VM. Block wins over allow; a host
+            with no matching rule prompts for approval on first use. Per-project rules and header
+            rewrites live on each project's detail view.</p>
+          <div id="settings-rules"></div>
+          <form id="settings-rule-add" class="net-form">
+            <select name="action"><option value="allow">allow</option><option value="block">block</option></select>
+            <input name="host" placeholder="host — api.github.com, *.github.com, *" required>
+            <input name="path" placeholder="path glob (optional)">
+            <select name="method">
+              <option value="">any method</option>
+              <option>GET</option><option>POST</option><option>PUT</option>
+              <option>PATCH</option><option>DELETE</option>
+            </select>
+            <button type="submit" class="primary">Add rule</button>
+            <span id="settings-rule-status" class="hint"></span>
+          </form>
+        </div>
       </section>
 
       <!-- SECRETS VIEW -->

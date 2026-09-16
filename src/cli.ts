@@ -4,6 +4,7 @@ import { join } from "path";
 import { config, VERSION } from "./config";
 import { baseImageFiles } from "./assets";
 import { startServer } from "./api/http";
+import { startProxy } from "./net/proxy";
 
 const BIN = config.containerBin;
 
@@ -70,6 +71,9 @@ async function doctor() {
     const img = await sh([BIN, "image", "inspect", config.baseImage]);
     console.log(`${img.code === 0 ? "✓" : "✗"} base image built (${config.baseImage})`);
   }
+  const ssl = await has("openssl");
+  console.log(`${ssl ? "✓" : "✗"} openssl (egress proxy TLS interception)`);
+  console.log(`proxy port:   ${config.proxyPort}`);
 }
 
 const HELP = `sadbox v${VERSION} — supervisor for microVM AI-agent sandboxes
@@ -82,12 +86,19 @@ Usage: sadbox <command>
   version    Print version
   help       Show this help
 
-Env: SADBOX_PORT, SADBOX_HOST, SADBOX_DATA, SADBOX_BASE_IMAGE`;
+Env: SADBOX_PORT, SADBOX_HOST, SADBOX_PROXY_PORT, SADBOX_PROXY_HOST,
+     SADBOX_DATA, SADBOX_BASE_IMAGE`;
 
 export async function main(argv: string[]) {
   const cmd = argv[2] ?? "serve";
   switch (cmd) {
-    case "serve": startServer(); break;
+    case "serve":
+      startServer();
+      // egress proxy for the VMs; runs alongside the API. Non-fatal if it can't
+      // start (e.g. openssl missing) — the UI/API still work, egress just isn't
+      // filtered until it's available.
+      startProxy().catch((e) => console.error(`⚠ proxy not started: ${e instanceof Error ? e.message : e}`));
+      break;
     case "setup": await setup(); break;
     case "doctor": await doctor(); break;
     case "version": case "--version": case "-v": console.log(VERSION); break;

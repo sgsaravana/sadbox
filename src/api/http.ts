@@ -9,11 +9,43 @@ import { assignSecrets, createGlobalSecret, createProjectSecret, deleteSecret, i
 import { createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState } from "../core/projects";
 import { syncStatus, syncProject } from "../core/sync";
 import { getSettings, updateSettings } from "../core/settings";
+import { createRule, deleteRule, listRules, createHeaderRule, deleteHeaderRule, listHeaderRules } from "../net/rules";
+import { resolveApproval, listPending, pendingCounts } from "../net/approvals";
+import { recentRequests, subscribe } from "../net/events";
+import { caCertPem } from "../net/ca";
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
 
 const err = (e: unknown, status = 400) => json({ error: String(e instanceof Error ? e.message : e) }, status);
+
+/** Server-sent events feed for one project's live network activity. Pushes a
+ *  snapshot on connect, then request/pending/resolved events as they happen. */
+function netStream(projectId: string): Response {
+  const enc = new TextEncoder();
+  let unsub = () => {};
+  let hb: ReturnType<typeof setInterval> | null = null;
+  const stream = new ReadableStream({
+    start(controller) {
+      const send = (obj: unknown) => {
+        try { controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`)); } catch {}
+      };
+      send({
+        type: "snapshot",
+        requests: recentRequests(projectId),
+        pending: listPending(projectId),
+        rules: listRules(projectId),
+        headerRules: listHeaderRules(projectId),
+      });
+      unsub = subscribe(projectId, send);
+      hb = setInterval(() => { try { controller.enqueue(enc.encode(": ping\n\n")); } catch {} }, 25_000);
+    },
+    cancel() { unsub(); if (hb) clearInterval(hb); },
+  });
+  return new Response(stream, {
+    headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" },
+  });
+}
 
 type TermConn = { projectId: string; cols: number; rows: number; term?: TerminalHandle };
 
@@ -83,6 +115,55 @@ export function startServer() {
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/sync\/status$/);
         if (m && req.method === "GET") return json(await syncStatus(m[1]));
+
+        // --- per-project network proxy: live feed, approvals, rules, headers ---
+        m = p.match(/^\/api\/projects\/([\w-]+)\/net\/stream$/);
+        if (m && req.method === "GET") return netStream(m[1]);
+        m = p.match(/^\/api\/projects\/([\w-]+)\/net\/requests$/);
+        if (m && req.method === "GET") return json({ requests: recentRequests(m[1]), pending: listPending(m[1]) });
+        m = p.match(/^\/api\/projects\/([\w-]+)\/net\/approvals\/([\w-]+)$/);
+        if (m && req.method === "POST") {
+          const b = await req.json();
+          return json({ ok: resolveApproval(m[2], b.action === "block" ? "block" : "allow", b.duration) });
+        }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/net\/rules$/);
+        if (m && req.method === "GET") return json(listRules(m[1]));
+        if (m && req.method === "POST") {
+          const b = await req.json();
+          return json(createRule({ scope: "project", projectId: m[1], action: b.action, host: b.host, path: b.path, method: b.method, note: b.note }), 201);
+        }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/net\/rules\/([\w-]+)$/);
+        if (m && req.method === "DELETE") { deleteRule(m[2]); return json({ ok: true }); }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/net\/headers$/);
+        if (m && req.method === "GET") return json(listHeaderRules(m[1]));
+        if (m && req.method === "POST") {
+          const b = await req.json();
+          return json(createHeaderRule({ scope: "project", projectId: m[1], host: b.host, direction: b.direction, op: b.op, header: b.header, value: b.value, valueSecretId: b.valueSecretId }), 201);
+        }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/net\/headers\/([\w-]+)$/);
+        if (m && req.method === "DELETE") { deleteHeaderRule(m[2]); return json({ ok: true }); }
+
+        // --- global network rules + shared proxy endpoints ---
+        if (p === "/api/net/rules" && req.method === "GET") return json(listRules());
+        if (p === "/api/net/rules" && req.method === "POST") {
+          const b = await req.json();
+          return json(createRule({ scope: "global", action: b.action, host: b.host, path: b.path, method: b.method, note: b.note }), 201);
+        }
+        m = p.match(/^\/api\/net\/rules\/([\w-]+)$/);
+        if (m && req.method === "DELETE") { deleteRule(m[1]); return json({ ok: true }); }
+        if (p === "/api/net/headers" && req.method === "GET") return json(listHeaderRules());
+        if (p === "/api/net/headers" && req.method === "POST") {
+          const b = await req.json();
+          return json(createHeaderRule({ scope: "global", host: b.host, direction: b.direction, op: b.op, header: b.header, value: b.value, valueSecretId: b.valueSecretId }), 201);
+        }
+        m = p.match(/^\/api\/net\/headers\/([\w-]+)$/);
+        if (m && req.method === "DELETE") { deleteHeaderRule(m[1]); return json({ ok: true }); }
+        if (p === "/api/net/pending" && req.method === "GET") return json(pendingCounts());
+        if (p === "/api/net/ca" && req.method === "GET") {
+          return new Response(caCertPem() || "", {
+            headers: { "content-type": "application/x-pem-file", "content-disposition": "attachment; filename=sadbox-proxy-ca.crt" },
+          });
+        }
 
         // folder picker: list subdirectories of a host path
         if (p === "/api/fs/dirs" && req.method === "GET") {

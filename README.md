@@ -17,13 +17,17 @@ v0 scaffold — the full vertical slice works: create → browser tmux terminal 
 secrets → git sync-back → destroy. The web UI has a side nav with a nested
 project list, Secrets, and Settings (default VM CPU/memory/disk for new projects),
 plus a per-project detail view with live CPU/memory/disk/network usage and
-tmux state. See `docs/research/` for the design research and `spikes/` for the
-de-risk experiments behind each piece.
+tmux state. Every VM's egress is routed through the supervisor as a **filtering
+MITM proxy** — block-by-default with interactive, time-boxed approvals, allow/
+block + header-rewrite rules (global or per-project), and a live request log on
+the detail view. See `docs/research/` for the design research and `spikes/` for
+the de-risk experiments behind each piece.
 
 ## Requirements
 
 - macOS 26+, Apple silicon
 - Apple `container` CLI: `brew install container`
+- `openssl` on PATH (ships with macOS) — the egress proxy mints its CA + certs
 - (dev only) [Bun](https://bun.com) ≥ 1.3.5
 
 ## Install
@@ -113,7 +117,26 @@ Guest: Debian + tmux + Bun + Claude Code, agent user, workdir = your repo copy
 - **Detail view**: per project, live CPU %/memory/disk/network/process usage
   (via `container stats` + in-guest probes), workdir size, tmux session/window
   counts and attached-terminal count, git branch/dirty state, and folder/remote
-  info.
+  info — plus the live **Network** panel (below).
+- **Network proxy** (egress control): every VM routes its HTTP(S) through the
+  supervisor. The proxy MITM-terminates TLS with a per-supervisor CA that each
+  VM trusts (installed into the guest trust store + `NODE_EXTRA_CA_CERTS` at
+  create), so it sees full URLs, headers, and bodies. It is **block-by-default**:
+  a request with no matching rule is *held* while the detail view prompts for
+  approval — **Allow once / 1m / 5m / 30m / 60m / forever**, or **Block**. Timed
+  and forever answers persist as rules so the host isn't re-prompted. Rules
+  (allow/block by host `*.example.com`/`*`, optional path glob + method) and
+  header rewrites (set/remove on request or response) are **global** (all VMs)
+  or **per-project**. A `set` value can be a literal or drawn from a **secret**
+  (global or the project's own) — so a real token can be injected per-host (e.g.
+  `Authorization` for `api.anthropic.com`) while never living inside the VM. The
+  detail view streams a **live request log** (method,
+  host, path, status, decision, size) over SSE. Wiring: guest tools honor
+  `HTTP(S)_PROXY` → `net` proxy on the host catches `CONNECT`, MITMs via a
+  per-host `https` server, filters/rewrites, forwards upstream, logs.
+  *(Cooperative: it covers proxy-aware tooling — curl, git, bun/node, pip —
+  which is everything the agent uses; a program making raw non-proxy sockets is
+  not yet forced through it. Transparent nftables enforcement is a follow-up.)*
 
 ## API
 
@@ -129,6 +152,15 @@ Guest: Debian + tmux + Bun + Claude Code, agent user, workdir = your repo copy
 | GET/PUT | `/api/settings` | default VM resources (CPUs, memory, disk) for new projects |
 | GET | `/api/fs/dirs?path=` | folder picker (lists subdirs, flags git repos) |
 | WS | `/projects/:id/term?cols&rows` | terminal (binary = bytes, text = JSON control) |
+| GET | `/api/projects/:id/net/stream` | SSE live feed: snapshot + request/pending/resolved events |
+| GET | `/api/projects/:id/net/requests` | recent requests + pending approvals (non-SSE) |
+| POST | `/api/projects/:id/net/approvals/:aid` | resolve a held request (`{action, duration}`) |
+| GET/POST | `/api/projects/:id/net/rules`, DELETE `…/:rid` | per-project allow/block rules |
+| GET/POST | `/api/projects/:id/net/headers`, DELETE `…/:hid` | per-project header rewrites |
+| GET/POST | `/api/net/rules`, DELETE `/api/net/rules/:id` | global allow/block rules |
+| GET/POST | `/api/net/headers`, DELETE `/api/net/headers/:id` | global header rewrites |
+| GET | `/api/net/pending` | `{projectId: count}` pending approvals (nav badges) |
+| GET | `/api/net/ca` | download the proxy CA (`.crt`) |
 
 ## Deploying
 
@@ -169,6 +201,10 @@ deployment path once the `kvm` driver lands, and it runs the UI/API anywhere.
 - macOS/`container` driver only; the Linux/Cloud Hypervisor driver and
   docker-compose packaging are designed (`docs/research/02`) but not built.
 - Secret rotation reaches new shells/panes only (env-file semantics).
+- The egress proxy is **cooperative** (VM tools honor `HTTP(S)_PROXY`): it
+  covers curl/git/bun/node/pip, but a program opening raw non-proxy sockets
+  bypasses it. Transparent nftables enforcement is designed, not built. Proxy
+  env + CA reach new shells only (same env-file semantics as secrets).
 - Claude Code auth: create a `CLAUDE_CODE_OAUTH_TOKEN` secret (from
   `claude setup-token` on the host) and assign it to projects — or an
   `ANTHROPIC_API_KEY`. See `docs/research/05`.

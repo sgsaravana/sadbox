@@ -1,0 +1,45 @@
+name: Feature Branch PR to Main
+
+on:
+  push:
+    branches:
+      - "feature/*"
+      - "fix/*"
+  workflow_dispatch: # Allows manual triggering of the workflow.
+
+# The default GITHUB_TOKEN is read-only in repos with restricted workflow
+# permissions — without this block `gh pr list/view` quietly return nothing
+# and `gh pr create` fails, which made the existing-PR check appear broken.
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  create-release-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Create Pull Request (skip when one is already open)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          if [ "$BRANCH" = "main" ]; then
+            echo "Running on main (manual dispatch?) — nothing to PR. Skipping."
+            exit 0
+          fi
+          # `gh pr view <branch>` resolves the branch's PR server-side — more
+          # reliable than `gh pr list --head`, which misses PRs on some gh
+          # versions. It also returns closed/merged PRs, so check the state:
+          # only an OPEN one should block creating a fresh PR.
+          pr_state=$(gh pr view "$BRANCH" --json state --jq .state 2>/dev/null || echo "NONE")
+          if [ "$pr_state" = "OPEN" ]; then
+            echo "An open pull request from $BRANCH to main already exists. Skipping."
+          else
+            gh pr create -B main -H "$BRANCH" -a sgsaravana \
+              --label 'automated-pr' \
+              --title "Merge $BRANCH into main" \
+              --body "This PR merges the feature branch $BRANCH into main."
+          fi
