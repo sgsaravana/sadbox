@@ -125,6 +125,52 @@ db.run(`
     at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
 
+// --- network proxy rules ---
+// Egress firewall for the per-project proxy. scope 'global' (project_id NULL)
+// applies to every VM; scope 'project' applies to one. Block beats allow; with
+// no matching rule the request is held for interactive approval (block-by-
+// default). expires_at drives the timed "allow for N minutes" approvals.
+db.run(`
+  CREATE TABLE IF NOT EXISTS net_rules (
+    id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL,                       -- global | project
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    action TEXT NOT NULL,                      -- allow | block
+    host TEXT NOT NULL,                        -- exact | *.suffix | *
+    path TEXT,                                 -- glob prefix (foo*) | NULL = any
+    method TEXT,                               -- GET/POST/... | NULL = any
+    expires_at TEXT,                           -- ISO 8601 | NULL = permanent
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+db.run("CREATE INDEX IF NOT EXISTS net_rules_lookup ON net_rules(scope, project_id)");
+
+// Header rewrites applied to matching requests/responses as they pass through.
+// A 'set' value is either a literal (`value`) or resolved at proxy time from a
+// secret (`value_secret_id`) — so a real token can be injected per-host without
+// ever living inside the VM. No FK on value_secret_id: a dangling reference just
+// resolves to "skip" rather than blocking the secret's deletion.
+db.run(`
+  CREATE TABLE IF NOT EXISTS net_header_rules (
+    id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL,                       -- global | project
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    host TEXT NOT NULL,
+    direction TEXT NOT NULL,                   -- request | response
+    op TEXT NOT NULL,                          -- set | remove
+    header TEXT NOT NULL,
+    value TEXT,                                -- literal value for 'set'
+    value_secret_id TEXT,                      -- resolve value from this secret instead
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+db.run("CREATE INDEX IF NOT EXISTS net_header_rules_lookup ON net_header_rules(scope, project_id)");
+// add value_secret_id to a pre-secret-value net_header_rules table
+{
+  const has = db.query<{ name: string }, []>("PRAGMA table_info(net_header_rules)").all()
+    .some((c) => c.name === "value_secret_id");
+  if (!has) db.run("ALTER TABLE net_header_rules ADD COLUMN value_secret_id TEXT");
+}
+
 export function logEvent(projectId: string | null, type: string, detail = "") {
   db.query("INSERT INTO events (project_id, type, detail) VALUES (?, ?, ?)").run(
     projectId, type, detail,

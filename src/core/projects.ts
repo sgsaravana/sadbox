@@ -5,6 +5,10 @@ import { db, logEvent } from "../db";
 import { getDriver } from "../driver";
 import { injectSecrets, assignSecrets, purgeProjectSecrets } from "./secrets";
 import { getSettings } from "./settings";
+import { installGuestProxy } from "../net/proxy";
+import { purgeProjectNet } from "../net/rules";
+import { clearProjectApprovals } from "../net/approvals";
+import { clearProjectFeed } from "../net/events";
 
 const driver = getDriver();
 
@@ -185,10 +189,24 @@ export async function createProject(opts: {
       `git config user.email "project@sadbox.local" && ` +
       `git checkout -q -b ${branchFor(name)} && ` +
       // .bashrc for interactive (tmux) shells, .profile for login/non-interactive —
-      // Debian's stock .bashrc returns early when non-interactive
-      `for f in ~/.bashrc ~/.profile; do grep -q sadbox/env $f 2>/dev/null || printf 'set -a; [ -f ~/.sadbox/env ] && . ~/.sadbox/env; set +a\\n' >> $f; done`,
+      // Debian's stock .bashrc returns early when non-interactive. Two hooks:
+      // secrets (set -a so plain NAME=val exports) and net.env (already exports).
+      `for f in ~/.bashrc ~/.profile; do ` +
+      `grep -q sadbox/env $f 2>/dev/null || printf 'set -a; [ -f ~/.sadbox/env ] && . ~/.sadbox/env; set +a\\n' >> $f; ` +
+      `grep -q sadbox/net.env $f 2>/dev/null || printf '[ -f ~/.sadbox/net.env ] && . ~/.sadbox/net.env\\n' >> $f; ` +
+      `done`,
     ]);
     if (setup.exitCode !== 0) throw new Error(`guest setup failed: ${setup.stderr}`);
+
+    // route the VM's egress through the supervisor proxy: trust the CA + set
+    // proxy env for the agent's shells. Best-effort — a VM without it just
+    // egresses directly rather than failing to boot.
+    try {
+      await installGuestProxy(ref);
+      logEvent(id, "proxy.configure", "CA installed, egress routed via supervisor");
+    } catch (e) {
+      logEvent(id, "proxy.configure.error", String(e));
+    }
 
     // external git remote + credentials (optional)
     await configureGitRemote(ref, getProject(id)!);
@@ -318,6 +336,9 @@ export async function destroyProject(id: string): Promise<void> {
   if (!p) throw new Error("project not found");
   await driver.destroy(refFor(p.name));
   purgeProjectSecrets(id); // project-specific secrets die with the VM
+  purgeProjectNet(id);     // per-project net rules die with the VM too
+  clearProjectApprovals(id);
+  clearProjectFeed(id);
   db.query("UPDATE projects SET state = 'destroyed' WHERE id = ?").run(id);
   logEvent(id, "destroy");
 }
