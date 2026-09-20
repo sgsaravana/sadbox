@@ -213,8 +213,9 @@ deployment path once the `kvm` driver lands, and it runs the UI/API anywhere.
 
 ## Known limitations (v0)
 
-- Source folder must be a git repo with ≥ 1 commit (tar-out fallback for
-  non-git folders is designed in `docs/research/06`, not built).
+- A **local-folder** source must be a git repo with ≥ 1 commit (tar-out fallback
+  for non-git folders is designed in `docs/research/06`, not built); or create
+  from a **git URL** and the VM clones it instead.
 - Web UI has no auth — localhost use only.
 - macOS/`container` driver only; the Linux/Cloud Hypervisor driver and
   docker-compose packaging are designed (`docs/research/02`) but not built.
