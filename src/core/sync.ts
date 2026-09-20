@@ -21,6 +21,9 @@ async function hostGit(repo: string, args: string[]) {
 export async function syncProject(id: string, opts?: { autocommit?: boolean }) {
   const p = getProject(id);
   if (!p) throw new Error("project not found");
+  if (!p.source_path) {
+    throw new Error("this project was cloned from a git remote and has no local folder to sync into — commit and `git push` from inside the VM instead");
+  }
   const ref = refFor(p.name);
   const branch = branchFor(p.name);
   const autocommit = opts?.autocommit ?? true;

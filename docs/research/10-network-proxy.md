@@ -52,6 +52,13 @@ Block wins over allow. Concurrent requests to the same host coalesce into one
 prompt and resolve together. Header rewrites (set/remove, request/response,
 host-scoped) apply on the way through.
 
+Beyond the pending-approval prompt, the live request log itself is actionable:
+each row carries a one-click **allow this host** for either **this VM** (a
+project rule) or **all VMs** (a global rule) — so an operator watching traffic
+can whitelist a host straight from the row that hit it, without retyping it into
+the rule form. Rows whose host is already covered by a plain allow rule show
+`✓` instead of the add button.
+
 ## Bun implementation gotchas (spiked before building)
 
 Bun's Node compat has sharp edges for a MITM proxy — each of these cost a spike:

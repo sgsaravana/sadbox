@@ -12,6 +12,9 @@
         <div><strong>SadBox</strong><span class="tag">Micro VM Agents</span></div>
       </div>
       <nav>
+        <a href="#home" class="nav-item" data-view="home">
+          <span class="nav-ico">⌂</span> Home
+        </a>
         <a href="#projects" class="nav-item" data-view="projects">
           <span class="nav-ico">▦</span> Projects
         </a>
@@ -26,6 +29,86 @@
     </aside>
 
     <main class="content">
+      <!-- HOME / OVERVIEW VIEW -->
+      <section id="view-home" class="view" hidden>
+        <div class="hero">
+          <div class="hero-badge"><span class="logo">▪</span> sadbox</div>
+          <h1 class="hero-title">Run AI coding agents in throwaway microVMs</h1>
+          <p class="lead">Every project gets its own isolated Linux microVM — a real VM with its own
+            kernel — seeded from a local folder or a git repo, plus a full agent toolchain. Watch and
+            steer the agent from your browser, gate its network access, and pull back only the work you
+            approve. Your original folder is never touched.</p>
+          <div class="hero-actions">
+            <button class="primary" id="home-new">+ Create a project</button>
+            <a class="btn-link" href="#projects">View projects →</a>
+          </div>
+        </div>
+
+        <h2 class="home-h">What you get</h2>
+        <div class="feature-grid">
+          <div class="feature">
+            <span class="feat-ico">🧊</span>
+            <h3>Isolated microVMs</h3>
+            <p>Each project is a real VM (Apple Virtualization.framework via <code>container</code>) —
+              not a shared-kernel container. The blast radius stays inside the box.</p>
+          </div>
+          <div class="feature">
+            <span class="feat-ico">🤖</span>
+            <h3>Agents pre-installed</h3>
+            <p>Claude Code, omp, and opencode ship in every VM, alongside Bun, git, ripgrep and jq.
+              Open a terminal and run one.</p>
+          </div>
+          <div class="feature">
+            <span class="feat-ico">🖥️</span>
+            <h3>Browser terminal</h3>
+            <p>A live tmux session in your browser — watch the agent work and jump in anytime.
+              Sessions survive supervisor restarts.</p>
+          </div>
+          <div class="feature">
+            <span class="feat-ico">🛡️</span>
+            <h3>Network firewall</h3>
+            <p>All egress routes through a filtering MITM proxy: block-by-default with time-boxed
+              approvals, allow/block + header rules, and a live request log.</p>
+          </div>
+          <div class="feature">
+            <span class="feat-ico">🔑</span>
+            <h3>Encrypted secrets</h3>
+            <p>Global or per-project secrets, encrypted at rest and injected into the VM as env —
+              write-only in the UI, never echoed back.</p>
+          </div>
+          <div class="feature">
+            <span class="feat-ico">↩️</span>
+            <h3>Reviewed sync-back</h3>
+            <p>Fetch the agent's commits into <code>refs/remotes/sadbox/&lt;name&gt;</code> with a diff
+              preview — merge when you like it. Your worktree is never modified.</p>
+          </div>
+        </div>
+
+        <h2 class="home-h">Quick start</h2>
+        <ol class="steps">
+          <li><span class="step-n">1</span><div><b>Create a project.</b> Give it a name, then either point
+            at a local git repo folder <i>or</i> paste a git repository URL — sadbox seeds a fresh VM by
+            copying the folder in, or by cloning the repo inside the VM.</div></li>
+          <li><span class="step-n">2</span><div><b>Open the terminal.</b> From the project's detail page
+            click <b>Terminal ↗</b> and run <code>claude</code>, <code>omp</code>, or <code>opencode</code>.</div></li>
+          <li><span class="step-n">3</span><div><b>Approve network as needed.</b> Egress is blocked by
+            default; when the agent reaches a new host you'll get a prompt to allow it (once / timed /
+            forever) on the detail page.</div></li>
+          <li><span class="step-n">4</span><div><b>Sync back.</b> When you like the result, hit
+            <b>Sync back</b> to fetch the agent's commits into your repo — then merge on your terms.</div></li>
+        </ol>
+
+        <div class="panel home-tips">
+          <h3>Good to know</h3>
+          <ul>
+            <li>Set default VM CPU / memory / disk and global network rules in <a href="#settings">Settings</a>.</li>
+            <li>Add shared API keys and tokens under <a href="#secrets">Secrets</a>, then assign them to projects.</li>
+            <li>For Claude Code auth, create a <code>CLAUDE_CODE_OAUTH_TOKEN</code> (or <code>ANTHROPIC_API_KEY</code>) secret and assign it to the project.</li>
+            <li>The web UI is localhost-only and has no auth — keep it on your machine.</li>
+          </ul>
+        </div>
+      </section>
+
       <!-- PROJECTS VIEW -->
       <section id="view-projects" class="view">
         <div class="section-head">
@@ -36,24 +119,46 @@
         <form id="create-form" class="panel create-panel" hidden>
           <h2>New project</h2>
           <label>Name <input name="name" required placeholder="my-feature" pattern="[a-zA-Z0-9-]+"></label>
-          <label>Source folder
-            <span class="row input-with-btn">
-              <input name="sourcePath" required placeholder="/Users/you/Projects/repo">
-              <button type="button" id="btn-browse">Browse…</button>
-            </span>
-          </label>
-          <label>Extra apt packages <input name="apps" placeholder="python3, htop (optional)"></label>
+          <div class="seg" id="src-mode">
+            <label class="seg-opt"><input type="radio" name="srcMode" value="local" checked><span>📁 Local folder</span></label>
+            <label class="seg-opt"><input type="radio" name="srcMode" value="git"><span>⎇ Git repository</span></label>
+          </div>
 
-          <fieldset class="git-setup">
-            <legend><label class="inline-check">
-              <input type="checkbox" id="git-toggle" name="gitEnabled"> Set up a git remote (optional)
-            </label></legend>
-            <div id="git-fields" hidden>
-              <label>Remote URL <input name="gitRemote" placeholder="https://github.com/you/repo.git"></label>
-              <label>Access token <input name="gitToken" type="password" placeholder="ghp_… (stored encrypted, write-only)"></label>
-              <p class="hint">The project's <code>origin</code> will point here and use this token to read/write.</p>
-            </div>
+          <div class="src-group" data-src="local">
+            <label>Source folder
+              <span class="row input-with-btn">
+                <input name="sourcePath" required placeholder="/Users/you/Projects/repo">
+                <button type="button" id="btn-browse">Browse…</button>
+              </span>
+            </label>
+            <fieldset class="git-setup">
+              <legend><label class="inline-check">
+                <input type="checkbox" id="git-toggle" name="gitEnabled"> Set up a git remote (optional)
+              </label></legend>
+              <div id="git-fields" hidden>
+                <label>Remote URL <input name="gitRemote" placeholder="https://github.com/you/repo.git"></label>
+                <label>Access token <input name="gitToken" type="password" placeholder="ghp_… (stored encrypted, write-only)"></label>
+                <p class="hint">The project's <code>origin</code> points here and uses this token to push / pull and sync back.</p>
+              </div>
+            </fieldset>
+          </div>
+
+          <div class="src-group" data-src="git" hidden>
+            <label>Git repository URL
+              <input name="cloneRemote" placeholder="https://github.com/you/repo.git">
+            </label>
+            <label>Access token <span class="hint">— optional, required for private repos</span>
+              <input name="cloneToken" type="password" placeholder="ghp_… (stored encrypted, write-only)">
+            </label>
+            <p class="hint">The VM clones this repository into its workdir. Commit and
+              <code>git push</code> from inside the VM — there's no local folder to sync back into.</p>
+          </div>
+
+          <fieldset id="create-toolchain-fs">
+            <legend>Pre-installed in every VM</legend>
+            <div id="create-toolchain" class="toolchain"><span class="hint">detecting…</span></div>
           </fieldset>
+          <label>Extra apt packages <input name="apps" placeholder="python3, htop (optional)"></label>
 
           <fieldset><legend>Global secrets</legend><div id="create-secrets" class="checks"></div></fieldset>
           <div class="row">
