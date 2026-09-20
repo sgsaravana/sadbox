@@ -15,6 +15,7 @@ let secretsCache = [];
 // ---- side nav routing ----
 // hashes: #projects (list) · #secrets · #project/<id> (detail)
 let detailTimer = null;
+let openCreateNext = false; // set by the Home CTA so #projects opens the create form
 function route() {
   const hash = location.hash.slice(1);
   const [head, arg] = hash.split("/");
@@ -22,20 +23,30 @@ function route() {
   if (!(head === "project" && arg)) closeNet();
 
   const detail = head === "project" && arg;
-  const isProjects = !["secrets", "settings"].includes(head) && !detail;
+  const isProjects = head === "projects";
+  const isSecrets = head === "secrets";
+  const isSettings = head === "settings";
+  const isHome = !detail && !isProjects && !isSecrets && !isSettings; // default / #home / unknown
+
+  $("#view-home").hidden = !isHome;
   $("#view-projects").hidden = !isProjects;
-  $("#view-secrets").hidden = head !== "secrets";
-  $("#view-settings").hidden = head !== "settings";
+  $("#view-secrets").hidden = !isSecrets;
+  $("#view-settings").hidden = !isSettings;
   $("#view-detail").hidden = !detail;
 
-  const activeNav = head === "secrets" ? "secrets" : head === "settings" ? "settings" : "projects";
+  const activeNav = isSecrets ? "secrets" : isSettings ? "settings"
+    : (isProjects || detail) ? "projects" : "home";
   document.querySelectorAll(".nav-item").forEach((a) =>
     a.classList.toggle("active", a.dataset.view === activeNav));
 
-  if (head === "secrets") refreshSecrets();
-  else if (head === "settings") loadSettings();
+  if (isSecrets) refreshSecrets();
+  else if (isSettings) loadSettings();
   else if (detail) openDetail(arg);
-  else { closeCreateForm(); refreshProjects(); }
+  else if (isProjects) {
+    refreshProjects();
+    if (openCreateNext) { openCreateNext = false; openCreateForm(); } else closeCreateForm();
+  }
+  // isHome: static overview, nothing to load
   refreshNavTree();
 }
 addEventListener("hashchange", route);
@@ -103,20 +114,19 @@ async function refreshProjects() {
   el.innerHTML = projects.map((p) => {
     const state = p.live?.state === "running" ? "running" : p.state;
     const gitLine = p.git_remote
-      ? `<br>remote ${escapeHtml(p.git_remote)}${p.has_git_token ? " 🔑" : ""}`
+      ? `<br>${p.source_path ? "remote" : "cloned from"} ${escapeHtml(p.git_remote)}${p.has_git_token ? " 🔑" : ""}`
       : "";
     return `
     <div class="card" data-id="${p.id}">
       <h3><a href="#project/${p.id}"><span class="dot ${state}"></span>${p.name}</a></h3>
       <div class="meta">
         ${state} · ${p.image}${p.live?.address ? ` · ${p.live.address}` : ""}<br>
-        ${escapeHtml(p.source_path)}<br>
-        branch sadbox/${p.name}${gitLine}${p.error ? `<br><span style="color:var(--bad)">${escapeHtml(p.error)}</span>` : ""}
+        ${p.source_path ? escapeHtml(p.source_path) + "<br>" : ""}branch sadbox/${p.name}${gitLine}${p.error ? `<br><span style="color:var(--bad)">${escapeHtml(p.error)}</span>` : ""}
       </div>
       <div class="row">
         <button data-details="${p.id}">Details</button>
         <button data-term="${p.id}" data-name="${p.name}">Terminal ↗</button>
-        <button data-sync="${p.id}">Sync back</button>
+        ${p.source_path ? `<button data-sync="${p.id}">Sync back</button>` : ""}
         <button data-secrets="${p.id}" data-name="${p.name}">Secrets…</button>
         <button class="danger" data-destroy="${p.id}" data-name="${p.name}">Destroy</button>
       </div>
@@ -279,11 +289,23 @@ async function loadCreateToolchain() {
   }
 }
 
+// show the folder fields or the git-clone fields based on the source-mode toggle;
+// only the visible source input is `required` (a required hidden field blocks submit)
+function syncSrcMode() {
+  const form = $("#create-form");
+  if (!form) return;
+  const mode = (form.querySelector("input[name=srcMode]:checked") || {}).value || "local";
+  form.querySelectorAll(".src-group").forEach((g) => { g.hidden = g.dataset.src !== mode; });
+  form.sourcePath.required = mode === "local";
+  form.cloneRemote.required = mode === "git";
+}
+
 function openCreateForm() {
   $("#create-form").hidden = false;
   $("#projects").hidden = true;
   $("#btn-new").hidden = true;
   loadCreateToolchain();
+  syncSrcMode();
 }
 function closeCreateForm() {
   $("#create-form").hidden = true;
@@ -291,8 +313,10 @@ function closeCreateForm() {
   $("#btn-new").hidden = false;
 }
 $("#btn-new").onclick = openCreateForm;
+$("#home-new").onclick = () => { openCreateNext = true; location.hash = "projects"; };
 $("#btn-cancel").onclick = closeCreateForm;
 $("#git-toggle").onchange = (e) => { $("#git-fields").hidden = !e.target.checked; };
+$("#src-mode").addEventListener("change", syncSrcMode);
 
 // ---- settings ----
 async function loadSettings() {
@@ -377,16 +401,25 @@ $("#create-form").onsubmit = async (e) => {
   e.preventDefault();
   const f = new FormData(e.target);
   const status = $("#create-status");
-  status.textContent = "Creating (boot + copy-in, a few seconds)…";
-  try {
-    const git = f.get("gitEnabled") && f.get("gitRemote")
+  const mode = f.get("srcMode") || "local";
+  let sourcePath, git;
+  if (mode === "git") {
+    // clone-in-VM mode: the git remote IS the source; no local folder
+    git = { remote: (f.get("cloneRemote") || "").trim(), token: (f.get("cloneToken") || "").trim() || undefined };
+    status.textContent = "Creating (boot + git clone, a few seconds)…";
+  } else {
+    sourcePath = (f.get("sourcePath") || "").trim();
+    git = f.get("gitEnabled") && f.get("gitRemote")
       ? { remote: f.get("gitRemote").trim(), token: (f.get("gitToken") || "").trim() || undefined }
       : undefined;
+    status.textContent = "Creating (boot + copy-in, a few seconds)…";
+  }
+  try {
     await api("/api/projects", {
       method: "POST",
       body: {
         name: f.get("name"),
-        sourcePath: f.get("sourcePath"),
+        sourcePath, // undefined ⇒ backend clones the git remote instead
         apps: (f.get("apps") || "").split(",").map((s) => s.trim()).filter(Boolean),
         secretIds: [...e.target.querySelectorAll("input[name=secret]:checked")].map((c) => c.value),
         git,
@@ -395,6 +428,7 @@ $("#create-form").onsubmit = async (e) => {
     status.textContent = "";
     e.target.reset();
     $("#git-fields").hidden = true;
+    syncSrcMode();
     closeCreateForm();
     refreshProjects();
     refreshNavTree();
@@ -501,7 +535,7 @@ async function renderDetail(id) {
 
   $("#detail-actions").innerHTML = `
     <button data-term="${d.id}" data-name="${d.name}">Terminal ↗</button>
-    <button data-sync="${d.id}">Sync back</button>
+    ${d.source_path ? `<button data-sync="${d.id}">Sync back</button>` : ""}
     <button data-secrets="${d.id}">Secrets…</button>
     <button class="danger" data-destroy="${d.id}" data-name="${d.name}">Destroy</button>`;
 
@@ -534,7 +568,7 @@ async function renderDetail(id) {
       <div class="panel stat">
         <h3>Folder & git</h3>
         <dl>
-          <dt>Source folder</dt><dd class="mono">${escapeHtml(d.source_path)}</dd>
+          <dt>Source</dt><dd class="mono">${d.source_path ? escapeHtml(d.source_path) : "git clone (no local folder)"}</dd>
           <dt>Workdir (in VM)</dt><dd class="mono">${escapeHtml(d.workdir)}</dd>
           <dt>Work branch</dt><dd class="mono">${escapeHtml(d.branch)}</dd>
           <dt>Uncommitted</dt><dd>${d.git.dirty ?? 0} file(s)</dd>
@@ -859,5 +893,5 @@ async function sendApproval(aid, action, duration) {
 const fmtClock = (ts) => new Date(ts).toTimeString().slice(0, 8);
 
 // boot: secrets cache first (for create-form checkboxes), then route
-refreshSecrets().then(() => { if (!location.hash) location.hash = "projects"; else route(); });
+refreshSecrets().then(() => { if (!location.hash) location.hash = "home"; else route(); });
 setInterval(() => { if (!$("#view-projects").hidden) { refreshProjects(); refreshNavTree(); } }, 5000);

@@ -99,10 +99,27 @@ export function getProject(id: string): ProjectRow | null {
   return db.query<ProjectRow, [string]>("SELECT * FROM projects WHERE id = ?").get(id);
 }
 
+/** Store an access token via git's credential helper so pushes/pulls/clones
+ *  authenticate. The token lives at ~/.git-credentials (0600) inside the VM —
+ *  reliable for agent-driven git regardless of shell env — and encrypted on the
+ *  host. Written before any clone so private repos can be fetched. */
+async function writeGitCredentials(ref: string, url: string, token: string) {
+  const host = hostFromUrl(url);
+  // credential line matched by protocol+host; username x-access-token works
+  // for GitHub PAT/App tokens, and token-as-password works broadly elsewhere
+  const credLine = `https://x-access-token:${token}@${host}\n`;
+  const write = await driver.execWithStdin(
+    ref,
+    `umask 077 && cat > ~/.git-credentials && ` +
+    `git config --global credential.helper store && ` +
+    `git config --global credential.https://${host}.username x-access-token`,
+    new TextEncoder().encode(credLine),
+  );
+  if (write.exitCode !== 0) throw new Error(`git credential setup failed: ${write.stderr}`);
+}
+
 /** Point the workdir's `origin` at an external remote and, if a token was
- *  given, store it via git's credential helper so pushes/pulls authenticate.
- *  The token lives at ~/.git-credentials (0600) inside the VM — reliable for
- *  agent-driven git regardless of shell env — and encrypted on the host. */
+ *  given, store it via git's credential helper so pushes/pulls authenticate. */
 async function configureGitRemote(ref: string, project: ProjectRow) {
   if (!project.git_remote) return;
   const url = project.git_remote;
@@ -113,42 +130,80 @@ async function configureGitRemote(ref: string, project: ProjectRow) {
     `|| git remote add origin ${shellArg(url)})`;
   const r = await driver.exec(ref, ["sh", "-c", setRemote]);
   if (r.exitCode !== 0) throw new Error(`git remote setup failed: ${r.stderr}`);
+  if (project.git_token_enc) await writeGitCredentials(ref, url, decrypt(project.git_token_enc));
+}
 
-  if (project.git_token_enc) {
-    const token = decrypt(project.git_token_enc);
-    const host = hostFromUrl(url);
-    // credential line matched by protocol+host; username x-access-token works
-    // for GitHub PAT/App tokens, and token-as-password works broadly elsewhere
-    const credLine = `https://x-access-token:${token}@${host}\n`;
-    const write = await driver.execWithStdin(
-      ref,
-      `umask 077 && cat > ~/.git-credentials && ` +
-      `git config --global credential.helper store && ` +
-      `git config --global credential.https://${host}.username x-access-token`,
-      new TextEncoder().encode(credLine),
-    );
-    if (write.exitCode !== 0) throw new Error(`git credential setup failed: ${write.stderr}`);
-  }
+/** Clone an external repo into the guest workdir (the "git only" create mode).
+ *  Runs via a non-login `sh -c`, which doesn't source the proxy env — so the
+ *  setup clone egresses directly through NAT rather than the block-by-default
+ *  proxy (which has no approver during create). Clones to a temp dir then copies
+ *  in, so it works even when workdir is a sized volume with a lost+found.
+ *  Returns the cloned default branch + its HEAD (the project's base). */
+async function cloneIntoWorkdir(ref: string, url: string, name: string): Promise<{ base: string; branch: string }> {
+  const wd = config.guestWorkdir;
+  const script =
+    `set -e; ` +
+    `tmp=$(mktemp -d); ` +
+    `git clone --quiet ${shellArg(url)} "$tmp/repo"; ` +
+    `mkdir -p ${wd}; ` +
+    `cp -a "$tmp/repo/." ${wd}/; ` +
+    `rm -rf "$tmp"; ` +
+    `cd ${wd}; ` +
+    `git config user.name "sadbox project ${name}"; ` +
+    `git config user.email "project@sadbox.local"; ` +
+    `defbr=$(git rev-parse --abbrev-ref HEAD); ` +
+    `base=$(git rev-parse HEAD); ` +
+    `git checkout -q -b ${branchFor(name)}; ` +
+    `echo "defbr=$defbr"; echo "base=$base"`;
+  const r = await driver.exec(ref, ["sh", "-c", script]);
+  if (r.exitCode !== 0) throw new Error(`git clone failed: ${r.stderr || r.stdout}`);
+  const info = kv(r.stdout);
+  return { base: info.base || "", branch: info.defbr || "HEAD" };
+}
+
+/** Append the secrets + proxy env source-hooks to the guest's shells (common to
+ *  both create modes). .bashrc for interactive tmux shells, .profile for login. */
+async function installShellHooks(ref: string) {
+  const r = await driver.exec(ref, ["sh", "-c",
+    `for f in ~/.bashrc ~/.profile; do ` +
+    `grep -q sadbox/env $f 2>/dev/null || printf 'set -a; [ -f ~/.sadbox/env ] && . ~/.sadbox/env; set +a\\n' >> $f; ` +
+    `grep -q sadbox/net.env $f 2>/dev/null || printf '[ -f ~/.sadbox/net.env ] && . ~/.sadbox/net.env\\n' >> $f; ` +
+    `done`,
+  ]);
+  if (r.exitCode !== 0) throw new Error(`shell hook setup failed: ${r.stderr}`);
 }
 
 export async function createProject(opts: {
   name: string;
-  sourcePath: string;
+  sourcePath?: string;    // omit to create from a git remote (clone-in-VM mode)
   apps?: string[];
   secretIds?: string[];
   git?: GitSetup;
 }): Promise<ProjectRow> {
   const name = opts.name.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
   if (!name) throw new Error("invalid project name");
-  if (!existsSync(opts.sourcePath)) throw new Error(`source folder not found: ${opts.sourcePath}`);
+  const cloneMode = !opts.sourcePath; // no local folder → clone the git remote in the VM
   if (opts.git?.remote && !/^https?:\/\//.test(opts.git.remote)) {
     throw new Error("git remote must be an http(s) URL");
   }
+  if (cloneMode) {
+    if (!opts.git?.remote) throw new Error("provide a local folder or a git repository URL");
+  } else if (!existsSync(opts.sourcePath!)) {
+    throw new Error(`source folder not found: ${opts.sourcePath}`);
+  }
 
-  const branch = await hostGit(opts.sourcePath, ["branch", "--show-current"]);
-  const head = await hostGit(opts.sourcePath, ["rev-parse", "HEAD"]);
-  if (head.code !== 0) {
-    throw new Error("source folder must be a git repository with at least one commit (v0 limitation)");
+  // Local mode reads the base commit from the host repo up front; clone mode
+  // learns it from the guest after the clone completes (below).
+  let branchName: string | null = null;
+  let baseSha: string | null = null;
+  if (!cloneMode) {
+    const branch = await hostGit(opts.sourcePath!, ["branch", "--show-current"]);
+    const head = await hostGit(opts.sourcePath!, ["rev-parse", "HEAD"]);
+    if (head.code !== 0) {
+      throw new Error("source folder must be a git repository with at least one commit (v0 limitation)");
+    }
+    branchName = branch.out || "HEAD";
+    baseSha = head.out;
   }
 
   const id = crypto.randomUUID().slice(0, 8);
@@ -158,9 +213,9 @@ export async function createProject(opts: {
   db.query(
     `INSERT INTO projects (id, name, image, state, source_path, source_branch, base_sha, last_synced_sha, apps, git_remote, git_token_enc)
      VALUES (?, ?, ?, 'creating', ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(id, name, image, opts.sourcePath, branch.out || "HEAD", head.out, head.out,
+  ).run(id, name, image, cloneMode ? "" : opts.sourcePath!, branchName, baseSha, baseSha,
         JSON.stringify(opts.apps ?? []), gitRemote, gitTokenEnc);
-  logEvent(id, "create.start", `${name} from ${opts.sourcePath}`);
+  logEvent(id, "create.start", cloneMode ? `${name} cloning ${gitRemote}` : `${name} from ${opts.sourcePath}`);
 
   try {
     const ref = refFor(name);
@@ -174,30 +229,32 @@ export async function createProject(opts: {
       await driver.exec(ref, ["chown", "agent:agent", config.guestWorkdir], { user: "root" });
     }
 
-    // copy-in
-    const tarBytes = await tarSource(opts.sourcePath);
-    const cp = await driver.execWithStdin(
-      ref,
-      `mkdir -p ${config.guestWorkdir} && tar -xf - -C ${config.guestWorkdir}`,
-      tarBytes,
-    );
-    if (cp.exitCode !== 0) throw new Error(`copy-in failed: ${cp.stderr}`);
+    if (cloneMode) {
+      // creds first (private repos), then clone straight into the workdir
+      if (gitTokenEnc) await writeGitCredentials(ref, gitRemote!, decrypt(gitTokenEnc));
+      const info = await cloneIntoWorkdir(ref, gitRemote!, name);
+      db.query("UPDATE projects SET base_sha = ?, last_synced_sha = ?, source_branch = ? WHERE id = ?")
+        .run(info.base, info.base, info.branch, id);
+    } else {
+      // copy-in the local folder, then set git identity + project branch
+      const tarBytes = await tarSource(opts.sourcePath!);
+      const cp = await driver.execWithStdin(
+        ref,
+        `mkdir -p ${config.guestWorkdir} && tar -xf - -C ${config.guestWorkdir}`,
+        tarBytes,
+      );
+      if (cp.exitCode !== 0) throw new Error(`copy-in failed: ${cp.stderr}`);
+      const setup = await driver.exec(ref, ["sh", "-c",
+        `cd ${config.guestWorkdir} && ` +
+        `git config user.name "sadbox project ${name}" && ` +
+        `git config user.email "project@sadbox.local" && ` +
+        `git checkout -q -b ${branchFor(name)}`,
+      ]);
+      if (setup.exitCode !== 0) throw new Error(`guest setup failed: ${setup.stderr}`);
+    }
 
-    // git identity + project branch + shell env hooks
-    const setup = await driver.exec(ref, ["sh", "-c",
-      `cd ${config.guestWorkdir} && ` +
-      `git config user.name "sadbox project ${name}" && ` +
-      `git config user.email "project@sadbox.local" && ` +
-      `git checkout -q -b ${branchFor(name)} && ` +
-      // .bashrc for interactive (tmux) shells, .profile for login/non-interactive —
-      // Debian's stock .bashrc returns early when non-interactive. Two hooks:
-      // secrets (set -a so plain NAME=val exports) and net.env (already exports).
-      `for f in ~/.bashrc ~/.profile; do ` +
-      `grep -q sadbox/env $f 2>/dev/null || printf 'set -a; [ -f ~/.sadbox/env ] && . ~/.sadbox/env; set +a\\n' >> $f; ` +
-      `grep -q sadbox/net.env $f 2>/dev/null || printf '[ -f ~/.sadbox/net.env ] && . ~/.sadbox/net.env\\n' >> $f; ` +
-      `done`,
-    ]);
-    if (setup.exitCode !== 0) throw new Error(`guest setup failed: ${setup.stderr}`);
+    // secrets + proxy env source-hooks for the guest's shells (both modes)
+    await installShellHooks(ref);
 
     // route the VM's egress through the supervisor proxy: trust the CA + set
     // proxy env for the agent's shells. Best-effort — a VM without it just
@@ -209,8 +266,9 @@ export async function createProject(opts: {
       logEvent(id, "proxy.configure.error", String(e));
     }
 
-    // external git remote + credentials (optional)
-    await configureGitRemote(ref, getProject(id)!);
+    // external git remote + credentials — local mode only; clone mode already
+    // has origin (from the clone) and credentials written above.
+    if (!cloneMode) await configureGitRemote(ref, getProject(id)!);
 
     // extra apps (best effort — base toolchain is baked into the image)
     for (const app of opts.apps ?? []) {

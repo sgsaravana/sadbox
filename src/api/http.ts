@@ -80,7 +80,9 @@ export function startServer() {
             ? { remote: String(b.git.remote).trim(), token: b.git.token ? String(b.git.token) : undefined }
             : undefined;
           return json(await createProject({
-            name: b.name, sourcePath: b.sourcePath, apps: b.apps, secretIds: b.secretIds, git,
+            name: b.name,
+            sourcePath: (b.sourcePath && String(b.sourcePath).trim()) || undefined, // empty ⇒ clone mode
+            apps: b.apps, secretIds: b.secretIds, git,
           }), 201);
         }
         let m = p.match(/^\/api\/projects\/([\w-]+)$/);

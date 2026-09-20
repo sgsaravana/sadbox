@@ -14,7 +14,8 @@ not shared-kernel containers.
 ## Status
 
 v0 scaffold — the full vertical slice works: create → browser tmux terminal →
-secrets → git sync-back → destroy. The web UI has a side nav with a nested
+secrets → git sync-back → destroy. The web UI opens on a **Home** overview
+(intro, feature tour, and quick-start) and has a side nav with a nested
 project list, Secrets, and Settings (default VM CPU/memory/disk for new projects),
 plus a per-project detail view with live CPU/memory/disk/network usage and
 tmux state. Every VM's egress is routed through the supervisor as a **filtering
@@ -98,8 +99,13 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
        workdir = your repo copy
 ```
 
-- **Copy-in**: `git ls-files --exclude-standard` → tar over exec stdin — only
-  gitignored paths are excluded, full history included. ~2 s for a 100 MB repo.
+- **Two source modes** at create: **(a) local folder** — `git ls-files
+  --exclude-standard` → tar over exec stdin (only gitignored paths excluded, full
+  history included; ~2 s for a 100 MB repo), with an optional git remote for
+  push/sync; or **(b) git repository** — omit the folder and give a remote URL
+  (+ token for private) and the VM **clones** it into the workdir. Cloned
+  projects have no local folder, so they push to the remote from inside the VM
+  rather than syncing back.
 - **Terminal**: xterm.js ⇄ WS ⇄ `Bun.spawn({terminal})` PTY ⇄
   `container exec -it <project> tmux new -A -s main`. Sessions live in the VM and
   survive supervisor restarts. tmux runs with `mouse on`, so to grab text (e.g.
@@ -153,7 +159,7 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 
 | Method | Path | |
 |---|---|---|
-| GET/POST | `/api/projects` | list (with live VM state) / create (`{name, sourcePath, apps?, secretIds?, git?: {remote, token?}}`) |
+| GET/POST | `/api/projects` | list (with live VM state) / create (`{name, sourcePath?, apps?, secretIds?, git?: {remote, token?}}` — omit `sourcePath` to clone `git.remote` in the VM) |
 | GET | `/api/projects/:id/details` | full detail: resources, tmux, git, folder |
 | DELETE | `/api/projects/:id` | destroy VM |
 | POST | `/api/projects/:id/sync` | sync-back (`{autocommit?: bool}`) |
