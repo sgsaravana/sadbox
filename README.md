@@ -24,6 +24,19 @@ block + header-rewrite rules (global or per-project), and a live request log on
 the detail view. See `docs/research/` for the design research and `spikes/` for
 the de-risk experiments behind each piece.
 
+## Releases
+
+<!-- LATEST_RELEASE:START -->
+_No release published yet — see the [releases page](https://github.com/sgsaravana/sadbox/releases)._
+<!-- LATEST_RELEASE:END -->
+
+Every release ships prebuilt binaries for macOS/Linux (arm64/x64) plus
+`SHA256SUMS`, built by [`release.yml`](.github/workflows/release.yml). Cut one by
+pushing a tag — `git tag v0.1.0 && git push --tags`. Publishing a release runs
+[`update-readme-release.yml`](.github/workflows/update-readme-release.yml), which
+rewrites the line above with the newest tag, its date, and a link to the notes.
+Browse them all on the [releases page](https://github.com/sgsaravana/sadbox/releases).
+
 ## Requirements
 
 - macOS 26+, Apple silicon

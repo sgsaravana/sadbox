@@ -1,0 +1,97 @@
+name: Update README on release
+
+# When a release is published, rewrite the "Latest release" line in README.md
+# (between the LATEST_RELEASE markers) with the new tag, date, and notes link,
+# then commit it back to main.
+#
+# NOTE: releases created by another workflow using the default GITHUB_TOKEN
+# (e.g. `release.yml` via action-gh-release) do NOT trigger this — GitHub
+# suppresses event chains from GITHUB_TOKEN to avoid loops. Publishing a
+# release from the GitHub UI (what this is for) does trigger it. To also cover
+# tag-push auto-releases, give release.yml a PAT, or run this manually below.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to sync (blank = latest)"
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-readme-release
+  cancel-in-progress: false
+
+jobs:
+  update-readme:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve release details
+        id: rel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="${EVENT_TAG:-${INPUT_TAG:-}}"
+          if [ -z "$TAG" ]; then
+            TAG="$(gh release view --json tagName --jq .tagName)"
+          fi
+          data="$(gh release view "$TAG" --json tagName,name,url,publishedAt)"
+          {
+            echo "tag=$(echo "$data"  | jq -r '.tagName')"
+            echo "url=$(echo "$data"  | jq -r '.url')"
+            echo "name=$(echo "$data" | jq -r '.name // .tagName')"
+            echo "date=$(echo "$data" | jq -r '.publishedAt // ""' | cut -c1-10)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Rewrite README latest-release block
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+          URL: ${{ steps.rel.outputs.url }}
+          NAME: ${{ steps.rel.outputs.name }}
+          DATE: ${{ steps.rel.outputs.date }}
+        run: |
+          node <<'EOF'
+          const fs = require("fs");
+          const { TAG, URL, NAME, DATE } = process.env;
+          const label = NAME && NAME !== TAG ? `${TAG} — ${NAME}` : TAG;
+          const block =
+            `**Latest release: [${label}](${URL})**` +
+            (DATE ? ` · published ${DATE}` : "") +
+            ` · [release notes →](${URL})`;
+          const START = "<!-- LATEST_RELEASE:START -->";
+          const END = "<!-- LATEST_RELEASE:END -->";
+          const path = "README.md";
+          const md = fs.readFileSync(path, "utf8");
+          const re = new RegExp(`${START}[\\s\\S]*?${END}`);
+          if (!re.test(md)) {
+            console.error("LATEST_RELEASE markers not found in README.md");
+            process.exit(1);
+          }
+          fs.writeFileSync(path, md.replace(re, `${START}\n${block}\n${END}`));
+          console.log("README updated:", block);
+          EOF
+
+      - name: Commit & push if changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- README.md; then
+            echo "README already reflects ${{ steps.rel.outputs.tag }} — nothing to do."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "docs(readme): latest release ${{ steps.rel.outputs.tag }} [skip ci]"
+          git push origin HEAD:main
