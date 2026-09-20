@@ -257,10 +257,33 @@ $("#picker-select").onclick = () => {
 };
 
 // ---- create project ---- (form replaces the grid while open)
+// name + version chips for a baked-in toolchain (create form + detail view)
+function toolchainHtml(tools) {
+  if (!tools || !tools.length) return `<span class="hint">—</span>`;
+  return tools.map((t) => t.version
+    ? `<span class="tool"><b>${escapeHtml(t.label)}</b> <span class="tv">${escapeHtml(t.version)}</span></span>`
+    : `<span class="tool absent" title="not installed in this VM">${escapeHtml(t.label)} <span class="tv">absent</span></span>`
+  ).join("");
+}
+
+let toolchainCache = null;
+async function loadCreateToolchain() {
+  const el = $("#create-toolchain");
+  if (!el) return;
+  if (toolchainCache) { el.innerHTML = toolchainHtml(toolchainCache.tools); return; }
+  try {
+    toolchainCache = await api("/api/toolchain");
+    el.innerHTML = toolchainHtml(toolchainCache.tools);
+  } catch (e) {
+    el.innerHTML = `<span class="hint">couldn't detect (${escapeHtml(e.message)})</span>`;
+  }
+}
+
 function openCreateForm() {
   $("#create-form").hidden = false;
   $("#projects").hidden = true;
   $("#btn-new").hidden = true;
+  loadCreateToolchain();
 }
 function closeCreateForm() {
   $("#create-form").hidden = true;
@@ -424,6 +447,21 @@ function skeletonPanel(rows) {
     <dl>${lines}</dl>
   </div>`;
 }
+function skeletonNet() {
+  const lines = (n, w) => Array.from({ length: n }, () =>
+    `<span class="sk sk-line" style="width:${w()}%;margin-bottom:8px"></span>`).join("");
+  return `<div class="panel net-panel skeleton">
+    <div class="net-head"><h3><span class="sk sk-line" style="width:90px"></span></h3></div>
+    <div class="net-section">
+      <div class="net-subhead"><span class="sk sk-line" style="width:120px"></span></div>
+      ${lines(3, () => 55 + Math.floor(Math.random() * 35))}
+    </div>
+    <div class="net-section">
+      <div class="net-subhead"><span class="sk sk-line" style="width:100px"></span></div>
+      ${lines(5, () => 100)}
+    </div>
+  </div>`;
+}
 function showDetailSkeleton() {
   $("#detail-name").innerHTML = `<span class="sk sk-line" style="width:90px;display:inline-block"></span>`;
   $("#detail-actions").innerHTML = Array.from({ length: 4 }, () =>
@@ -433,9 +471,9 @@ function showDetailSkeleton() {
   $("#detail-body").innerHTML =
     `<div id="detail-stats">
        <div class="loading-bar"><span class="spinner"></span> Loading VM details…</div>
-       <div class="detail-grid">${skeletonPanel(6) + skeletonPanel(6) + skeletonPanel(6)}</div>
+       <div class="detail-grid">${skeletonPanel(6) + skeletonPanel(6) + skeletonPanel(5) + skeletonPanel(4)}</div>
      </div>
-     <div id="detail-net"></div>
+     <div id="detail-net">${skeletonNet()}</div>
      <div class="sync-result"></div>`;
 }
 
@@ -501,8 +539,17 @@ async function renderDetail(id) {
           <dt>Work branch</dt><dd class="mono">${escapeHtml(d.branch)}</dd>
           <dt>Uncommitted</dt><dd>${d.git.dirty ?? 0} file(s)</dd>
           <dt>Git remote</dt><dd class="mono">${d.git_remote ? escapeHtml(d.git_remote) + (d.has_git_token ? " 🔑" : "") : "—"}</dd>
-          <dt>Apps</dt><dd>${d.apps.length ? d.apps.map(escapeHtml).join(", ") : "base image only"}</dd>
         </dl>
+      </div>
+
+      <div class="panel stat">
+        <h3>Installed tools</h3>
+        <div class="toolchain">${
+          state === "running"
+            ? (d.toolchain ? toolchainHtml(d.toolchain) : `<span class="hint">could not probe</span>`)
+            : `<span class="hint">start the VM to detect</span>`
+        }</div>
+        <dl><dt>Extra apt</dt><dd>${d.apps.length ? d.apps.map(escapeHtml).join(", ") : "none"}</dd></dl>
       </div>
     </div>
     ${d.error ? `<div class="panel" style="color:var(--bad)">${escapeHtml(d.error)}</div>` : ""}`;
@@ -601,7 +648,7 @@ async function reloadNetRules() {
       api(`/api/projects/${netId}/net/headers`),
     ]);
     netModel.rules = rules; netModel.headerRules = headers;
-    renderRules(); renderHeaders();
+    renderRules(); renderHeaders(); renderLog(); // log's "allowed" markers derive from rules
   } catch {}
 }
 
@@ -645,7 +692,7 @@ function netShellHtml() {
       <div class="net-subhead">Live requests</div>
       <div class="net-log-wrap">
         <table class="net-log">
-          <thead><tr><th>time</th><th>method</th><th>host / path</th><th>status</th><th>decision</th><th>size</th></tr></thead>
+          <thead><tr><th>time</th><th>method</th><th>host / path</th><th>status</th><th>decision</th><th>size</th><th>allow host</th></tr></thead>
           <tbody id="net-log"></tbody>
         </table>
       </div>
@@ -678,17 +725,29 @@ function renderLog() {
   const el = $("#net-log");
   if (!el) return;
   const rows = netModel.requests.slice(-200).reverse();
-  if (!rows.length) { el.innerHTML = `<tr><td colspan="6" class="empty">no requests yet</td></tr>`; return; }
+  if (!rows.length) { el.innerHTML = `<tr><td colspan="7" class="empty">no requests yet</td></tr>`; return; }
+  // hosts already covered by a plain (host-only) allow rule, per scope — so we
+  // can show "✓ allowed" instead of offering to add a duplicate rule
+  const allowedProject = new Set(netModel.rules.filter((r) => r.action === "allow" && !r.path && !r.method && r.scope !== "global").map((r) => r.host));
+  const allowedGlobal = new Set(netModel.rules.filter((r) => r.action === "allow" && !r.path && !r.method && r.scope === "global").map((r) => r.host));
   el.innerHTML = rows.map((r) => {
     const s = r.status;
     const sc = s == null ? "" : s >= 500 ? "s5xx" : s >= 400 ? "s4xx" : s >= 300 ? "s3xx" : "s2xx";
+    const h = escapeHtml(r.host);
+    const vmBtn = allowedProject.has(r.host)
+      ? `<span class="rowallowed" title="already allowed for this VM">✓ VM</span>`
+      : `<button class="rowallow" data-allow-host="${h}" data-scope="project" title="Allow ${h} for this VM">＋ VM</button>`;
+    const glBtn = allowedGlobal.has(r.host)
+      ? `<span class="rowallowed" title="already allowed for all VMs">✓ all</span>`
+      : `<button class="rowallow" data-allow-host="${h}" data-scope="global" title="Allow ${h} for all VMs">＋ all</button>`;
     return `<tr class="dec-${r.decision}">
       <td class="mono">${fmtClock(r.ts)}</td>
       <td>${escapeHtml(r.method)}</td>
-      <td class="np"><span class="host">${escapeHtml(r.host)}</span><span class="path">${escapeHtml(r.path)}</span></td>
+      <td class="np"><span class="host">${h}</span><span class="path">${escapeHtml(r.path)}</span></td>
       <td class="mono ${sc}">${s ?? "—"}</td>
       <td><span class="decb ${r.decision}">${r.decision}</span></td>
       <td class="mono">${fmtBytes(r.respBytes)}</td>
+      <td class="rowact">${vmBtn}${glBtn}</td>
     </tr>`;
   }).join("");
 }
@@ -738,6 +797,19 @@ function bindNetHandlers(el) {
     if (appr && e.target.closest("[data-block]")) {
       const d = appr.querySelector(".dur").value; // once ⇒ deny this only; else a permanent block rule
       return sendApproval(appr.dataset.aid, "block", d === "once" ? "once" : "forever");
+    }
+    const al = e.target.closest("[data-allow-host]");
+    if (al) {
+      const host = al.dataset.allowHost;
+      const scope = al.dataset.scope; // "project" | "global"
+      const base = scope === "global" ? "/api/net/rules" : `/api/projects/${netId}/net/rules`;
+      al.disabled = true;
+      try {
+        await api(base, { method: "POST", body: { action: "allow", host } });
+        al.textContent = "✓ done";
+        await reloadNetRules(); // updates the Rules list and flips these buttons to "✓"
+      } catch (err) { al.disabled = false; alert(err.message); }
+      return;
     }
     const dr = e.target.closest("[data-del-rule]");
     if (dr) { try { await api(`/api/net/rules/${dr.dataset.delRule}`, { method: "DELETE" }); } catch {} return reloadNetRules(); }

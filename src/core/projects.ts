@@ -9,6 +9,7 @@ import { installGuestProxy } from "../net/proxy";
 import { purgeProjectNet } from "../net/rules";
 import { clearProjectApprovals } from "../net/approvals";
 import { clearProjectFeed } from "../net/events";
+import { vmToolchain, type ToolInfo } from "./toolchain";
 
 const driver = getDriver();
 
@@ -275,6 +276,7 @@ export async function projectDetails(id: string) {
   let cpuPercent: number | null = null;
   let stats = running ? await driver.stats(ref).catch(() => null) : null;
   let guest: Record<string, string> = {};
+  let toolchain: ToolInfo[] | null = null;
   if (running) {
     const s0 = stats;
     await Bun.sleep(700);
@@ -284,8 +286,13 @@ export async function projectDetails(id: string) {
       cpuPercent = Math.max(0, Math.min(100, (delta / (700_000 * info.cpus)) * 100));
     }
     stats = s1 ?? s0;
-    const g = await driver.exec(ref, ["sh", "-c", GUEST_PROBE]).catch(() => null);
+    // guest resource probe + installed-toolchain probe run in parallel
+    const [g, tc] = await Promise.all([
+      driver.exec(ref, ["sh", "-c", GUEST_PROBE]).catch(() => null),
+      vmToolchain(ref).catch(() => null),
+    ]);
     if (g?.exitCode === 0) guest = kv(g.stdout);
+    toolchain = tc;
   }
 
   const num = (v: string | undefined) => (v ? Number(v) : null);
@@ -319,6 +326,7 @@ export async function projectDetails(id: string) {
       workdirBytes: num(guest.workdir_bytes),
       uptimeSec: num(guest.uptime),
     },
+    toolchain, // installed agents/tools + versions probed from this VM (null if not running)
     tmux: {
       sessions: num(guest.tmux_sessions),
       windows: num(guest.tmux_windows),

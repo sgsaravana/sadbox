@@ -94,14 +94,25 @@ Supervisor (Bun/TS, this repo) ── SQLite state, AES-GCM secrets
    │ ProjectDriver interface
 Apple container CLI ── one microVM per project
    │ vsock (exec)
-Guest: Debian + tmux + Bun + Claude Code, agent user, workdir = your repo copy
+Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
+       workdir = your repo copy
 ```
 
 - **Copy-in**: `git ls-files --exclude-standard` → tar over exec stdin — only
   gitignored paths are excluded, full history included. ~2 s for a 100 MB repo.
 - **Terminal**: xterm.js ⇄ WS ⇄ `Bun.spawn({terminal})` PTY ⇄
   `container exec -it <project> tmux new -A -s main`. Sessions live in the VM and
-  survive supervisor restarts.
+  survive supervisor restarts. tmux runs with `mouse on`, so to grab text (e.g.
+  an OAuth URL when authorizing an agent's provider) hold **⌥ and drag** — this
+  forces a native selection despite mouse-reporting mode, and finishing the drag
+  copies it. **⌘C**/**⌘V** (or Ctrl+Shift+C/V) copy the selection and paste.
+- **Agents baked in**: Claude Code, [omp](https://omp.sh), and
+  [opencode](https://opencode.ai) are installed in the base image (plus Bun +
+  git + ripgrep + jq). Run `claude`, `omp`, or `opencode` in the terminal. The
+  new-project form lists what a VM ships with and their versions (probed from
+  the base image via `/api/toolchain`); the detail view's **Installed tools**
+  panel probes the *running VM* itself, so an older VM correctly shows which
+  tools it's missing.
 - **Secrets** (two scopes): **global** secrets are shared and assignable to any
   number of projects; **project-specific** secrets live in one project and are
   deleted with it (overriding a global of the same name). All encrypted at rest
@@ -150,6 +161,7 @@ Guest: Debian + tmux + Bun + Claude Code, agent user, workdir = your repo copy
 | GET/PUT/POST | `/api/projects/:id/secrets` | view / assign globals / add project-specific |
 | GET/POST | `/api/secrets`, DELETE `/api/secrets/:id` | global secret store |
 | GET/PUT | `/api/settings` | default VM resources (CPUs, memory, disk) for new projects |
+| GET | `/api/toolchain` | agents/tools + versions baked into the base image (`?refresh=1` to re-probe) |
 | GET | `/api/fs/dirs?path=` | folder picker (lists subdirs, flags git repos) |
 | WS | `/projects/:id/term?cols&rows` | terminal (binary = bytes, text = JSON control) |
 | GET | `/api/projects/:id/net/stream` | SSE live feed: snapshot + request/pending/resolved events |

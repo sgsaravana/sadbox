@@ -23,6 +23,8 @@ RUN curl -fsSL https://bun.com/install | bash
 RUN curl -fsSL https://claude.ai/install.sh | bash
 # omp coding agent (https://omp.sh — README-recommended Bun install)
 RUN ~/.bun/bin/bun install -g @oh-my-pi/pi-coding-agent
+# opencode coding agent (https://opencode.ai — documented npm package)
+RUN ~/.bun/bin/bun install -g opencode-ai
 
 # login shells: Debian /etc/profile resets PATH and skel ~/.profile only
 # re-adds ~/.local/bin — put the full toolchain PATH back for sh -l / ssh

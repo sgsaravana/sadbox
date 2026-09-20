@@ -5,14 +5,38 @@
 <link rel="stylesheet" href="/vendor/xterm.css">
 <style>
   html, body { height: 100%; margin: 0; background: #0b0b0f; }
-  #term { height: 100%; }
+  body { display: flex; flex-direction: column; }
+  #term { flex: 1; min-height: 0; }
   .xterm .xterm-viewport { background: #0b0b0f; }
-  #bar { position: fixed; top: 8px; right: 12px; z-index: 9; font: 12px system-ui; }
-  #bar button { background: #1d2f57; color: #dbe4ff; border: 0; border-radius: 6px; padding: 4px 10px; cursor: pointer; display: none; }
+  #toolbar { flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
+             padding: 6px 10px; background: #0e0e15; border-bottom: 1px solid #1c1c28; font: 12px system-ui; }
+  #toolbar .tlabel { color: #6b7280; font-size: 11px; text-transform: uppercase; letter-spacing: .6px; margin-right: 2px; }
+  #toolbar .tbtn { background: #1a1a24; color: #dbe4ff; border: 1px solid #2a2a35; border-radius: 6px;
+                   padding: 4px 9px; cursor: pointer; font: inherit; }
+  #toolbar .tbtn:hover { border-color: #5b8cff; }
+  #toolbar .tbtn kbd { color: #7c7c94; font-size: 10px; margin-left: 3px; }
+  #toolbar .grow { flex: 1; }
+  #reconnect { display: none; }
+  #hint { color: #6b7280; font-size: 11px; user-select: none; }
+  #hint kbd { background: #1a1a22; color: #cbd5e1; border: 1px solid #2a2a35; border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font: inherit; }
+  #toast { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%) translateY(12px); z-index: 10;
+           background: #14532d; color: #dcfce7; border: 1px solid #166534; border-radius: 6px; padding: 5px 12px;
+           font: 12px system-ui; opacity: 0; transition: opacity .15s, transform .15s; pointer-events: none; }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 </style>
 <body>
-  <div id="bar"><button id="reconnect">reconnect</button></div>
+  <div id="toolbar">
+    <span class="tlabel">tmux</span>
+    <button class="tbtn" data-tmux="w" title="List windows (Ctrl+b w)">▤ Windows</button>
+    <button class="tbtn" data-tmux="c" title="New window (Ctrl+b c)">＋ New</button>
+    <button class="tbtn" data-tmux="p" title="Previous window (Ctrl+b p)">◀ Prev</button>
+    <button class="tbtn" data-tmux="n" title="Next window (Ctrl+b n)">Next ▶</button>
+    <span class="grow"></span>
+    <span id="hint"><kbd>⌥</kbd>-drag select · <kbd>⌘</kbd>C copy · <kbd>⌘</kbd>V paste</span>
+    <button class="tbtn" id="reconnect">reconnect</button>
+  </div>
   <div id="term"></div>
+  <div id="toast">copied</div>
   <script src="/vendor/xterm.js"></script>
   <script src="/vendor/addon-fit.js"></script>
   <script>
@@ -26,12 +50,64 @@
       fontSize: 13,
       cursorBlink: true,
       allowProposedApi: true,
+      // tmux runs with `mouse on`, so the app grabs the mouse and xterm forwards
+      // events to it instead of doing a native selection. These let the viewer
+      // still select/copy text (e.g. an OAuth URL when authorizing a provider):
+      // holding ⌥ forces a real selection despite mouse-reporting mode.
+      macOptionClickForcesSelection: true,
+      rightClickSelectsWord: true,
       theme: { background: "#0b0b0f" },
     });
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
     term.open(document.getElementById("term"));
     fit.fit();
+
+    // --- clipboard: select-to-copy + ⌘/Ctrl+Shift C/V ------------------------
+    const toast = document.getElementById("toast");
+    let toastTimer;
+    function flash(msg) {
+      toast.textContent = msg;
+      toast.classList.add("show");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove("show"), 900);
+    }
+    async function writeClipboard(text) {
+      try { await navigator.clipboard.writeText(text); return true; }
+      catch {
+        // fallback for non-secure contexts (localhost is secure, but just in case)
+        try {
+          const ta = document.createElement("textarea");
+          ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+          document.body.appendChild(ta); ta.select();
+          const ok = document.execCommand("copy"); ta.remove(); return ok;
+        } catch { return false; }
+      }
+    }
+    async function copySelection() {
+      const sel = term.getSelection();
+      if (!sel) return false;
+      if (await writeClipboard(sel)) { flash("copied"); return true; }
+      return false;
+    }
+    // classic terminal behaviour: finishing a drag-selection copies it
+    document.getElementById("term").addEventListener("mouseup", () => {
+      if (term.hasSelection()) copySelection();
+    });
+    // ⌘C / Ctrl+Shift+C copy (only when there's a selection — Ctrl+C stays SIGINT);
+    // ⌘V / Ctrl+Shift+V paste
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown") return true;
+      const combo = e.metaKey || (e.ctrlKey && e.shiftKey);
+      if (!combo) return true;
+      const k = e.key.toLowerCase();
+      if (k === "c" && term.hasSelection()) { copySelection(); return false; }
+      if (k === "v") {
+        navigator.clipboard.readText().then((t) => { if (t) term.paste(t); }).catch(() => {});
+        return false;
+      }
+      return true;
+    });
 
     const enc = new TextEncoder();
     let ws;
@@ -47,6 +123,17 @@
       };
     }
     document.getElementById("reconnect").onclick = connect;
+
+    // tmux shortcut buttons: send the prefix (Ctrl+b = 0x02) then the command key
+    function sendKeys(s) {
+      if (ws?.readyState === WebSocket.OPEN) ws.send(enc.encode(s));
+      term.focus();
+    }
+    document.getElementById("toolbar").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-tmux]");
+      if (b) sendKeys("\x02" + b.dataset.tmux);
+    });
+
     term.onData((d) => { if (ws?.readyState === WebSocket.OPEN) ws.send(enc.encode(d)); });
     term.onBinary((d) => {
       if (ws?.readyState === WebSocket.OPEN) ws.send(Uint8Array.from(d, (c) => c.charCodeAt(0)));

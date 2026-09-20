@@ -9,6 +9,7 @@ import { assignSecrets, createGlobalSecret, createProjectSecret, deleteSecret, i
 import { createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState } from "../core/projects";
 import { syncStatus, syncProject } from "../core/sync";
 import { getSettings, updateSettings } from "../core/settings";
+import { baseImageToolchain } from "../core/toolchain";
 import { createRule, deleteRule, listRules, createHeaderRule, deleteHeaderRule, listHeaderRules } from "../net/rules";
 import { resolveApproval, listPending, pendingCounts } from "../net/approvals";
 import { recentRequests, subscribe } from "../net/events";
@@ -188,6 +189,11 @@ export function startServer() {
           });
         }
 
+        // toolchain baked into the image new projects boot from (name + version)
+        if (p === "/api/toolchain" && req.method === "GET") {
+          return json(await baseImageToolchain(url.searchParams.get("refresh") === "1"));
+        }
+
         if (p === "/api/settings" && req.method === "GET") return json(getSettings());
         if (p === "/api/settings" && req.method === "PUT") {
           const b = await req.json();
@@ -219,9 +225,13 @@ export function startServer() {
       open(ws) {
         const proj = getProject(ws.data.projectId);
         if (!proj) { ws.close(4004, "project not found"); return; }
+        // -A: attach to the existing session (create it only if missing) — never
+        // a second session. -D: detach any other client on attach, so orphaned
+        // clients (e.g. a browser tab closed without a clean detach) don't pile
+        // up mirroring the same session and fighting over its size.
         const term = driver.terminal(
           refFor(proj.name),
-          ["tmux", "new-session", "-A", "-s", config.tmuxSession],
+          ["tmux", "new-session", "-A", "-D", "-s", config.tmuxSession],
           { cols: ws.data.cols, rows: ws.data.rows },
         );
         term.onData((chunk) => ws.send(chunk));
