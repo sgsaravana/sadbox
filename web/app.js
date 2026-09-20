@@ -155,6 +155,15 @@ document.addEventListener("click", async (e) => {
       b.disabled = false; b.textContent = "Sync back";
     } else if (b.dataset.secrets) {
       openProjectSecrets(b.dataset.secrets, b.dataset.name || b.closest(".card")?.querySelector("h3").textContent.trim() || "project");
+    } else if (b.dataset.rebuild) {
+      if (confirm(`Rebuild "${b.dataset.name}"? The VM is destroyed and recreated from the project's original source (local folder re-copied, or git remote re-cloned). Unsynced work inside the VM will be lost.`)) {
+        b.disabled = true; b.textContent = "Rebuilding…";
+        try {
+          await api(`/api/projects/${b.dataset.rebuild}/rebuild`, { method: "POST", body: {} });
+          if (location.hash.startsWith("#project/")) renderDetail(b.dataset.rebuild);
+          else { refreshProjects(); refreshNavTree(); }
+        } finally { b.disabled = false; b.textContent = "Rebuild"; }
+      }
     } else if (b.dataset.destroy) {
       if (confirm(`Destroy project "${b.dataset.name}"? The VM and any unsynced work in it are deleted.`)) {
         await api(`/api/projects/${b.dataset.destroy}`, { method: "DELETE" });
@@ -537,6 +546,7 @@ async function renderDetail(id) {
     <button data-term="${d.id}" data-name="${d.name}">Terminal ↗</button>
     ${d.source_path ? `<button data-sync="${d.id}">Sync back</button>` : ""}
     <button data-secrets="${d.id}">Secrets…</button>
+    <button data-rebuild="${d.id}" data-name="${d.name}" title="Destroy the VM and recreate it from the original source">Rebuild</button>
     <button class="danger" data-destroy="${d.id}" data-name="${d.name}">Destroy</button>`;
 
   stats.innerHTML = `

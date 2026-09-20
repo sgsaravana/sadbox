@@ -24,6 +24,19 @@ block + header-rewrite rules (global or per-project), and a live request log on
 the detail view. See `docs/research/` for the design research and `spikes/` for
 the de-risk experiments behind each piece.
 
+## Releases
+
+<!-- LATEST_RELEASE:START -->
+_No release published yet — see the [releases page](https://github.com/sgsaravana/sadbox/releases)._
+<!-- LATEST_RELEASE:END -->
+
+Every release ships prebuilt binaries for macOS/Linux (arm64/x64) plus
+`SHA256SUMS`, built by [`release.yml`](.github/workflows/release.yml). Cut one by
+pushing a tag — `git tag v0.1.0 && git push --tags`. Publishing a release runs
+[`update-readme-release.yml`](.github/workflows/update-readme-release.yml), which
+rewrites the line above with the newest tag, its date, and a link to the notes.
+Browse them all on the [releases page](https://github.com/sgsaravana/sadbox/releases).
+
 ## Requirements
 
 - macOS 26+, Apple silicon
@@ -133,8 +146,14 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   returned to the UI.
 - **Detail view**: per project, live CPU %/memory/disk/network/process usage
   (via `container stats` + in-guest probes), workdir size, tmux session/window
-  counts and attached-terminal count, git branch/dirty state, and folder/remote
-  info — plus the live **Network** panel (below).
+  counts and attached-terminal count, git branch/dirty state, folder/remote
+  info, and the installed-toolchain probe — plus the live **Network** panel
+  (below). A **Rebuild** action destroys the VM and recreates it from the
+  project's original source (local folder re-copied at its current HEAD, or the
+  git remote re-cloned), keeping the project's secrets and network rules;
+  unsynced work inside the old VM is lost. Rebuild uses the **current** base
+  image, so a project created before a tool was baked in (e.g. opencode) picks
+  it up on rebuild.
 - **Network proxy** (egress control): every VM routes its HTTP(S) through the
   supervisor. The proxy MITM-terminates TLS with a per-supervisor CA that each
   VM trusts (installed into the guest trust store + `NODE_EXTRA_CA_CERTS` at
@@ -163,6 +182,7 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 | GET | `/api/projects/:id/details` | full detail: resources, tmux, git, folder |
 | DELETE | `/api/projects/:id` | destroy VM |
 | POST | `/api/projects/:id/sync` | sync-back (`{autocommit?: bool}`) |
+| POST | `/api/projects/:id/rebuild` | destroy + recreate the VM from the project's original source (keeps secrets + net rules) |
 | GET | `/api/projects/:id/sync/status` | dirty/ahead counts |
 | GET/PUT/POST | `/api/projects/:id/secrets` | view / assign globals / add project-specific |
 | GET/POST | `/api/secrets`, DELETE `/api/secrets/:id` | global secret store |
@@ -213,8 +233,9 @@ deployment path once the `kvm` driver lands, and it runs the UI/API anywhere.
 
 ## Known limitations (v0)
 
-- Source folder must be a git repo with ≥ 1 commit (tar-out fallback for
-  non-git folders is designed in `docs/research/06`, not built).
+- A **local-folder** source must be a git repo with ≥ 1 commit (tar-out fallback
+  for non-git folders is designed in `docs/research/06`, not built); or create
+  from a **git URL** and the VM clones it instead.
 - Web UI has no auth — localhost use only.
 - macOS/`container` driver only; the Linux/Cloud Hypervisor driver and
   docker-compose packaging are designed (`docs/research/02`) but not built.

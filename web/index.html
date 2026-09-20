@@ -101,6 +101,9 @@
         <div class="panel home-tips">
           <h3>Good to know</h3>
           <ul>
+            <li><b>Rebuild</b> a project from its detail page to redeploy a fresh VM from the same
+              source (folder re-copied or git repo re-cloned) — secrets and network rules are kept,
+              and it uses the latest base image, so newly-baked tools (e.g. opencode) show up.</li>
             <li>Set default VM CPU / memory / disk and global network rules in <a href="#settings">Settings</a>.</li>
             <li>Add shared API keys and tokens under <a href="#secrets">Secrets</a>, then assign them to projects.</li>
             <li>For Claude Code auth, create a <code>CLAUDE_CODE_OAUTH_TOKEN</code> (or <code>ANTHROPIC_API_KEY</code>) secret and assign it to the project.</li>
