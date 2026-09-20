@@ -6,7 +6,7 @@ import { staticRoutes } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
 import { assignSecrets, createGlobalSecret, createProjectSecret, deleteSecret, injectSecrets, listGlobalSecrets, projectSecretView } from "../core/secrets";
-import { createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState } from "../core/projects";
+import { createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject } from "../core/projects";
 import { syncStatus, syncProject } from "../core/sync";
 import { getSettings, updateSettings } from "../core/settings";
 import { baseImageToolchain } from "../core/toolchain";
@@ -116,6 +116,8 @@ export function startServer() {
           const b = await req.json().catch(() => ({}));
           return json(await syncProject(m[1], { autocommit: b.autocommit ?? true }));
         }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/rebuild$/);
+        if (m && req.method === "POST") return json(await rebuildProject(m[1]));
         m = p.match(/^\/api\/projects\/([\w-]+)\/sync\/status$/);
         if (m && req.method === "GET") return json(await syncStatus(m[1]));
 

@@ -146,8 +146,14 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   returned to the UI.
 - **Detail view**: per project, live CPU %/memory/disk/network/process usage
   (via `container stats` + in-guest probes), workdir size, tmux session/window
-  counts and attached-terminal count, git branch/dirty state, and folder/remote
-  info — plus the live **Network** panel (below).
+  counts and attached-terminal count, git branch/dirty state, folder/remote
+  info, and the installed-toolchain probe — plus the live **Network** panel
+  (below). A **Rebuild** action destroys the VM and recreates it from the
+  project's original source (local folder re-copied at its current HEAD, or the
+  git remote re-cloned), keeping the project's secrets and network rules;
+  unsynced work inside the old VM is lost. Rebuild uses the **current** base
+  image, so a project created before a tool was baked in (e.g. opencode) picks
+  it up on rebuild.
 - **Network proxy** (egress control): every VM routes its HTTP(S) through the
   supervisor. The proxy MITM-terminates TLS with a per-supervisor CA that each
   VM trusts (installed into the guest trust store + `NODE_EXTRA_CA_CERTS` at
@@ -176,6 +182,7 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 | GET | `/api/projects/:id/details` | full detail: resources, tmux, git, folder |
 | DELETE | `/api/projects/:id` | destroy VM |
 | POST | `/api/projects/:id/sync` | sync-back (`{autocommit?: bool}`) |
+| POST | `/api/projects/:id/rebuild` | destroy + recreate the VM from the project's original source (keeps secrets + net rules) |
 | GET | `/api/projects/:id/sync/status` | dirty/ahead counts |
 | GET/PUT/POST | `/api/projects/:id/secrets` | view / assign globals / add project-specific |
 | GET/POST | `/api/secrets`, DELETE `/api/secrets/:id` | global secret store |

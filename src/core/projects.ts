@@ -173,6 +173,90 @@ async function installShellHooks(ref: string) {
   if (r.exitCode !== 0) throw new Error(`shell hook setup failed: ${r.stderr}`);
 }
 
+/** Boot and seed the VM for an existing project row, then start tmux. Shared by
+ *  create and rebuild: copies in the local folder (or clones the remote),
+ *  records the base commit, installs shell hooks + proxy, configures git, apps,
+ *  and (re)injects the project's assigned secrets. Idempotent enough to run on a
+ *  freshly-destroyed ref, so rebuild is just destroy + provisionVM. */
+async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } = {}) {
+  const ref = refFor(p.name);
+  const cloneMode = !p.source_path; // no local folder → clone the git remote
+  const s = getSettings();          // default resource allocation
+  await driver.create(ref, p.image, {
+    cpus: s.defaultCpus, memoryMB: s.defaultMemoryMB, diskGB: s.defaultDiskGB,
+  });
+
+  // a sized workdir volume mounts root-owned — hand it to the agent user
+  if (s.defaultDiskGB) {
+    await driver.exec(ref, ["chown", "agent:agent", config.guestWorkdir], { user: "root" });
+  }
+
+  if (cloneMode) {
+    if (!p.git_remote) throw new Error("no git remote to clone from");
+    // creds first (private repos), then clone straight into the workdir
+    if (p.git_token_enc) await writeGitCredentials(ref, p.git_remote, decrypt(p.git_token_enc));
+    const info = await cloneIntoWorkdir(ref, p.git_remote, p.name);
+    db.query("UPDATE projects SET base_sha = ?, last_synced_sha = ?, source_branch = ? WHERE id = ?")
+      .run(info.base, info.base, info.branch, p.id);
+  } else {
+    // re-read the local repo's current HEAD so a rebuild picks up new work
+    const branch = await hostGit(p.source_path, ["branch", "--show-current"]);
+    const head = await hostGit(p.source_path, ["rev-parse", "HEAD"]);
+    if (head.code !== 0) throw new Error(`source folder is not a git repository with a commit: ${p.source_path}`);
+    db.query("UPDATE projects SET base_sha = ?, last_synced_sha = ?, source_branch = ? WHERE id = ?")
+      .run(head.out, head.out, branch.out || "HEAD", p.id);
+    const tarBytes = await tarSource(p.source_path);
+    const cp = await driver.execWithStdin(
+      ref,
+      `mkdir -p ${config.guestWorkdir} && tar -xf - -C ${config.guestWorkdir}`,
+      tarBytes,
+    );
+    if (cp.exitCode !== 0) throw new Error(`copy-in failed: ${cp.stderr}`);
+    const setup = await driver.exec(ref, ["sh", "-c",
+      `cd ${config.guestWorkdir} && ` +
+      `git config user.name "sadbox project ${p.name}" && ` +
+      `git config user.email "project@sadbox.local" && ` +
+      `git checkout -q -b ${branchFor(p.name)}`,
+    ]);
+    if (setup.exitCode !== 0) throw new Error(`guest setup failed: ${setup.stderr}`);
+  }
+
+  // secrets + proxy env source-hooks for the guest's shells (both modes)
+  await installShellHooks(ref);
+
+  // route the VM's egress through the supervisor proxy: trust the CA + set
+  // proxy env for the agent's shells. Best-effort — a VM without it just
+  // egresses directly rather than failing to boot.
+  try {
+    await installGuestProxy(ref);
+    logEvent(p.id, "proxy.configure", "CA installed, egress routed via supervisor");
+  } catch (e) {
+    logEvent(p.id, "proxy.configure.error", String(e));
+  }
+
+  // external git remote + credentials — local mode only; clone mode already has
+  // origin (from the clone) and credentials written above.
+  if (!cloneMode) await configureGitRemote(ref, p);
+
+  // extra apps (best effort — base toolchain is baked into the image)
+  for (const app of JSON.parse(p.apps || "[]") as string[]) {
+    const pkg = app.replace(/[^a-zA-Z0-9._+-]/g, "");
+    if (!pkg) continue;
+    const r = await driver.exec(ref, ["sh", "-c",
+      `command -v ${pkg} >/dev/null 2>&1 || sudo apt-get install -y -qq ${pkg}`]);
+    logEvent(p.id, "app.install", `${pkg}: exit ${r.exitCode}`);
+  }
+
+  // assign (create only) then (re)write the env file from whatever's assigned
+  if (opts.assignSecretIds?.length) assignSecrets(p.id, opts.assignSecretIds);
+  await injectSecrets(p.id);
+
+  // tmux starts last so its shells are born with the secrets + proxy env in place
+  const tmux = await driver.exec(ref, ["tmux", "new-session", "-d",
+    "-s", config.tmuxSession, "-c", config.guestWorkdir]);
+  if (tmux.exitCode !== 0) throw new Error(`tmux start failed: ${tmux.stderr}`);
+}
+
 export async function createProject(opts: {
   name: string;
   sourcePath?: string;    // omit to create from a git remote (clone-in-VM mode)
@@ -188,107 +272,29 @@ export async function createProject(opts: {
   }
   if (cloneMode) {
     if (!opts.git?.remote) throw new Error("provide a local folder or a git repository URL");
-  } else if (!existsSync(opts.sourcePath!)) {
-    throw new Error(`source folder not found: ${opts.sourcePath}`);
-  }
-
-  // Local mode reads the base commit from the host repo up front; clone mode
-  // learns it from the guest after the clone completes (below).
-  let branchName: string | null = null;
-  let baseSha: string | null = null;
-  if (!cloneMode) {
-    const branch = await hostGit(opts.sourcePath!, ["branch", "--show-current"]);
+  } else {
+    if (!existsSync(opts.sourcePath!)) throw new Error(`source folder not found: ${opts.sourcePath}`);
+    // fail fast before booting a VM: the folder must be a git repo with a commit
     const head = await hostGit(opts.sourcePath!, ["rev-parse", "HEAD"]);
     if (head.code !== 0) {
       throw new Error("source folder must be a git repository with at least one commit (v0 limitation)");
     }
-    branchName = branch.out || "HEAD";
-    baseSha = head.out;
   }
 
   const id = crypto.randomUUID().slice(0, 8);
   const image = await resolveImage();
   const gitRemote = opts.git?.remote ?? null;
   const gitTokenEnc = opts.git?.token ? encrypt(opts.git.token) : null;
+  // base_sha/source_branch recorded by provisionVM once the workdir is seeded
   db.query(
     `INSERT INTO projects (id, name, image, state, source_path, source_branch, base_sha, last_synced_sha, apps, git_remote, git_token_enc)
-     VALUES (?, ?, ?, 'creating', ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(id, name, image, cloneMode ? "" : opts.sourcePath!, branchName, baseSha, baseSha,
+     VALUES (?, ?, ?, 'creating', ?, NULL, NULL, NULL, ?, ?, ?)`,
+  ).run(id, name, image, cloneMode ? "" : opts.sourcePath!,
         JSON.stringify(opts.apps ?? []), gitRemote, gitTokenEnc);
   logEvent(id, "create.start", cloneMode ? `${name} cloning ${gitRemote}` : `${name} from ${opts.sourcePath}`);
 
   try {
-    const ref = refFor(name);
-    const s = getSettings(); // default resource allocation for new VMs
-    await driver.create(ref, image, {
-      cpus: s.defaultCpus, memoryMB: s.defaultMemoryMB, diskGB: s.defaultDiskGB,
-    });
-
-    // a sized workdir volume mounts root-owned — hand it to the agent user
-    if (s.defaultDiskGB) {
-      await driver.exec(ref, ["chown", "agent:agent", config.guestWorkdir], { user: "root" });
-    }
-
-    if (cloneMode) {
-      // creds first (private repos), then clone straight into the workdir
-      if (gitTokenEnc) await writeGitCredentials(ref, gitRemote!, decrypt(gitTokenEnc));
-      const info = await cloneIntoWorkdir(ref, gitRemote!, name);
-      db.query("UPDATE projects SET base_sha = ?, last_synced_sha = ?, source_branch = ? WHERE id = ?")
-        .run(info.base, info.base, info.branch, id);
-    } else {
-      // copy-in the local folder, then set git identity + project branch
-      const tarBytes = await tarSource(opts.sourcePath!);
-      const cp = await driver.execWithStdin(
-        ref,
-        `mkdir -p ${config.guestWorkdir} && tar -xf - -C ${config.guestWorkdir}`,
-        tarBytes,
-      );
-      if (cp.exitCode !== 0) throw new Error(`copy-in failed: ${cp.stderr}`);
-      const setup = await driver.exec(ref, ["sh", "-c",
-        `cd ${config.guestWorkdir} && ` +
-        `git config user.name "sadbox project ${name}" && ` +
-        `git config user.email "project@sadbox.local" && ` +
-        `git checkout -q -b ${branchFor(name)}`,
-      ]);
-      if (setup.exitCode !== 0) throw new Error(`guest setup failed: ${setup.stderr}`);
-    }
-
-    // secrets + proxy env source-hooks for the guest's shells (both modes)
-    await installShellHooks(ref);
-
-    // route the VM's egress through the supervisor proxy: trust the CA + set
-    // proxy env for the agent's shells. Best-effort — a VM without it just
-    // egresses directly rather than failing to boot.
-    try {
-      await installGuestProxy(ref);
-      logEvent(id, "proxy.configure", "CA installed, egress routed via supervisor");
-    } catch (e) {
-      logEvent(id, "proxy.configure.error", String(e));
-    }
-
-    // external git remote + credentials — local mode only; clone mode already
-    // has origin (from the clone) and credentials written above.
-    if (!cloneMode) await configureGitRemote(ref, getProject(id)!);
-
-    // extra apps (best effort — base toolchain is baked into the image)
-    for (const app of opts.apps ?? []) {
-      const pkg = app.replace(/[^a-zA-Z0-9._+-]/g, "");
-      if (!pkg) continue;
-      const r = await driver.exec(ref, ["sh", "-c",
-        `command -v ${pkg} >/dev/null 2>&1 || sudo apt-get install -y -qq ${pkg}`]);
-      logEvent(id, "app.install", `${pkg}: exit ${r.exitCode}`);
-    }
-
-    if (opts.secretIds?.length) {
-      assignSecrets(id, opts.secretIds);
-      await injectSecrets(id);
-    }
-
-    // tmux starts last so its shells are born with the secrets env in place
-    const tmux = await driver.exec(ref, ["tmux", "new-session", "-d",
-      "-s", config.tmuxSession, "-c", config.guestWorkdir]);
-    if (tmux.exitCode !== 0) throw new Error(`tmux start failed: ${tmux.stderr}`);
-
+    await provisionVM(getProject(id)!, { assignSecretIds: opts.secretIds });
     db.query("UPDATE projects SET state = 'running' WHERE id = ?").run(id);
     logEvent(id, "create.done");
   } catch (e) {
@@ -407,6 +413,45 @@ export async function destroyProject(id: string): Promise<void> {
   clearProjectFeed(id);
   db.query("UPDATE projects SET state = 'destroyed' WHERE id = ?").run(id);
   logEvent(id, "destroy");
+}
+
+/** Redeploy a project: destroy its VM and recreate it from the same source
+ *  (local folder re-copied, or git remote re-cloned) with the same settings. The
+ *  project row, assigned secrets, and net rules are preserved — only the VM is
+ *  rebuilt. A local-mode rebuild picks up the folder's current HEAD; a clone-mode
+ *  rebuild re-clones the remote. Unsynced work inside the old VM is lost. */
+export async function rebuildProject(id: string): Promise<ProjectRow> {
+  const p = getProject(id);
+  if (!p) throw new Error("project not found");
+  if (p.state === "destroyed") throw new Error("project has been destroyed");
+  const cloneMode = !p.source_path;
+  if (cloneMode) {
+    if (!p.git_remote) throw new Error("this project has no source to rebuild from");
+  } else if (!existsSync(p.source_path)) {
+    throw new Error(`source folder no longer exists, cannot rebuild: ${p.source_path}`);
+  }
+
+  // Rebuild onto the CURRENT base image (not the stale image the project was
+  // first created with) so newly-baked tools — e.g. opencode added to the base
+  // after this project — land in the fresh VM.
+  const image = await resolveImage();
+  logEvent(id, "rebuild.start",
+    (cloneMode ? `re-clone ${p.git_remote}` : `re-copy ${p.source_path}`) +
+    (image !== p.image ? ` · image ${p.image} → ${image}` : ""));
+  db.query("UPDATE projects SET state = 'creating', error = NULL, image = ? WHERE id = ?").run(image, id);
+  try {
+    await driver.destroy(refFor(p.name)); // tear down the old VM; keep row + secrets + rules
+    clearProjectApprovals(id);
+    clearProjectFeed(id);
+    await provisionVM(getProject(id)!); // fresh row (current image) → secrets re-injected inside
+    db.query("UPDATE projects SET state = 'running' WHERE id = ?").run(id);
+    logEvent(id, "rebuild.done");
+  } catch (e) {
+    db.query("UPDATE projects SET state = 'error', error = ? WHERE id = ?").run(String(e), id);
+    logEvent(id, "rebuild.error", String(e));
+    throw e;
+  }
+  return getProject(id)!;
 }
 
 /** Merge live driver state into DB rows for the UI. Degrades to DB-only
