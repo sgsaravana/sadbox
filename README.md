@@ -52,7 +52,7 @@ needed at runtime).
 
 **Homebrew (recommended on macOS):**
 ```sh
-brew install OWNER/tap/sadbox   # pulls in the `container` dependency
+brew install sgsaravana/tap/sadbox   # pulls in the `container` dependency
 sadbox setup                    # starts container system + builds base image
 sadbox serve                    # http://localhost:7070
 # or run at login:  brew services start sadbox
@@ -60,7 +60,7 @@ sadbox serve                    # http://localhost:7070
 
 **Install script:**
 ```sh
-curl -fsSL https://raw.githubusercontent.com/OWNER/sadbox/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh | sh
 sadbox setup && sadbox serve
 ```
 
