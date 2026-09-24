@@ -253,19 +253,33 @@ sadbox binds **`localhost:7070`** by default and has **no auth**, so the right
 shape is: run it natively, leave it on localhost, and let the Caddy already on
 your Mac mini be the only network-facing piece — it terminates TLS, adds auth,
 and reverse-proxies to `127.0.0.1:7070`. A ready-to-adapt block is in
-[`packaging/caddy/Caddyfile.example`](packaging/caddy/Caddyfile.example):
+[`packaging/caddy/Caddyfile.example`](packaging/caddy/Caddyfile.example).
+
+If you already terminate a **wildcard** cert (e.g. Cloudflare DNS challenge),
+route sadbox by host inside that block so it reuses the real, browser-trusted
+cert — then `wss://` (terminal) and SSE work with no client cert-trust steps:
 
 ```caddy
-sadbox.home.arpa {
-    tls internal                     # or your own domain + real certs
-    basic_auth {                     # sadbox has no auth — add it here
-        admin $2a$14$…               # caddy hash-password
+*.internal.example.com {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
     }
-    reverse_proxy 127.0.0.1:7070 {
-        flush_interval -1            # stream the SSE network feed unbuffered
+
+    @sadbox host sadbox.internal.example.com
+    handle @sadbox {
+        basic_auth {                 # sadbox has no auth — add it here
+            admin $2a$14$…           # caddy hash-password
+        }
+        reverse_proxy 127.0.0.1:7070 {
+            flush_interval -1        # stream the SSE network feed unbuffered
+        }
     }
+    # …your other per-host handle blocks…
 }
 ```
+
+(For a standalone hostname without a wildcard, give the block its own `tls`
+directive — real certs, or `tls internal` plus `caddy trust` on each client.)
 
 Notes:
 - **WebSocket** (the browser terminal) is upgraded automatically by Caddy v2 —
