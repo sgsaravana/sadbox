@@ -46,30 +46,46 @@ Browse them all on the [releases page](https://github.com/sgsaravana/sadbox/rele
 
 ## Install
 
-sadbox ships as a **single self-contained binary** (Bun-compiled; the web UI
-and base-image recipe are embedded — no repo checkout or `node_modules`
-needed at runtime).
+The repo is currently **private**, so the public install paths (Homebrew, the
+`curl | sh` script) don't work yet — they need a public repo + release. Install
+from source or from a locally-built binary.
 
-**Homebrew (recommended on macOS):**
+**From source (recommended while private):**
 ```sh
-brew install sgsaravana/tap/sadbox   # pulls in the `container` dependency
-sadbox setup                    # starts container system + builds base image
-sadbox serve                    # http://localhost:7070
-# or run at login:  brew services start sadbox
+git clone git@github.com:sgsaravana/sadbox.git && cd sadbox
+bun install
+bun run setup      # check deps, start container system, build the base image
+bun run start      # http://localhost:7070
 ```
 
-**Install script:**
+**Self-contained binary** — sadbox compiles to a single file (Bun-compiled; the
+web UI and base-image recipe are embedded, so no repo checkout or `node_modules`
+are needed at runtime):
 ```sh
-curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh | sh
+bun run compile                 # → dist/sadbox for this platform
+cp dist/sadbox ~/.local/bin/    # (ensure ~/.local/bin is on PATH)
 sadbox setup && sadbox serve
 ```
 
-**From source (dev):**
+<details>
+<summary><b>Public distribution (once the repo is public)</b></summary>
+
+These need `sgsaravana/sadbox` to be public and a published Release with the
+`sadbox-*` binaries attached (built by `release.yml` on tag push), plus a public
+`sgsaravana/homebrew-tap` repo holding `Formula/sadbox.rb` (see
+`packaging/homebrew/sadbox.rb`, with the two `sha256`s filled in from the
+release's `SHA256SUMS`).
+
 ```sh
-bun install
-bun run src/index.ts setup      # or: bun run setup
-bun run start
+# Homebrew
+brew install sgsaravana/tap/sadbox
+sadbox setup && sadbox serve            # or: brew services start sadbox
+
+# Install script
+curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh | sh
+sadbox setup && sadbox serve
 ```
+</details>
 
 ### CLI
 
