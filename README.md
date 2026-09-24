@@ -247,12 +247,52 @@ bun run start                # or a launchd plist for boot persistence
 The ECR image is still worth pushing — it's the artifact for the Linux
 deployment path once the `kvm` driver lands, and it runs the UI/API anywhere.
 
+### Serving to the LAN behind Caddy (Mac mini home server)
+
+sadbox binds **`localhost:7070`** by default and has **no auth**, so the right
+shape is: run it natively, leave it on localhost, and let the Caddy already on
+your Mac mini be the only network-facing piece — it terminates TLS, adds auth,
+and reverse-proxies to `127.0.0.1:7070`. A ready-to-adapt block is in
+[`packaging/caddy/Caddyfile.example`](packaging/caddy/Caddyfile.example):
+
+```caddy
+sadbox.home.arpa {
+    tls internal                     # or your own domain + real certs
+    basic_auth {                     # sadbox has no auth — add it here
+        admin $2a$14$…               # caddy hash-password
+    }
+    reverse_proxy 127.0.0.1:7070 {
+        flush_interval -1            # stream the SSE network feed unbuffered
+    }
+}
+```
+
+Notes:
+- **WebSocket** (the browser terminal) is upgraded automatically by Caddy v2 —
+  no extra config. The terminal picks `wss://` on an HTTPS page, so it works
+  through TLS. `flush_interval -1` is what keeps the live **network feed** (SSE)
+  streaming instead of buffering.
+- **Keep sadbox on localhost.** Since Caddy is on the same host you don't need
+  `SADBOX_HOST=0.0.0.0`; leaving it on localhost means the only way in is
+  through Caddy (and its auth). Set `SADBOX_HOST` only if Caddy runs on a
+  different machine.
+- **Only route 7070.** Port 7071 is the VMs' internal egress proxy on the vmnet
+  gateway (`192.168.64.1`) — it must stay reachable from the guests and must not
+  be proxied or exposed.
+- Use a **dedicated hostname** (or the root), not a subpath — sadbox serves its
+  assets and API from `/`.
+- Run it under **launchd** so it survives reboots (or `brew services` once the
+  formula is in use); Caddy keeps proxying to the same localhost port.
+
 ## Known limitations (v0)
 
 - A **local-folder** source must be a git repo with ≥ 1 commit (tar-out fallback
   for non-git folders is designed in `docs/research/06`, not built); or create
   from a **git URL** and the VM clones it instead.
-- Web UI has no auth — localhost use only.
+- Web UI has no auth — bind it to localhost (default) and, to reach it from
+  other machines, front it with an authenticating reverse proxy (see the Caddy
+  setup under [Deploying](#deploying)). Never expose `SADBOX_HOST=0.0.0.0`
+  without one.
 - macOS/`container` driver only; the Linux/Cloud Hypervisor driver and
   docker-compose packaging are designed (`docs/research/02`) but not built.
 - Secret rotation reaches new shells/panes only (env-file semantics).
