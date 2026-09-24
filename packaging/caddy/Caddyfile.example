@@ -1,0 +1,55 @@
+# sadbox behind Caddy on the Mac mini (home server).
+#
+# sadbox runs NATIVELY on the Mac mini (it needs Apple Virtualization.framework
+# via `container` — never in Docker) and binds localhost:7070. Caddy, already on
+# the same box, is the only thing exposed to the network.
+#
+#   - WebSocket (the browser terminal) is proxied automatically by Caddy v2.
+#   - `flush_interval -1` keeps the SSE network-activity feed streaming.
+#   - sadbox has NO auth of its own — protect it here (or with Tailscale /
+#     forward_auth). It can create/destroy VMs and open shells.
+#   - Only port 7070 is routed. Port 7071 is the VMs' internal egress proxy on
+#     the vmnet gateway (192.168.64.1) — leave it alone, never proxy it.
+#   - Use a dedicated hostname (or root), not a subpath: sadbox serves from "/".
+
+# --- Option A: slot into an existing wildcard block (recommended) -------------
+# If you already terminate TLS for a wildcard via the Cloudflare DNS challenge,
+# route sadbox by host inside that block so it reuses the real (browser-trusted)
+# wildcard cert — wss:// and SSE then work with no cert-trust steps on clients.
+#
+# *.internal.example.com {
+#   tls {
+#     dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+#   }
+#
+#   @sadbox host sadbox.internal.example.com
+#   handle @sadbox {
+#     basic_auth {
+#       admin $2a$14$REPLACE_WITH_BCRYPT_HASH   # caddy hash-password
+#     }
+#     reverse_proxy 127.0.0.1:7070 {
+#       flush_interval -1
+#     }
+#   }
+#
+#   # …your other per-host handle blocks…
+# }
+
+# --- Option B: a standalone site block ---------------------------------------
+# If sadbox gets its own block, give it TLS too. With a real domain, reuse your
+# DNS challenge; on a bare LAN name, `tls internal` works but each client must
+# trust Caddy's root CA (`caddy trust`) or the terminal's wss will be rejected.
+
+sadbox.internal.example.com {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+
+	basic_auth {
+		admin $2a$14$REPLACE_WITH_BCRYPT_HASH   # caddy hash-password
+	}
+
+	reverse_proxy 127.0.0.1:7070 {
+		flush_interval -1  # stream SSE (live network feed) without buffering
+	}
+}

@@ -46,30 +46,46 @@ Browse them all on the [releases page](https://github.com/sgsaravana/sadbox/rele
 
 ## Install
 
-sadbox ships as a **single self-contained binary** (Bun-compiled; the web UI
-and base-image recipe are embedded — no repo checkout or `node_modules`
-needed at runtime).
+The repo is currently **private**, so the public install paths (Homebrew, the
+`curl | sh` script) don't work yet — they need a public repo + release. Install
+from source or from a locally-built binary.
 
-**Homebrew (recommended on macOS):**
+**From source (recommended while private):**
 ```sh
-brew install sgsaravana/tap/sadbox   # pulls in the `container` dependency
-sadbox setup                    # starts container system + builds base image
-sadbox serve                    # http://localhost:7070
-# or run at login:  brew services start sadbox
+git clone git@github.com:sgsaravana/sadbox.git && cd sadbox
+bun install
+bun run setup      # check deps, start container system, build the base image
+bun run start      # http://localhost:7070
 ```
 
-**Install script:**
+**Self-contained binary** — sadbox compiles to a single file (Bun-compiled; the
+web UI and base-image recipe are embedded, so no repo checkout or `node_modules`
+are needed at runtime):
 ```sh
-curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh | sh
+bun run compile                 # → dist/sadbox for this platform
+cp dist/sadbox ~/.local/bin/    # (ensure ~/.local/bin is on PATH)
 sadbox setup && sadbox serve
 ```
 
-**From source (dev):**
+<details>
+<summary><b>Public distribution (once the repo is public)</b></summary>
+
+These need `sgsaravana/sadbox` to be public and a published Release with the
+`sadbox-*` binaries attached (built by `release.yml` on tag push), plus a public
+`sgsaravana/homebrew-tap` repo holding `Formula/sadbox.rb` (see
+`packaging/homebrew/sadbox.rb`, with the two `sha256`s filled in from the
+release's `SHA256SUMS`).
+
 ```sh
-bun install
-bun run src/index.ts setup      # or: bun run setup
-bun run start
+# Homebrew
+brew install sgsaravana/tap/sadbox
+sadbox setup && sadbox serve            # or: brew services start sadbox
+
+# Install script
+curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh | sh
+sadbox setup && sadbox serve
 ```
+</details>
 
 ### CLI
 
@@ -231,12 +247,66 @@ bun run start                # or a launchd plist for boot persistence
 The ECR image is still worth pushing — it's the artifact for the Linux
 deployment path once the `kvm` driver lands, and it runs the UI/API anywhere.
 
+### Serving to the LAN behind Caddy (Mac mini home server)
+
+sadbox binds **`localhost:7070`** by default and has **no auth**, so the right
+shape is: run it natively, leave it on localhost, and let the Caddy already on
+your Mac mini be the only network-facing piece — it terminates TLS, adds auth,
+and reverse-proxies to `127.0.0.1:7070`. A ready-to-adapt block is in
+[`packaging/caddy/Caddyfile.example`](packaging/caddy/Caddyfile.example).
+
+If you already terminate a **wildcard** cert (e.g. Cloudflare DNS challenge),
+route sadbox by host inside that block so it reuses the real, browser-trusted
+cert — then `wss://` (terminal) and SSE work with no client cert-trust steps:
+
+```caddy
+*.internal.example.com {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+
+    @sadbox host sadbox.internal.example.com
+    handle @sadbox {
+        basic_auth {                 # sadbox has no auth — add it here
+            admin $2a$14$…           # caddy hash-password
+        }
+        reverse_proxy 127.0.0.1:7070 {
+            flush_interval -1        # stream the SSE network feed unbuffered
+        }
+    }
+    # …your other per-host handle blocks…
+}
+```
+
+(For a standalone hostname without a wildcard, give the block its own `tls`
+directive — real certs, or `tls internal` plus `caddy trust` on each client.)
+
+Notes:
+- **WebSocket** (the browser terminal) is upgraded automatically by Caddy v2 —
+  no extra config. The terminal picks `wss://` on an HTTPS page, so it works
+  through TLS. `flush_interval -1` is what keeps the live **network feed** (SSE)
+  streaming instead of buffering.
+- **Keep sadbox on localhost.** Since Caddy is on the same host you don't need
+  `SADBOX_HOST=0.0.0.0`; leaving it on localhost means the only way in is
+  through Caddy (and its auth). Set `SADBOX_HOST` only if Caddy runs on a
+  different machine.
+- **Only route 7070.** Port 7071 is the VMs' internal egress proxy on the vmnet
+  gateway (`192.168.64.1`) — it must stay reachable from the guests and must not
+  be proxied or exposed.
+- Use a **dedicated hostname** (or the root), not a subpath — sadbox serves its
+  assets and API from `/`.
+- Run it under **launchd** so it survives reboots (or `brew services` once the
+  formula is in use); Caddy keeps proxying to the same localhost port.
+
 ## Known limitations (v0)
 
 - A **local-folder** source must be a git repo with ≥ 1 commit (tar-out fallback
   for non-git folders is designed in `docs/research/06`, not built); or create
   from a **git URL** and the VM clones it instead.
-- Web UI has no auth — localhost use only.
+- Web UI has no auth — bind it to localhost (default) and, to reach it from
+  other machines, front it with an authenticating reverse proxy (see the Caddy
+  setup under [Deploying](#deploying)). Never expose `SADBOX_HOST=0.0.0.0`
+  without one.
 - macOS/`container` driver only; the Linux/Cloud Hypervisor driver and
   docker-compose packaging are designed (`docs/research/02`) but not built.
 - Secret rotation reaches new shells/panes only (env-file semantics).

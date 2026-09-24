@@ -1,10 +1,10 @@
 #!/bin/sh
 # sadbox installer — downloads the prebuilt binary for this platform.
-#   curl -fsSL https://raw.githubusercontent.com/OWNER/sadbox/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh | sh
 # Override: SADBOX_REPO=owner/repo  SADBOX_VERSION=v0.1.0  SADBOX_BIN_DIR=~/.local/bin
 set -eu
 
-REPO="${SADBOX_REPO:-OWNER/sadbox}"
+REPO="${SADBOX_REPO:-sgsaravana/sadbox}"
 VERSION="${SADBOX_VERSION:-latest}"
 BIN_DIR="${SADBOX_BIN_DIR:-$HOME/.local/bin}"
 

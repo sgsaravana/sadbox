@@ -1,11 +1,11 @@
-# Homebrew formula for sadbox. Publish in a tap repo (e.g. OWNER/homebrew-tap)
-# as Formula/sadbox.rb, then: brew install OWNER/tap/sadbox
+# Homebrew formula for sadbox. Publish in a tap repo (e.g. sgsaravana/homebrew-tap)
+# as Formula/sadbox.rb, then: brew install sgsaravana/tap/sadbox
 #
 # Update `version`, both `url`s, and both `sha256`s on each release
 # (shasum -a 256 dist/sadbox-darwin-*).
 class Sadbox < Formula
   desc "Supervisor for microVM AI-agent sandboxes"
-  homepage "https://github.com/OWNER/sadbox"
+  homepage "https://github.com/sgsaravana/sadbox"
   version "0.1.0"
   license "MIT"
 
@@ -13,11 +13,11 @@ class Sadbox < Formula
   depends_on :macos
 
   on_arm do
-    url "https://github.com/OWNER/sadbox/releases/download/v0.1.0/sadbox-darwin-arm64"
+    url "https://github.com/sgsaravana/sadbox/releases/download/v0.1.0/sadbox-darwin-arm64"
     sha256 "REPLACE_WITH_ARM64_SHA256"
   end
   on_intel do
-    url "https://github.com/OWNER/sadbox/releases/download/v0.1.0/sadbox-darwin-x64"
+    url "https://github.com/sgsaravana/sadbox/releases/download/v0.1.0/sadbox-darwin-x64"
     sha256 "REPLACE_WITH_X64_SHA256"
   end
 
