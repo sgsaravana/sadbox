@@ -31,7 +31,12 @@ case ":$PATH:" in
   *) echo "⚠  add $BIN_DIR to your PATH:  echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.zshrc" ;;
 esac
 
-if [ "$os" = "darwin" ]; then
+if [ "$os" = "darwin" ] && [ "$arch" != "arm64" ]; then
+  echo
+  echo "Note: this is an Intel Mac. Project microVMs need Apple's 'container' CLI,"
+  echo "which only supports Apple silicon — 'brew install container' will not install here."
+  echo "The UI/API run ('sadbox serve'), but creating projects is not available."
+elif [ "$os" = "darwin" ]; then
   echo
   echo "Next:"
   echo "  brew install container   # if not already installed"
