@@ -311,6 +311,7 @@ details.net-section > summary { cursor: pointer; list-style: revert; }
 .net-form button { padding: 6px 12px; }
 
 button.mini { padding: 2px 8px; font-size: 12px; margin-left: 6px; }
+dd .spinner { display: inline-block; vertical-align: -3px; margin-right: 4px; }
 
 /* pending approval prompts */
 .approval {

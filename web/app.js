@@ -163,21 +163,12 @@ document.addEventListener("click", async (e) => {
     } else if (b.dataset.linkFolder) {
       // connect a local folder to a project cloned from a git URL (reuses the folder picker)
       const id = b.dataset.linkFolder;
-      pickerOnSelect = async (path) => {
-        try {
-          const r = await api(`/api/projects/${id}/sync-folder`, { method: "PUT", body: { path } });
-          if (r.hasBase === false) {
-            alert(`Connected ${r.sync_path}.\n\nThis folder does not contain the commit the VM started from, so the first sync will bring the branch's full history rather than just the new commits. (If it is a clone of the same repository, a 'git fetch' there first keeps syncs small.)`);
-          }
-          renderDetail(id);
-        } catch (err) { alert(err.message); }
-      };
+      pickerOnSelect = (path) => { setSyncFolder(id, path); };
       picker.showModal();
       loadDir(b.dataset.current || null).catch(() => loadDir(null));
     } else if (b.dataset.unlinkFolder) {
       if (confirm("Disconnect this folder? Nothing in it is changed; the project just stops syncing there.")) {
-        await api(`/api/projects/${b.dataset.unlinkFolder}/sync-folder`, { method: "DELETE" });
-        renderDetail(b.dataset.unlinkFolder);
+        setSyncFolder(b.dataset.unlinkFolder, null);
       }
     } else if (b.dataset.secrets) {
       openProjectSecrets(b.dataset.secrets, b.dataset.name || b.closest(".card")?.querySelector("h3").textContent.trim() || "project");
@@ -561,11 +552,64 @@ async function openDetail(id) {
   }, 4000);
 }
 
+// Loading a project's details takes a few seconds (live VM stats), so a change
+// to its connected folder is shown at once instead of waiting for that:
+//   folderPending — a connect/disconnect is in flight (the row shows a spinner)
+//   folderKnown   — its outcome, applied over any details that were requested
+//                   before it happened and would otherwise flip the row back
+let lastDetail = null;
+let folderPending = null; // { id, label }
+let folderKnown = null;   // { id, path: string | null, at: ms }
+
 async function renderDetail(id) {
   let d;
   const stats = $("#detail-stats") || $("#detail-body");
+  const asked = Date.now();
   try { d = await api(`/api/projects/${id}/details`); }
   catch (e) { stats.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  if (folderKnown && folderKnown.id === id && asked < folderKnown.at) {
+    d.sync_path = folderKnown.path;
+    d.sync_folder = d.source_path || folderKnown.path || "";
+  }
+  lastDetail = d;
+  paintDetail(d);
+  // usage and tool versions were still being read — fetch again shortly rather
+  // than leaving the gaps until the regular refresh
+  if (d.partial) {
+    clearTimeout(partialTimer);
+    partialTimer = setTimeout(() => { if (location.hash === `#project/${id}`) renderDetail(id); }, 1000);
+  }
+}
+let partialTimer = null;
+
+/** Change the connected folder of a cloned project (path null = disconnect),
+ *  with the row showing progress straight away. */
+async function setSyncFolder(id, path) {
+  folderPending = { id, label: path ? "Connecting…" : "Disconnecting…" };
+  if (lastDetail?.id === id) paintDetail(lastDetail);
+  try {
+    const r = path
+      ? await api(`/api/projects/${id}/sync-folder`, { method: "PUT", body: { path } })
+      : await api(`/api/projects/${id}/sync-folder`, { method: "DELETE" });
+    folderKnown = { id, path: r.sync_path, at: Date.now() };
+    folderPending = null;
+    if (lastDetail?.id === id) {
+      lastDetail.sync_path = r.sync_path;
+      lastDetail.sync_folder = lastDetail.source_path || r.sync_path || "";
+      paintDetail(lastDetail);
+    }
+    if (r.hasBase === false) {
+      alert(`Connected ${r.sync_path}.\n\nThis folder does not contain the commit the VM started from, so the first sync will bring the branch's full history rather than just the new commits. (If it is a clone of the same repository, a 'git fetch' there first keeps syncs small.)`);
+    }
+  } catch (err) {
+    folderPending = null;
+    if (lastDetail?.id === id) paintDetail(lastDetail);
+    alert(err.message);
+  }
+}
+
+function paintDetail(d) {
+  const stats = $("#detail-stats") || $("#detail-body");
   $("#detail-name").textContent = d.name;
   const state = d.live?.state === "running" ? "running" : d.state;
   const r = d.resources;
@@ -615,7 +659,9 @@ async function renderDetail(id) {
         <h3>Folder & git</h3>
         <dl>
           <dt>Source</dt><dd class="mono">${d.source_path ? escapeHtml(d.source_path) : "git clone"}</dd>
-          ${d.source_path ? "" : `<dt>Local folder</dt><dd>${d.sync_path
+          ${d.source_path ? "" : `<dt>Local folder</dt><dd>${folderPending?.id === d.id
+            ? `<span class="spinner"></span> <span class="dim">${folderPending.label}</span>`
+            : d.sync_path
             ? `<span class="mono">${escapeHtml(d.sync_path)}</span>
                <button class="mini" data-link-folder="${d.id}" data-current="${escapeHtml(d.sync_path)}" title="Sync into a different folder">Change</button>
                <button class="mini" data-unlink-folder="${d.id}">Disconnect</button>`
@@ -632,7 +678,7 @@ async function renderDetail(id) {
         <h3>Installed tools</h3>
         <div class="toolchain">${
           state === "running"
-            ? (d.toolchain ? toolchainHtml(d.toolchain) : `<span class="hint">could not probe</span>`)
+            ? (d.toolchain ? toolchainHtml(d.toolchain) : `<span class="hint">${d.partial ? "checking…" : "could not probe"}</span>`)
             : `<span class="hint">start the VM to detect</span>`
         }</div>
         <dl><dt>Extra apt</dt><dd>${d.apps.length ? d.apps.map(escapeHtml).join(", ") : "none"}</dd></dl>

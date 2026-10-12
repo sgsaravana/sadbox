@@ -3,6 +3,7 @@ import { config } from "../config";
 import { encrypt, decrypt } from "../crypto";
 import { db, logEvent } from "../db";
 import { getDriver } from "../driver";
+import type { ProjectStats } from "../driver/types";
 import { injectSecrets, assignSecrets, purgeProjectSecrets } from "./secrets";
 import { getSettings } from "./settings";
 import { installGuestProxy, openProjectSocket, closeProjectSocket } from "../net/proxy";
@@ -12,7 +13,8 @@ import { clearProjectApprovals } from "../net/approvals";
 import { clearProjectFeed } from "../net/events";
 import { purgeProjectForwards } from "../net/forwards";
 import { duringSetup } from "../net/setup";
-import { vmToolchain, type ToolInfo } from "./toolchain";
+import { type ToolInfo } from "./toolchain";
+import { forgetVitals, liveStats, liveToolchain, QUERY_TIMEOUT_MS } from "./vitals";
 
 const driver = getDriver();
 
@@ -355,8 +357,19 @@ function kv(text: string): Record<string, string> {
 }
 
 /** Full detail view for one project: DB record + live VM state, resource
- *  usage (incl. sampled CPU %), and in-guest probes (disk, workdir, tmux). */
-export async function projectDetails(id: string) {
+ *  usage (incl. CPU %), and in-guest probes (disk, workdir, tmux). Requests for
+ *  the same project that overlap share one round of queries. */
+export function projectDetails(id: string) {
+  let pending = detailsInFlight.get(id);
+  if (!pending) {
+    pending = loadDetails(id).finally(() => detailsInFlight.delete(id));
+    detailsInFlight.set(id, pending);
+  }
+  return pending;
+}
+const detailsInFlight = new Map<string, ReturnType<typeof loadDetails>>();
+
+async function loadDetails(id: string) {
   const p = getProject(id);
   if (!p) throw new Error("project not found");
   const ref = refFor(p.name);
@@ -365,25 +378,21 @@ export async function projectDetails(id: string) {
   const running = info?.state === "running";
 
   let cpuPercent: number | null = null;
-  let stats = running ? await driver.stats(ref).catch(() => null) : null;
+  let stats: ProjectStats | null = null;
   let guest: Record<string, string> = {};
   let toolchain: ToolInfo[] | null = null;
+  let partial = false; // some readings are still on their way — ask again shortly
   if (running) {
-    const s0 = stats;
-    await Bun.sleep(700);
-    const s1 = await driver.stats(ref).catch(() => null);
-    if (s0?.cpuUsageUsec != null && s1?.cpuUsageUsec != null && info?.cpus) {
-      const delta = s1.cpuUsageUsec - s0.cpuUsageUsec; // usec of CPU time
-      cpuPercent = Math.max(0, Math.min(100, (delta / (700_000 * info.cpus)) * 100));
-    }
-    stats = s1 ?? s0;
-    // guest resource probe + installed-toolchain probe run in parallel
-    const [g, tc] = await Promise.all([
-      driver.exec(ref, ["sh", "-c", GUEST_PROBE]).catch(() => null),
-      vmToolchain(ref).catch(() => null),
+    // only the guest probe is waited for; see vitals.ts for the other two
+    const [g, live, tc] = await Promise.all([
+      driver.exec(ref, ["sh", "-c", GUEST_PROBE], { timeoutMs: QUERY_TIMEOUT_MS }).catch(() => null),
+      liveStats(ref, info?.cpus),
+      liveToolchain(ref),
     ]);
     if (g?.exitCode === 0) guest = kv(g.stdout);
-    toolchain = tc;
+    ({ stats, cpuPercent } = live);
+    toolchain = tc.tools;
+    partial = live.pending || tc.pending;
   }
 
   const num = (v: string | undefined) => (v ? Number(v) : null);
@@ -405,6 +414,7 @@ export async function projectDetails(id: string) {
     has_git_token: p.git_token_enc != null,
     error: p.error,
     created_at: p.created_at,
+    partial,
     live: info,
     resources: {
       cpus: info?.cpus ?? null,
@@ -472,6 +482,7 @@ export async function destroyProject(id: string): Promise<void> {
   closeProjectSocket(id);
   clearProjectApprovals(id);
   clearProjectFeed(id);
+  forgetVitals(refFor(getProject(id)?.name ?? ""));
   db.query("UPDATE projects SET state = 'destroyed' WHERE id = ?").run(id);
   logEvent(id, "destroy");
 }
@@ -502,6 +513,7 @@ export async function rebuildProject(id: string): Promise<ProjectRow> {
   db.query("UPDATE projects SET state = 'creating', error = NULL, image = ? WHERE id = ?").run(image, id);
   try {
     await driver.destroy(refFor(p.name)); // tear down the old VM; keep row + secrets + rules
+    forgetVitals(refFor(p.name));
     clearProjectApprovals(id);
     clearProjectFeed(id);
     await provisionVM(getProject(id)!); // fresh row (current image) → secrets re-injected inside

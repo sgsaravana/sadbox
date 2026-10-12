@@ -71,10 +71,10 @@ export interface ProjectDriver {
   inspect(ref: string): Promise<ProjectInfo>;
   list(): Promise<ProjectInfo[]>;
   /** Live resource usage, or null if unavailable. */
-  stats(ref: string): Promise<ProjectStats | null>;
+  stats(ref: string, timeoutMs?: number): Promise<ProjectStats | null>;
 
   /** Run a command in the guest, capture output. */
-  exec(ref: string, cmd: string[], opts?: { user?: string }): Promise<ExecResult>;
+  exec(ref: string, cmd: string[], opts?: { user?: string; timeoutMs?: number }): Promise<ExecResult>;
   /** Run a shell snippet in the guest with a byte stream piped to stdin. */
   execWithStdin(ref: string, shellCmd: string, stdin: Blob | Uint8Array, opts?: { user?: string }): Promise<ExecResult>;
   /** Run a shell snippet in the guest with both directions streamed: a raw

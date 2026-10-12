@@ -57,9 +57,10 @@ export function parseToolchain(stdout: string): ToolInfo[] {
 }
 
 /** Probe the toolchain inside a running VM. */
-export async function vmToolchain(ref: string): Promise<ToolInfo[]> {
+export async function vmToolchain(ref: string, timeoutMs?: number): Promise<ToolInfo[]> {
   const driver = getDriver();
-  const r = await driver.exec(ref, ["sh", "-c", probeScript()]);
+  const r = await driver.exec(ref, ["sh", "-c", probeScript()], { timeoutMs });
+  if (r.exitCode !== 0 && !r.stdout) throw new Error("toolchain probe failed");
   return parseToolchain(r.stdout);
 }
 

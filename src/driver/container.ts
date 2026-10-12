@@ -7,18 +7,31 @@ import type { ByteStream, ExecResult, TerminalHandle, ProjectDriver, ProjectInfo
 const BIN = config.containerBin;
 const volname = (ref: string) => `${ref}-workdir`;
 
-async function run(args: string[], stdin?: Blob | Uint8Array): Promise<ExecResult> {
+/** `timeoutMs` gives up on the command if it has not finished by then (it is
+ *  killed and reported as exit 124) — for status queries, which hang rather
+ *  than fail when a VM or the container service is stuck. */
+async function run(args: string[], stdin?: Blob | Uint8Array, timeoutMs?: number): Promise<ExecResult> {
   const proc = Bun.spawn([BIN, ...args], {
     stdin: stdin ?? "ignore",
     stdout: "pipe",
     stderr: "pipe",
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
+  const done = Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
     proc.exited,
-  ]);
-  return { exitCode, stdout, stderr };
+  ]).then(([stdout, stderr, exitCode]) => ({ exitCode, stdout, stderr }));
+  if (!timeoutMs) return done;
+  let timer: Timer | undefined;
+  // not waited for after the kill: a child of the command may still hold its pipes
+  const gaveUp = new Promise<ExecResult>((resolve) => {
+    timer = setTimeout(() => {
+      proc.kill("SIGKILL");
+      done.catch(() => {});
+      resolve({ exitCode: 124, stdout: "", stderr: `timed out after ${timeoutMs} ms` });
+    }, timeoutMs);
+  });
+  return Promise.race([done, gaveUp]).finally(() => clearTimeout(timer));
 }
 
 // inspect/list element shape (verified against container CLI 1.4.1):
@@ -105,8 +118,8 @@ export const containerDriver: ProjectDriver = {
     }
   },
 
-  async stats(ref): Promise<ProjectStats | null> {
-    const r = await run(["stats", "--no-stream", "--format", "json", ref]);
+  async stats(ref, timeoutMs): Promise<ProjectStats | null> {
+    const r = await run(["stats", "--no-stream", "--format", "json", ref], undefined, timeoutMs);
     if (r.exitCode !== 0) return null;
     try {
       const j = JSON.parse(r.stdout);
@@ -129,7 +142,7 @@ export const containerDriver: ProjectDriver = {
 
   async exec(ref, cmd, opts) {
     const user = opts?.user ? ["-u", opts.user] : [];
-    return run(["exec", ...user, ref, ...cmd]);
+    return run(["exec", ...user, ref, ...cmd], undefined, opts?.timeoutMs);
   },
 
   async execWithStdin(ref, shellCmd, stdin, opts) {
