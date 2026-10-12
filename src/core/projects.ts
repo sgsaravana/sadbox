@@ -28,6 +28,7 @@ export interface ProjectRow {
   apps: string;
   git_remote: string | null;
   git_token_enc: string | null;
+  sync_path: string | null;   // local folder connected to a cloned project (sync target only)
   error: string | null;
   created_at: string;
 }
@@ -38,6 +39,9 @@ export interface GitSetup {
 }
 
 export const refFor = (name: string) => `sadbox-${name}`;
+/** The local folder a project's work is synced into: the folder it was created
+ *  from, or one connected later to a project cloned from a git URL. */
+export const syncFolderOf = (p: Pick<ProjectRow, "source_path" | "sync_path">) => p.source_path || p.sync_path || "";
 export const branchFor = (name: string) => `sadbox/${name}`;
 
 async function hostGit(repo: string, args: string[]): Promise<{ code: number; out: string }> {
@@ -389,6 +393,8 @@ export async function projectDetails(id: string) {
     state: p.state,
     image: p.image,
     source_path: p.source_path,
+    sync_path: p.sync_path,           // folder connected to a cloned project, if any
+    sync_folder: syncFolderOf(p),     // where Sync back delivers ('' = nowhere yet)
     source_branch: p.source_branch,
     workdir: config.guestWorkdir,
     branch: branchFor(p.name),
@@ -424,6 +430,36 @@ export async function projectDetails(id: string) {
       currentBranch: guest.git_branch || null,
     },
   };
+}
+
+/** Connect a local folder to a project that was created from a git URL, so its
+ *  work can be synced back there (`path: null` disconnects). The folder must be
+ *  a git repository; it does not have to be a clone of the same remote, though
+ *  a sync is only a few commits when it is. Nothing in the folder is touched
+ *  here — or by a sync, which only adds a ref. A Rebuild still re-clones the
+ *  remote: this is where work goes, not where the VM comes from. */
+export async function connectSyncFolder(id: string, path: string | null) {
+  const p = getProject(id);
+  if (!p || p.state === "destroyed") throw new Error("project not found");
+  if (p.source_path) throw new Error("this project was created from a local folder and already syncs there");
+  if (path == null || !String(path).trim()) {
+    db.query("UPDATE projects SET sync_path = NULL WHERE id = ?").run(id);
+    logEvent(id, "sync.disconnect", p.sync_path ?? "");
+    return { sync_path: null, hasBase: null };
+  }
+  const given = String(path).trim();
+  if (!existsSync(given)) throw new Error(`folder not found: ${given}`);
+  const top = await hostGit(given, ["rev-parse", "--show-toplevel"]);
+  if (top.code !== 0) throw new Error("that folder is not a git repository — run `git init` in it (or clone the repo there) first");
+  const repo = top.out;
+  // does it already have the commit the VM started from? (true for a clone of
+  // the same remote that is reasonably up to date)
+  const hasBase = p.base_sha != null &&
+    (await hostGit(repo, ["cat-file", "-e", `${p.base_sha}^{commit}`])).code === 0;
+  // start over from the VM's base for this folder: it has received nothing yet
+  db.query("UPDATE projects SET sync_path = ?, last_synced_sha = base_sha WHERE id = ?").run(repo, id);
+  logEvent(id, "sync.connect", repo);
+  return { sync_path: repo, hasBase };
 }
 
 export async function destroyProject(id: string): Promise<void> {
@@ -492,6 +528,7 @@ export async function projectsWithLiveState() {
     image: r.image,
     state: r.state,
     source_path: r.source_path,
+    sync_folder: syncFolderOf(r),
     source_branch: r.source_branch,
     git_remote: r.git_remote,
     has_git_token: r.git_token_enc != null,

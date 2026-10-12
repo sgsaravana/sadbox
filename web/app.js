@@ -131,7 +131,7 @@ async function refreshProjects() {
         <button data-details="${p.id}">Details</button>
         <button data-term="${p.id}" data-name="${p.name}">Terminal ↗</button>
         <button data-edit="${p.id}" data-name="${p.name}">Editor ↗</button>
-        ${p.source_path ? `<button data-sync="${p.id}">Sync back</button>` : ""}
+        ${p.sync_folder ? `<button data-sync="${p.id}">Sync back</button>` : ""}
         <button data-secrets="${p.id}" data-name="${p.name}">Secrets…</button>
         <button class="danger" data-destroy="${p.id}" data-name="${p.name}">Destroy</button>
       </div>
@@ -155,11 +155,30 @@ document.addEventListener("click", async (e) => {
       const r = await api(`/api/projects/${b.dataset.sync}/sync`, { method: "POST", body: {} });
       const out = r.upToDate
         ? "Already up to date."
-        : `Fetched into ${r.ref} (${r.bundleBytes} bytes)\n\n${r.commits}\n\n${r.diffstat}\n\nApply with e.g.:\n  git merge ${r.ref}`;
+        : `Fetched into ${r.ref} in ${r.folder} (${r.bundleBytes} bytes${r.fullHistory ? ", full history — the folder did not have the starting commit" : ""})\n\n${r.commits}\n\n${r.diffstat}\n\nApply with e.g.:\n  git -C ${r.folder} merge ${r.ref}`;
       const container = b.closest(".card") || $("#view-detail");
       container.querySelector(".sync-result").innerHTML =
         `<pre class="result">${escapeHtml(out)}</pre>`;
       b.disabled = false; b.textContent = "Sync back";
+    } else if (b.dataset.linkFolder) {
+      // connect a local folder to a project cloned from a git URL (reuses the folder picker)
+      const id = b.dataset.linkFolder;
+      pickerOnSelect = async (path) => {
+        try {
+          const r = await api(`/api/projects/${id}/sync-folder`, { method: "PUT", body: { path } });
+          if (r.hasBase === false) {
+            alert(`Connected ${r.sync_path}.\n\nThis folder does not contain the commit the VM started from, so the first sync will bring the branch's full history rather than just the new commits. (If it is a clone of the same repository, a 'git fetch' there first keeps syncs small.)`);
+          }
+          renderDetail(id);
+        } catch (err) { alert(err.message); }
+      };
+      picker.showModal();
+      loadDir(b.dataset.current || null).catch(() => loadDir(null));
+    } else if (b.dataset.unlinkFolder) {
+      if (confirm("Disconnect this folder? Nothing in it is changed; the project just stops syncing there.")) {
+        await api(`/api/projects/${b.dataset.unlinkFolder}/sync-folder`, { method: "DELETE" });
+        renderDetail(b.dataset.unlinkFolder);
+      }
     } else if (b.dataset.secrets) {
       openProjectSecrets(b.dataset.secrets, b.dataset.name || b.closest(".card")?.querySelector("h3").textContent.trim() || "project");
     } else if (b.dataset.rebuild) {
@@ -251,6 +270,7 @@ $("#psec-apply").onclick = async () => {
 // ---- folder picker ----
 const picker = $("#picker");
 let pickerPath = null;
+let pickerOnSelect = null; // what to do with the chosen folder (default: fill the create form)
 
 async function loadDir(path) {
   const q = path ? `?path=${encodeURIComponent(path)}` : "";
@@ -268,6 +288,7 @@ async function loadDir(path) {
 }
 
 $("#btn-browse").onclick = () => {
+  pickerOnSelect = null;
   picker.showModal();
   loadDir($("#create-form").sourcePath.value.trim() || null).catch(() => loadDir(null));
 };
@@ -278,7 +299,8 @@ $("#picker-list").onclick = (e) => {
   if (li) loadDir(li.dataset.dir).catch((err) => alert(err.message));
 };
 $("#picker-select").onclick = () => {
-  if (pickerPath) $("#create-form").sourcePath.value = pickerPath;
+  const done = pickerOnSelect; pickerOnSelect = null;
+  if (pickerPath) { if (done) done(pickerPath); else $("#create-form").sourcePath.value = pickerPath; }
   picker.close();
 };
 
@@ -554,7 +576,7 @@ async function renderDetail(id) {
   $("#detail-actions").innerHTML = `
     <button data-term="${d.id}" data-name="${d.name}">Terminal ↗</button>
     <button data-edit="${d.id}" data-name="${d.name}" title="Browse and edit the workdir">Editor ↗</button>
-    ${d.source_path ? `<button data-sync="${d.id}">Sync back</button>` : ""}
+    ${d.sync_folder ? `<button data-sync="${d.id}">Sync back</button>` : ""}
     <button data-secrets="${d.id}">Secrets…</button>
     <button data-rebuild="${d.id}" data-name="${d.name}" title="Destroy the VM and recreate it from the original source">Rebuild</button>
     <button class="danger" data-destroy="${d.id}" data-name="${d.name}">Destroy</button>`;
@@ -592,7 +614,13 @@ async function renderDetail(id) {
       <div class="panel stat">
         <h3>Folder & git</h3>
         <dl>
-          <dt>Source</dt><dd class="mono">${d.source_path ? escapeHtml(d.source_path) : "git clone (no local folder)"}</dd>
+          <dt>Source</dt><dd class="mono">${d.source_path ? escapeHtml(d.source_path) : "git clone"}</dd>
+          ${d.source_path ? "" : `<dt>Local folder</dt><dd>${d.sync_path
+            ? `<span class="mono">${escapeHtml(d.sync_path)}</span>
+               <button class="mini" data-link-folder="${d.id}" data-current="${escapeHtml(d.sync_path)}" title="Sync into a different folder">Change</button>
+               <button class="mini" data-unlink-folder="${d.id}">Disconnect</button>`
+            : `<span class="dim">not connected</span>
+               <button class="mini" data-link-folder="${d.id}" title="Pick a local git repository to sync this project's work into">Connect a folder…</button>`}</dd>`}
           <dt>Workdir (in VM)</dt><dd class="mono">${escapeHtml(d.workdir)}</dd>
           <dt>Work branch</dt><dd class="mono">${escapeHtml(d.branch)}</dd>
           <dt>Uncommitted</dt><dd>${d.git.dirty ?? 0} file(s)</dd>

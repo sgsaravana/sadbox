@@ -204,9 +204,15 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   --exclude-standard` → tar over exec stdin (only gitignored paths excluded, full
   history included; ~2 s for a 100 MB repo), with an optional git remote for
   push/sync; or **(b) git repository** — omit the folder and give a remote URL
-  (+ token for private) and the VM **clones** it into the workdir. Cloned
-  projects have no local folder, so they push to the remote from inside the VM
-  rather than syncing back.
+  (+ token for private) and the VM **clones** it into the workdir. A cloned
+  project starts with no local folder, so it pushes to the remote from inside
+  the VM — or you **connect a local folder** to it later (detail page → Folder
+  & git → *Connect a folder…*) and use **Sync back** like any other project.
+  The folder must be a git repository; a clone of the same remote gets just
+  the new commits, any other repository gets the branch's full history. As
+  always, a sync only adds `refs/remotes/sadbox/<name>` there — your branch
+  and working tree are not touched. A connected folder is only where work
+  goes: **Rebuild** still re-clones the remote.
 - **Terminal**: xterm.js ⇄ WS ⇄ `Bun.spawn({terminal})` PTY ⇄
   `container exec -it <project> tmux new -A -s main`. Sessions live in the VM and
   survive supervisor restarts. **🔗 Links** in the toolbar lists every link
@@ -345,6 +351,7 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 | GET | `/api/projects/:id/term/links` | links currently on the project's terminal (wrapped URLs re-joined) |
 | POST | `/api/projects/:id/rebuild` | destroy + recreate the VM from the project's original source (keeps secrets + net rules) |
 | GET | `/api/projects/:id/sync/status` | dirty/ahead counts |
+| PUT/DELETE | `/api/projects/:id/sync-folder` | connect (`{path}`) / disconnect a local folder for a project cloned from a git URL |
 | GET/PUT/POST | `/api/projects/:id/secrets` | view / assign globals / add project-specific |
 | GET/POST | `/api/secrets`, DELETE `/api/secrets/:id` | global secret store |
 | GET/PUT | `/api/settings` | default VM resources (CPUs, memory, disk) for new projects |

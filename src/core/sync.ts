@@ -4,7 +4,7 @@ import { join } from "path";
 import { config } from "../config";
 import { db, logEvent } from "../db";
 import { getDriver } from "../driver";
-import { branchFor, getProject, refFor } from "./projects";
+import { branchFor, getProject, refFor, syncFolderOf } from "./projects";
 
 const driver = getDriver();
 
@@ -21,8 +21,9 @@ async function hostGit(repo: string, args: string[]) {
 export async function syncProject(id: string, opts?: { autocommit?: boolean }) {
   const p = getProject(id);
   if (!p) throw new Error("project not found");
-  if (!p.source_path) {
-    throw new Error("this project was cloned from a git remote and has no local folder to sync into — commit and `git push` from inside the VM instead");
+  const folder = syncFolderOf(p);
+  if (!folder) {
+    throw new Error("this project was cloned from a git remote and has no local folder to sync into — connect one on the project's page, or commit and `git push` from inside the VM");
   }
   const ref = refFor(p.name);
   const branch = branchFor(p.name);
@@ -46,8 +47,14 @@ export async function syncProject(id: string, opts?: { autocommit?: boolean }) {
     return { upToDate: true, tip: tipSha, commits: "", diffstat: "" };
   }
 
+  // An incremental bundle only applies where the commit it builds on exists. A
+  // connected folder may not have it (not a clone of the same remote, or one
+  // that has not fetched lately): send the branch's whole history instead.
+  const hostHasBasis = basis != null &&
+    (await hostGit(folder, ["cat-file", "-e", `${basis}^{commit}`])).code === 0;
+  const range = hostHasBasis ? `${basis}..${branch}` : branch;
   const bundle = await driver.execCaptureBytes(ref,
-    `cd ${config.guestWorkdir} && git bundle create - ${basis}..${branch}`);
+    `cd ${config.guestWorkdir} && git bundle create - ${range}`);
   if (bundle.exitCode !== 0 || bundle.stdout.length === 0) {
     throw new Error("bundle creation failed in guest");
   }
@@ -56,7 +63,7 @@ export async function syncProject(id: string, opts?: { autocommit?: boolean }) {
   await Bun.write(bundlePath, bundle.stdout);
   try {
     // + allows non-fast-forward updates if the agent rebased its branch
-    const fetch = await hostGit(p.source_path,
+    const fetch = await hostGit(folder,
       ["fetch", bundlePath, `+${branch}:refs/remotes/${branch}`]);
     if (fetch.code !== 0) throw new Error(`host fetch failed: ${fetch.err}`);
   } finally {
@@ -67,12 +74,14 @@ export async function syncProject(id: string, opts?: { autocommit?: boolean }) {
   logEvent(id, "sync", `${basis?.slice(0, 7)}..${tipSha.slice(0, 7)} (${bundle.stdout.length} bytes)`);
 
   const base = p.base_sha!;
-  const commits = await hostGit(p.source_path,
+  const commits = await hostGit(folder,
     ["log", "--oneline", `${base}..refs/remotes/${branch}`]);
-  const diffstat = await hostGit(p.source_path,
+  const diffstat = await hostGit(folder,
     ["diff", "--stat", `${base}...refs/remotes/${branch}`]);
   return {
     upToDate: false,
+    folder,
+    fullHistory: !hostHasBasis,
     tip: tipSha,
     bundleBytes: bundle.stdout.length,
     ref: `refs/remotes/${branch}`,

@@ -6,7 +6,7 @@ import { staticRoutes, aceFiles } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
 import { assignSecrets, createGlobalSecret, createProjectSecret, deleteSecret, injectSecrets, listGlobalSecrets, projectSecretView } from "../core/secrets";
-import { createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject } from "../core/projects";
+import { connectSyncFolder, createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject } from "../core/projects";
 import { syncStatus, syncProject } from "../core/sync";
 import { terminalLinks } from "../core/links";
 import { getSettings, updateSettings } from "../core/settings";
@@ -166,6 +166,12 @@ export function startServer() {
         if (m && req.method === "GET") return json(await terminalLinks(m[1]));
         m = p.match(/^\/api\/projects\/([\w-]+)\/rebuild$/);
         if (m && req.method === "POST") return json(await rebuildProject(m[1]));
+        m = p.match(/^\/api\/projects\/([\w-]+)\/sync-folder$/);
+        if (m && req.method === "PUT") {            // connect a local folder to a cloned project
+          const b = await req.json();
+          return json(await connectSyncFolder(m[1], b.path ?? null));
+        }
+        if (m && req.method === "DELETE") return json(await connectSyncFolder(m[1], null));
         m = p.match(/^\/api\/projects\/([\w-]+)\/sync\/status$/);
         if (m && req.method === "GET") return json(await syncStatus(m[1]));
 

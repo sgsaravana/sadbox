@@ -310,6 +310,8 @@ details.net-section > summary { cursor: pointer; list-style: revert; }
 .net-form input[name="host"], .net-form input[name="header"] { flex: 1 1 160px; }
 .net-form button { padding: 6px 12px; }
 
+button.mini { padding: 2px 8px; font-size: 12px; margin-left: 6px; }
+
 /* pending approval prompts */
 .approval {
   display: flex; justify-content: space-between; align-items: center; gap: 12px;
