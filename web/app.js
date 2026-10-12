@@ -126,6 +126,7 @@ async function refreshProjects() {
       <div class="row">
         <button data-details="${p.id}">Details</button>
         <button data-term="${p.id}" data-name="${p.name}">Terminal ↗</button>
+        <button data-edit="${p.id}" data-name="${p.name}">Editor ↗</button>
         ${p.source_path ? `<button data-sync="${p.id}">Sync back</button>` : ""}
         <button data-secrets="${p.id}" data-name="${p.name}">Secrets…</button>
         <button class="danger" data-destroy="${p.id}" data-name="${p.name}">Destroy</button>
@@ -141,6 +142,8 @@ document.addEventListener("click", async (e) => {
   try {
     if (b.dataset.term) {
       window.open(`/terminal?id=${b.dataset.term}&name=${b.dataset.name}`, "_blank");
+    } else if (b.dataset.edit) {
+      window.open(`/editor?id=${b.dataset.edit}&name=${b.dataset.name}`, "_blank");
     } else if (b.dataset.details) {
       location.hash = `project/${b.dataset.details}`;
     } else if (b.dataset.sync) {
@@ -546,6 +549,7 @@ async function renderDetail(id) {
 
   $("#detail-actions").innerHTML = `
     <button data-term="${d.id}" data-name="${d.name}">Terminal ↗</button>
+    <button data-edit="${d.id}" data-name="${d.name}" title="Browse and edit the workdir">Editor ↗</button>
     ${d.source_path ? `<button data-sync="${d.id}">Sync back</button>` : ""}
     <button data-secrets="${d.id}">Secrets…</button>
     <button data-rebuild="${d.id}" data-name="${d.name}" title="Destroy the VM and recreate it from the original source">Rebuild</button>

@@ -127,10 +127,13 @@ export const containerDriver: ProjectDriver = {
       stdout: "pipe",
       stderr: "ignore",
     });
-    const [stdout, exitCode] = await Promise.all([
-      new Response(proc.stdout).bytes(),
+    // via arrayBuffer(): Response.bytes() does not reliably hand back a
+    // Uint8Array for multi-megabyte output under Bun 1.3
+    const [buf, exitCode] = await Promise.all([
+      new Response(proc.stdout).arrayBuffer(),
       proc.exited,
     ]);
+    const stdout = new Uint8Array(buf);
     return { exitCode, stdout };
   },
 

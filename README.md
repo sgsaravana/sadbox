@@ -141,6 +141,16 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   an OAuth URL when authorizing an agent's provider) hold **⌥ and drag** — this
   forces a native selection despite mouse-reporting mode, and finishing the drag
   copies it. **⌘C**/**⌘V** (or Ctrl+Shift+C/V) copy the selection and paste.
+- **Editor**: **Editor ↗** opens the project's workdir in its own tab — a
+  file tree, tabs, syntax highlighting (One Dark, ~55 languages), find
+  (**⌘F**), go-to-file (**⌘P**, over everything git tracks or would add), save
+  (**⌘S**), and new/rename/delete. Like the terminal it needs nothing running
+  in the VM: each read or save is a short `container exec`. The agent edits the
+  same files, so a save is refused if the file changed in the VM since you
+  opened it (reload, or overwrite deliberately), and an unedited tab picks up
+  the agent's changes when you return to it. It is an editor, not an IDE — no
+  language server, debugger or project-wide search — and it handles UTF-8 text
+  files up to 2 MB.
 - **Agents baked in**: Claude Code, [omp](https://omp.sh), and
   [opencode](https://opencode.ai) are installed in the base image (plus Bun +
   git + ripgrep + jq). Run `claude`, `omp`, or `opencode` in the terminal. The
@@ -224,6 +234,10 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 | POST | `/api/projects/:id/net/approvals/:aid` | resolve a held request (`{action, duration}`) |
 | GET/POST | `/api/projects/:id/net/rules`, DELETE `…/:rid` | per-project allow/block rules |
 | GET/POST | `/api/projects/:id/net/headers`, DELETE `…/:hid` | per-project header rewrites |
+| GET/POST | `/api/projects/:id/files?path=` | list a workdir folder / create a folder (`{path}`) |
+| GET | `/api/projects/:id/files/index` | every non-ignored file (editor quick-open) |
+| POST | `/api/projects/:id/files/rename` | rename or move (`{from, to}`) |
+| GET/PUT/DELETE | `/api/projects/:id/file?path=` | read / save (`{path, content, baseHash, force?}` — 409 if it changed in the VM) / delete |
 | GET/POST | `/api/projects/:id/forwards`, DELETE `…/:fid` | port forwards (`{hostPort, guestPort}`) — host port → VM port |
 | GET/POST | `/api/net/rules`, DELETE `/api/net/rules/:id` | global allow/block rules |
 | GET/POST | `/api/net/headers`, DELETE `/api/net/headers/:id` | global header rewrites |

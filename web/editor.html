@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>sadbox editor</title>
+<style>
+  /* One Dark, as Zed ships it */
+  :root {
+    --bg: #282c33; --panel: #2f343e; --bar: #3b414d; --border: #464b57; --line: #363c46;
+    --text: #dce0e5; --dim: #a9afbc; --faint: #878a98; --accent: #74ade8; --sel: #454a56;
+    --ok: #a1c181; --warn: #dec184; --bad: #d07277;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text);
+               font: 13px/1.4 system-ui, -apple-system, sans-serif; overflow: hidden; }
+  body { display: flex; flex-direction: column; }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+  #main { flex: 1; min-height: 0; display: flex; }
+
+  /* file tree */
+  #side { width: 260px; flex: 0 0 auto; background: var(--panel); border-right: 1px solid var(--border);
+          display: flex; flex-direction: column; min-width: 140px; }
+  #side-head { display: flex; align-items: center; gap: 2px; padding: 7px 8px 7px 12px; border-bottom: 1px solid var(--border); }
+  #side-head .title { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .icon-btn { color: var(--dim); border-radius: 4px; padding: 2px 6px; font-size: 13px; line-height: 1.3; }
+  .icon-btn:hover { background: var(--bar); color: var(--text); }
+  #tree { flex: 1; overflow: auto; padding: 4px 0 20px; user-select: none; }
+  .row { display: flex; align-items: center; height: 24px; padding-right: 6px; cursor: pointer; white-space: nowrap; color: var(--dim); }
+  .row:hover { background: #363c46; color: var(--text); }
+  .row.active { background: var(--sel); color: var(--text); }
+  .row .tw { width: 14px; flex: 0 0 auto; text-align: center; font-size: 9px; color: var(--faint); }
+  .row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .row.dir .nm { color: var(--text); }
+  .row .acts { display: none; }
+  .row:hover .acts { display: flex; }
+  .row .acts button { color: var(--faint); padding: 0 4px; font-size: 12px; border-radius: 3px; }
+  .row .acts button:hover { color: var(--text); background: var(--bar); }
+  .tree-msg { padding: 3px 12px; color: var(--faint); font-style: italic; }
+  #grip { width: 4px; margin-left: -2px; margin-right: -2px; cursor: col-resize; z-index: 5; flex: 0 0 auto; }
+  #grip:hover { background: var(--accent); }
+
+  /* tabs + editor */
+  #work { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #tabs { display: flex; background: var(--panel); border-bottom: 1px solid var(--border); overflow-x: auto; flex: 0 0 auto; min-height: 33px; }
+  #tabs::-webkit-scrollbar { height: 0; }
+  .tab { display: flex; align-items: center; gap: 8px; padding: 0 8px 0 14px; height: 32px; border-right: 1px solid var(--border);
+         color: var(--dim); cursor: pointer; white-space: nowrap; flex: 0 0 auto; }
+  .tab:hover { color: var(--text); }
+  .tab.active { background: var(--bg); color: var(--text); box-shadow: inset 0 -1px 0 var(--bg); margin-bottom: -1px; height: 33px; }
+  .tab .x { width: 16px; height: 16px; border-radius: 4px; color: var(--faint); font-size: 14px; line-height: 14px; text-align: center; }
+  .tab .x:hover { background: var(--bar); color: var(--text); }
+  .tab.dirty .x::before { content: "●"; font-size: 10px; color: var(--accent); }
+  .tab.dirty .x:hover::before { content: "×"; font-size: 14px; color: var(--text); }
+  .tab:not(.dirty) .x::before { content: "×"; }
+  .tab.stale .lbl { color: var(--warn); }
+  #stage { flex: 1; min-height: 0; position: relative; }
+  #editor { position: absolute; inset: 0; }
+  #empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+           gap: 10px; color: var(--faint); background: var(--bg); z-index: 4; }
+  #empty .big { font-size: 15px; color: var(--dim); }
+  kbd { background: var(--panel); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px;
+        padding: 0 5px; font: 11px system-ui; color: var(--dim); }
+  #banner { display: none; align-items: center; gap: 10px; padding: 6px 12px; background: #4a3f2a; color: #f0dcae;
+            border-bottom: 1px solid var(--border); flex: 0 0 auto; }
+  #banner.show { display: flex; }
+  #banner .grow { flex: 1; }
+  #banner button { border: 1px solid #7a6a45; border-radius: 4px; padding: 2px 9px; }
+  #banner button:hover { background: #5c4f34; }
+
+  /* status bar */
+  #status { flex: 0 0 auto; display: flex; align-items: center; gap: 14px; height: 26px; padding: 0 12px;
+            background: var(--panel); border-top: 1px solid var(--border); color: var(--dim); font-size: 12px; }
+  #status .grow { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #st-msg.ok { color: var(--ok); } #st-msg.bad { color: var(--bad); }
+
+  /* quick open */
+  #palette { display: none; position: fixed; inset: 0; z-index: 50; background: #0006; justify-content: center; align-items: flex-start; padding-top: 12vh; }
+  #palette.show { display: flex; }
+  #palette .box { width: min(620px, 90vw); background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+                  box-shadow: 0 12px 40px #000a; overflow: hidden; }
+  #palette input { width: 100%; padding: 11px 14px; background: none; border: 0; border-bottom: 1px solid var(--border);
+                   color: var(--text); font: 14px system-ui; outline: none; }
+  #pal-list { max-height: 46vh; overflow: auto; padding: 4px; }
+  .pal-item { padding: 5px 10px; border-radius: 5px; cursor: pointer; display: flex; gap: 10px; align-items: baseline; }
+  .pal-item.sel { background: var(--sel); }
+  .pal-item .dir { color: var(--faint); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pal-empty { padding: 10px 12px; color: var(--faint); }
+
+  /* blend Ace into the page */
+  .ace_editor { font-family: "SF Mono", Menlo, Monaco, Consolas, monospace !important; }
+  .ace-one-dark, .ace-one-dark .ace_gutter { background: var(--bg) !important; }
+  .ace-one-dark .ace_gutter { color: #4e5a6a !important; }
+  .ace-one-dark .ace_marker-layer .ace_active-line, .ace-one-dark .ace_gutter-active-line { background: #2f343e !important; }
+</style>
+<body>
+  <div id="main">
+    <aside id="side">
+      <div id="side-head">
+        <span class="title" id="proj-name">workdir</span>
+        <button class="icon-btn" id="btn-open" title="Go to file (⌘P)">⌕</button>
+        <button class="icon-btn" id="btn-newfile" title="New file">＋</button>
+        <button class="icon-btn" id="btn-newdir" title="New folder">▣</button>
+        <button class="icon-btn" id="btn-refresh" title="Refresh the tree">⟳</button>
+      </div>
+      <div id="tree"></div>
+    </aside>
+    <div id="grip"></div>
+    <section id="work">
+      <div id="tabs"></div>
+      <div id="banner">
+        <span class="grow" id="banner-text"></span>
+        <button id="banner-reload">Reload from VM</button>
+        <button id="banner-keep">Keep mine</button>
+      </div>
+      <div id="stage">
+        <div id="editor"></div>
+        <div id="empty">
+          <div class="big">Pick a file from the tree</div>
+          <div><kbd>⌘</kbd> <kbd>P</kbd> go to file &nbsp;·&nbsp; <kbd>⌘</kbd> <kbd>S</kbd> save &nbsp;·&nbsp; <kbd>⌘</kbd> <kbd>F</kbd> find</div>
+        </div>
+      </div>
+    </section>
+  </div>
+  <div id="status">
+    <span class="grow" id="st-path"></span>
+    <span id="st-msg"></span>
+    <span id="st-pos"></span>
+    <span id="st-lang"></span>
+  </div>
+  <div id="palette"><div class="box">
+    <input id="pal-input" placeholder="Go to file…" autocomplete="off" spellcheck="false">
+    <div id="pal-list"></div>
+  </div></div>
+
+  <script src="/vendor/ace/ace.js"></script>
+  <script src="/vendor/ace/ext-modelist.js"></script>
+  <script src="/vendor/ace/ext-searchbox.js"></script>
+  <script src="/vendor/ace/theme-one_dark.js"></script>
+  <script>
+    const $ = (s) => document.querySelector(s);
+    const params = new URLSearchParams(location.search);
+    const projectId = params.get("id");
+    const projName = params.get("name") || projectId;
+    document.title = `${projName} — editor`;
+    $("#proj-name").textContent = projName;
+    const API = `/api/projects/${encodeURIComponent(projectId)}`;
+    const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+    // fetch wrapper that keeps the status + parsed body on failure (409 conflicts need both)
+    async function api(path, opts = {}) {
+      const r = await fetch(API + path, {
+        method: opts.method || "GET",
+        headers: opts.body ? { "content-type": "application/json" } : undefined,
+        body: opts.body ? JSON.stringify(opts.body) : undefined,
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw Object.assign(new Error(data.error || r.statusText), { status: r.status, data });
+      return data;
+    }
+    const qs = (path) => `?path=${encodeURIComponent(path)}`;
+    const base = (p) => p.slice(p.lastIndexOf("/") + 1);
+    const parent = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+    const join = (dir, name) => (dir ? `${dir}/${name}` : name);
+
+    let msgTimer;
+    function flash(text, cls = "") {
+      const el = $("#st-msg");
+      el.textContent = text; el.className = cls;
+      clearTimeout(msgTimer);
+      msgTimer = setTimeout(() => { el.textContent = ""; }, 4000);
+    }
+
+    // ---- Ace ----
+    ace.config.set("basePath", "/vendor/ace");
+    const modelist = ace.require("ace/ext/modelist");
+    const editor = ace.edit("editor", {
+      theme: "ace/theme/one_dark", fontSize: 13, showPrintMargin: false, useWorker: false,
+      tabSize: 2, useSoftTabs: true, scrollPastEnd: 0.3, displayIndentGuides: true, highlightSelectedWord: true,
+    });
+    editor.container.style.lineHeight = "1.55";
+    editor.renderer.updateFontSize();
+    let modes = new Set(["text"]); // language modes the supervisor actually ships
+    fetch("/api/editor/modes").then((r) => r.json()).then((m) => {
+      modes = new Set(m);
+      for (const t of tabs) applyMode(t); // files opened before the list arrived
+    }).catch(() => {});
+
+    function applyMode(tab) {
+      const m = modelist.getModeForPath(tab.path);
+      const known = modes.has(m.name);
+      tab.lang = known ? m.caption : "Plain Text";
+      tab.session.setMode(known ? m.mode : "ace/mode/text");
+      if (tab === active) $("#st-lang").textContent = tab.lang;
+    }
+
+    // ---- tabs ----
+    // tab: { path, session, hash (as last loaded/saved; null = not on disk yet), dirty, stale, lang }
+    const tabs = [];
+    let active = null;
+
+    function makeSession(tab, content) {
+      const s = ace.createEditSession(content);
+      s.setUseWorker(false);
+      s.setTabSize(2); s.setUseSoftTabs(true);
+      s.on("change", () => setTimeout(() => {
+        const dirty = !s.getUndoManager().isClean();
+        if (dirty !== tab.dirty) { tab.dirty = dirty; renderTabs(); }
+      }, 0));
+      s.selection.on("changeCursor", () => { if (tab === active) showPos(); });
+      tab.session = s;
+      applyMode(tab);
+    }
+
+    function showPos() {
+      if (!active) { $("#st-pos").textContent = ""; return; }
+      const c = active.session.selection.getCursor();
+      $("#st-pos").textContent = `${c.row + 1}:${c.column + 1}`;
+    }
+
+    function renderTabs() {
+      $("#tabs").innerHTML = tabs.map((t, i) => {
+        // show the folder too when two open files share a name
+        const twin = tabs.some((o) => o !== t && base(o.path) === base(t.path));
+        const label = twin && parent(t.path) ? `${base(t.path)} — ${parent(t.path)}` : base(t.path);
+        return `<div class="tab${t === active ? " active" : ""}${t.dirty ? " dirty" : ""}${t.stale ? " stale" : ""}" data-i="${i}" title="${esc(t.path)}">
+          <span class="lbl">${esc(label)}</span><button class="x" data-close="${i}" title="Close"></button></div>`;
+      }).join("");
+      $("#tabs .tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+
+    function activate(tab) {
+      active = tab;
+      $("#empty").style.display = tab ? "none" : "flex";
+      if (tab) {
+        editor.setSession(tab.session);
+        editor.focus();
+        $("#st-path").textContent = tab.path;
+        $("#st-lang").textContent = tab.lang;
+        checkDisk(tab);
+      } else {
+        $("#st-path").textContent = ""; $("#st-lang").textContent = "";
+      }
+      showPos(); renderTabs(); showBanner(); markTreeActive();
+    }
+
+    async function openFile(path) {
+      let tab = tabs.find((t) => t.path === path);
+      if (!tab) {
+        let f;
+        try { f = await api("/file" + qs(path)); }
+        catch (e) { flash(e.message, "bad"); return; }
+        tab = tabs.find((t) => t.path === path); // opened twice while loading
+        if (!tab) {
+          tab = { path, hash: f.hash, dirty: false, stale: false };
+          makeSession(tab, f.content);
+          tabs.push(tab);
+        }
+      }
+      activate(tab);
+    }
+
+    function closeTab(tab) {
+      if (tab.dirty && !confirm(`Discard unsaved changes to ${base(tab.path)}?`)) return;
+      const i = tabs.indexOf(tab);
+      tabs.splice(i, 1);
+      tab.session.destroy?.();
+      if (tab === active) activate(tabs[Math.min(i, tabs.length - 1)] || null);
+      else renderTabs();
+    }
+
+    $("#tabs").addEventListener("click", (e) => {
+      const x = e.target.closest("[data-close]");
+      if (x) { e.stopPropagation(); return closeTab(tabs[+x.dataset.close]); }
+      const t = e.target.closest(".tab");
+      if (t) activate(tabs[+t.dataset.i]);
+    });
+    $("#tabs").addEventListener("auxclick", (e) => {
+      const t = e.target.closest(".tab");
+      if (t && e.button === 1) { e.preventDefault(); closeTab(tabs[+t.dataset.i]); }
+    });
+
+    // ---- save, and noticing the agent's edits ----
+    async function save(tab = active, force = false) {
+      if (!tab) return;
+      const content = tab.session.getValue();
+      try {
+        const r = await api("/file", { method: "PUT", body: { path: tab.path, content, baseHash: tab.hash, force } });
+        tab.hash = r.hash; tab.stale = false;
+        // only clean if nothing was typed while the save was in flight
+        if (tab.session.getValue() === content) { tab.session.getUndoManager().markClean(); tab.dirty = false; }
+        flash(`Saved ${base(tab.path)}`, "ok");
+        renderTabs(); showBanner();
+      } catch (e) {
+        if (e.status === 409 && e.data?.conflict) { tab.stale = true; renderTabs(); showBanner(); flash("Not saved — the file changed in the VM", "bad"); }
+        else flash(`Save failed: ${e.message}`, "bad");
+      }
+    }
+
+    // The agent edits these files too. When a tab comes to the front (or the
+    // window regains focus), compare with the VM: an untouched tab just picks up
+    // the new content; one with unsaved edits is flagged instead of overwritten.
+    async function checkDisk(tab) {
+      if (!tab || tab.checking) return;
+      tab.checking = true;
+      try {
+        const f = await api("/file" + qs(tab.path));
+        if (f.hash === tab.hash) { if (tab.stale && !tab.dirty) { tab.stale = false; renderTabs(); showBanner(); } return; }
+        if (tab.dirty) { tab.stale = true; }
+        else { reloadInto(tab, f); flash(`${base(tab.path)} updated from the VM`); }
+        renderTabs(); showBanner();
+      } catch (e) {
+        if (e.status === 404 && tab.hash != null) { tab.stale = true; tab.gone = true; renderTabs(); showBanner(); }
+      } finally { tab.checking = false; }
+    }
+
+    function reloadInto(tab, f) {
+      const pos = tab.session.selection.getCursor();
+      const top = tab.session.getScrollTop();
+      tab.session.setValue(f.content);          // also resets undo → clean
+      tab.session.selection.moveCursorToPosition(pos);
+      tab.session.setScrollTop(top);
+      tab.hash = f.hash; tab.dirty = false; tab.stale = false; tab.gone = false;
+    }
+
+    function showBanner() {
+      const b = $("#banner");
+      if (!active?.stale) { b.classList.remove("show"); editor.resize(); return; }
+      $("#banner-text").textContent = active.gone
+        ? `${base(active.path)} was deleted in the VM.`
+        : `${base(active.path)} changed in the VM while you had unsaved edits.`;
+      $("#banner-reload").hidden = !!active.gone;
+      $("#banner-keep").textContent = active.gone ? "Save it back" : "Overwrite with mine";
+      b.classList.add("show");
+      editor.resize();
+    }
+    $("#banner-reload").onclick = async () => {
+      const tab = active;
+      try { reloadInto(tab, await api("/file" + qs(tab.path))); renderTabs(); showBanner(); }
+      catch (e) { flash(e.message, "bad"); }
+    };
+    $("#banner-keep").onclick = () => save(active, true);
+    addEventListener("focus", () => checkDisk(active));
+
+    // ---- file tree ----
+    // node: { path, name, type, open, kids (null until loaded) }
+    const root = { path: "", name: "", type: "dir", open: true, kids: null };
+    let selectedDir = ""; // where "new file/folder" lands
+
+    async function loadKids(node) {
+      const r = await api("/files" + qs(node.path));
+      const old = new Map((node.kids || []).map((k) => [k.name, k]));
+      node.kids = r.entries.map((e) => {
+        const prev = old.get(e.name);
+        return prev && prev.type === e.type ? prev : { path: join(node.path, e.name), name: e.name, type: e.type, open: false, kids: null };
+      });
+    }
+
+    function rowsFor(node, depth, out) {
+      for (const k of node.kids || []) {
+        const pad = 8 + depth * 12;
+        const isDir = k.type === "dir";
+        out.push(`<div class="row ${isDir ? "dir" : "file"}" data-path="${esc(k.path)}" data-type="${k.type}" style="padding-left:${pad}px" title="${esc(k.path)}">
+          <span class="tw">${isDir ? (k.open ? "▾" : "▸") : ""}</span><span class="nm">${esc(k.name)}</span>
+          <span class="acts"><button data-act="rename" title="Rename / move">✎</button><button data-act="delete" title="Delete">✕</button></span></div>`);
+        if (isDir && k.open) {
+          if (k.kids && !k.kids.length) out.push(`<div class="tree-msg" style="padding-left:${pad + 26}px">empty</div>`);
+          rowsFor(k, depth + 1, out);
+        }
+      }
+      return out;
+    }
+
+    function renderTree() {
+      const html = rowsFor(root, 0, []).join("");
+      $("#tree").innerHTML = html || `<div class="tree-msg">${root.kids ? "the workdir is empty" : "loading…"}</div>`;
+      markTreeActive();
+    }
+    function markTreeActive() {
+      for (const r of document.querySelectorAll("#tree .row.active")) r.classList.remove("active");
+      if (active) document.querySelector(`#tree .row[data-path="${CSS.escape(active.path)}"]`)?.classList.add("active");
+    }
+
+    function findNode(path, node = root) {
+      if (node.path === path) return node;
+      for (const k of node.kids || []) {
+        if (k.path === path) return k;
+        if (k.type === "dir" && path.startsWith(k.path + "/")) return findNode(path, k);
+      }
+      return null;
+    }
+
+    /** Re-read every folder that is currently open, keeping the expansion state. */
+    async function refreshTree(node = root) {
+      try { await loadKids(node); } catch (e) { if (node === root) { $("#tree").innerHTML = `<div class="tree-msg">${esc(e.message)}</div>`; throw e; } node.open = false; return; }
+      await Promise.all(node.kids.filter((k) => k.type === "dir" && k.open).map((k) => refreshTree(k)));
+      if (node === root) renderTree();
+    }
+
+    $("#tree").addEventListener("click", async (e) => {
+      const row = e.target.closest(".row");
+      if (!row) { selectedDir = ""; return; }
+      const path = row.dataset.path;
+      const act = e.target.closest("[data-act]")?.dataset.act;
+      if (act === "rename") return renameEntry(path);
+      if (act === "delete") return deleteEntry(path, row.dataset.type);
+      if (row.dataset.type === "dir") {
+        const node = findNode(path);
+        node.open = !node.open;
+        selectedDir = path;
+        if (node.open && !node.kids) { try { await loadKids(node); } catch (err) { node.open = false; flash(err.message, "bad"); } }
+        renderTree();
+      } else if (row.dataset.type === "file") {
+        selectedDir = parent(path);
+        openFile(path);
+      } else flash("Not a regular file", "bad");
+    });
+
+    async function newEntry(kind) {
+      const hint = selectedDir ? selectedDir + "/" : "";
+      const input = prompt(`New ${kind} — path relative to the workdir:`, hint);
+      if (!input || input === hint) return;
+      const path = input.replace(/^\/+|\/+$/g, "");
+      try {
+        if (kind === "folder") await api("/files", { method: "POST", body: { path } });
+        else await api("/file", { method: "PUT", body: { path, content: "", baseHash: null } });
+        // open the folders leading to it so it is visible
+        let node = root;
+        for (const part of parent(path).split("/").filter(Boolean)) {
+          await loadKids(node); // re-read: the folder may have just been created
+          const next = node.kids.find((k) => k.name === part && k.type === "dir");
+          if (!next) break;
+          node = next; node.open = true;
+        }
+        await refreshTree();
+        if (kind === "file") openFile(path);
+      } catch (e) { flash(e.message, "bad"); }
+    }
+
+    async function renameEntry(from) {
+      const input = prompt("Rename / move to (path relative to the workdir):", from);
+      if (!input) return;
+      const to = input.replace(/^\/+|\/+$/g, "");
+      if (to === from) return;
+      try {
+        await api("/files/rename", { method: "POST", body: { from, to } });
+        for (const t of tabs) {             // keep open tabs pointing at the moved files
+          if (t.path === from) t.path = to;
+          else if (t.path.startsWith(from + "/")) t.path = to + t.path.slice(from.length);
+          else continue;
+          applyMode(t);
+        }
+        if (active) $("#st-path").textContent = active.path;
+        renderTabs();
+        await refreshTree();
+      } catch (e) { flash(e.message, "bad"); }
+    }
+
+    async function deleteEntry(path, type) {
+      if (!confirm(`Delete ${type === "dir" ? "the folder" : "the file"} ${path}${type === "dir" ? " and everything in it" : ""}? This cannot be undone.`)) return;
+      try {
+        await api("/file" + qs(path), { method: "DELETE" });
+        for (const t of tabs.filter((t) => t.path === path || t.path.startsWith(path + "/"))) {
+          t.dirty = false; closeTab(t);
+        }
+        await refreshTree();
+      } catch (e) { flash(e.message, "bad"); }
+    }
+
+    $("#btn-newfile").onclick = () => newEntry("file");
+    $("#btn-newdir").onclick = () => newEntry("folder");
+    $("#btn-refresh").onclick = () => { refreshTree().catch(() => {}); fileList = null; };
+
+    // sidebar width
+    $("#grip").addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const move = (ev) => { $("#side").style.width = Math.max(140, Math.min(ev.clientX, innerWidth - 240)) + "px"; editor.resize(); };
+      const up = () => { removeEventListener("mousemove", move); removeEventListener("mouseup", up); };
+      addEventListener("mousemove", move); addEventListener("mouseup", up);
+    });
+
+    // ---- quick open (⌘P) ----
+    let fileList = null, palItems = [], palSel = 0;
+
+    /** Subsequence match; higher is better. Rewards runs, word starts, and hits in the file name. */
+    function score(path, query) {
+      const p = path.toLowerCase(), nameAt = p.lastIndexOf("/") + 1;
+      let s = 0, pi = 0, run = 0;
+      for (const ch of query) {
+        const at = p.indexOf(ch, pi);
+        if (at === -1) return -1;
+        run = at === pi ? run + 1 : 0;
+        s += 1 + run * 3 + (at >= nameAt ? 4 : 0) + (at === nameAt || "/._-".includes(p[at - 1]) ? 6 : 0);
+        pi = at + 1;
+      }
+      return s - path.length * 0.02;
+    }
+
+    function renderPalette() {
+      const query = $("#pal-input").value.trim().toLowerCase().replace(/\s+/g, "");
+      if (!fileList) { $("#pal-list").innerHTML = `<div class="pal-empty">indexing the workdir…</div>`; return; }
+      if (!query) palItems = tabs.map((t) => t.path).concat(fileList.filter((f) => !tabs.some((t) => t.path === f))).slice(0, 60);
+      else {
+        palItems = fileList.map((f) => [score(f, query), f]).filter((x) => x[0] >= 0)
+          .sort((a, b) => b[0] - a[0]).slice(0, 60).map((x) => x[1]);
+      }
+      palSel = Math.min(palSel, Math.max(0, palItems.length - 1));
+      $("#pal-list").innerHTML = palItems.length
+        ? palItems.map((f, i) => `<div class="pal-item${i === palSel ? " sel" : ""}" data-i="${i}">
+            <span>${esc(base(f))}</span><span class="dir">${esc(parent(f))}</span></div>`).join("")
+        : `<div class="pal-empty">no files match</div>`;
+      $("#pal-list .sel")?.scrollIntoView({ block: "nearest" });
+    }
+
+    async function openPalette() {
+      $("#palette").classList.add("show");
+      $("#pal-input").value = ""; palSel = 0;
+      $("#pal-input").focus();
+      renderPalette();
+      try { fileList = (await api("/files/index")).files; } // re-indexed each time: the agent adds files
+      catch (e) { fileList = fileList || []; flash(e.message, "bad"); }
+      renderPalette();
+    }
+    function closePalette() { $("#palette").classList.remove("show"); editor.focus(); }
+    function pickPalette(i) { const f = palItems[i]; closePalette(); if (f) openFile(f); }
+
+    $("#btn-open").onclick = openPalette;
+    $("#pal-input").addEventListener("input", () => { palSel = 0; renderPalette(); });
+    $("#pal-input").addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown") { e.preventDefault(); palSel = Math.min(palSel + 1, palItems.length - 1); renderPalette(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); palSel = Math.max(palSel - 1, 0); renderPalette(); }
+      else if (e.key === "Enter") { e.preventDefault(); pickPalette(palSel); }
+      else if (e.key === "Escape") { e.preventDefault(); closePalette(); }
+    });
+    $("#pal-list").addEventListener("click", (e) => { const it = e.target.closest(".pal-item"); if (it) pickPalette(+it.dataset.i); });
+    $("#palette").addEventListener("mousedown", (e) => { if (e.target === $("#palette")) closePalette(); });
+
+    // ---- keys ----
+    addEventListener("keydown", (e) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod || e.altKey) return;
+      const k = e.key.toLowerCase();
+      if (k === "s") { e.preventDefault(); save(); }
+      else if (k === "p" && !e.shiftKey) { e.preventDefault(); openPalette(); }
+    }, true);
+    addEventListener("beforeunload", (e) => { if (tabs.some((t) => t.dirty)) { e.preventDefault(); e.returnValue = ""; } });
+    addEventListener("resize", () => editor.resize());
+
+    // ---- boot ----
+    activate(null);
+    renderTree();
+    refreshTree().catch(() => {});
+  </script>
+</body>
+</html>

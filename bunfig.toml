@@ -1,0 +1,4 @@
+[test]
+# point the supervisor at a throwaway data dir + a stub `container` CLI before
+# any module reads config (src/config.ts captures env at import time)
+preload = ["./test/setup.ts"]
