@@ -56,8 +56,22 @@ async function projectForIp(ip: string): Promise<{ id: string; name: string } | 
 }
 
 // ---- loopback context (which decrypted connection belongs to which client) ----
-type Ctx = { scheme: "http" | "https"; clientIp: string; connectHost?: string };
+type Ctx = { scheme: "http" | "https"; clientIp: string; connectHost?: string; connectPort?: number };
 const ctxByPort = new Map<number, Ctx>();
+
+/** Split "host", "host:port" or "[v6]:port" — `def` when no port is given. */
+function splitHostPort(s: string, def: number): { host: string; port: number } {
+  const m = /^\[([^\]]+)\](?::(\d+))?$/.exec(s) ?? /^([^:]*)(?::(\d+))?$/.exec(s);
+  if (!m) return { host: s, port: def };
+  return { host: m[1], port: m[2] ? Number(m[2]) : def };
+}
+
+// The host's own loopback is never a legitimate guest target (the guest's own
+// localhost is in NO_PROXY and never reaches us) — and it is where the
+// unauthenticated supervisor API listens, so refuse it outright.
+const isLoopback = (host: string) =>
+  host === "localhost" || host.endsWith(".localhost") || /^127\./.test(host) ||
+  host === "0.0.0.0" || host === "::1" || host === "[::1]";
 
 let seq = 0;
 const rid = () => `${(++seq).toString(36)}-${Date.now().toString(36)}`;
@@ -66,13 +80,19 @@ const rid = () => `${(++seq).toString(36)}-${Date.now().toString(36)}`;
 function makeHandler(scheme: "http" | "https") {
   return async (req: IncomingMessage, res: ServerResponse) => {
     const ctx = ctxByPort.get(req.socket.remotePort!) ?? { scheme, clientIp: "" };
-    let host: string, path: string;
+    let host: string, path: string, port: number;
     if (scheme === "https") {
-      host = (req.headers.host || ctx.connectHost || "").split(":")[0];
+      host = splitHostPort(req.headers.host || ctx.connectHost || "", 443).host;
+      port = ctx.connectPort ?? 443; // the CONNECT target is authoritative for the port
       path = req.url || "/";
     } else {
-      try { const u = new URL(req.url!); host = u.hostname; path = u.pathname + u.search; }
-      catch { host = (req.headers.host || "").split(":")[0]; path = req.url || "/"; }
+      try {
+        const u = new URL(req.url!);
+        host = u.hostname; port = u.port ? Number(u.port) : 80; path = u.pathname + u.search;
+      } catch {
+        ({ host, port } = splitHostPort(req.headers.host || "", 80));
+        path = req.url || "/";
+      }
     }
     const method = req.method || "GET";
     const started = Date.now();
@@ -81,7 +101,8 @@ function makeHandler(scheme: "http" | "https") {
     const projectId = proj?.id ?? null;
 
     let verdict = evaluate(projectId, { host, path, method });
-    if (verdict.decision === "ask") {
+    if (isLoopback(host)) verdict = { decision: "block" };
+    else if (verdict.decision === "ask") {
       if (!projectId) verdict = { decision: "block" }; // unknown source: deny
       else verdict = { decision: await requestApproval({ projectId, host, method, scheme, path }) };
     }
@@ -103,7 +124,7 @@ function makeHandler(scheme: "http" | "https") {
 
     const mod = scheme === "https" ? https : http;
     const up = mod.request(
-      { host, port: scheme === "https" ? 443 : 80, method, path, headers: headers as any, servername: host },
+      { host, port, method, path, headers: headers as any, servername: host },
       (upRes) => {
         const out: Record<string, unknown> = { ...upRes.headers };
         if (projectId) applyHeaders(projectId, host, "response", out);
@@ -240,11 +261,11 @@ export async function startProxy(): Promise<void> {
       const [method, target] = buf.slice(0, nl).toString().split(" ");
       const ip = (socket.remoteAddress || "").replace(/^::ffff:/, "");
       if (method === "CONNECT") {
-        const host = (target || "").split(":")[0];
+        const { host, port: connectPort } = splitHostPort(target || "", 443);
         try {
           const port = await serverForHost(host);
           socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-          toLoopback(socket, port, { scheme: "https", clientIp: ip, connectHost: host });
+          toLoopback(socket, port, { scheme: "https", clientIp: ip, connectHost: host, connectPort });
           // no manual resume — toLoopback's pipe() resumes the socket
         } catch {
           try { socket.write("HTTP/1.1 502 Bad Gateway\r\n\r\n"); socket.end(); } catch {}

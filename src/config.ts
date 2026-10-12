@@ -12,6 +12,12 @@ export const config = {
   // where the proxy binds on the host. Default: the vmnet gateway (guest-only,
   // e.g. 192.168.64.1) auto-detected at start; SADBOX_PROXY_HOST overrides.
   proxyHost: process.env.SADBOX_PROXY_HOST || undefined,
+  // where inbound port forwards (host port → VM port) listen. All interfaces by
+  // default, so a forwarded app is reachable at <web UI's domain>:<port> from
+  // wherever the UI is — including when the UI itself sits on localhost behind
+  // a reverse proxy. Forwards are served as-is (no TLS, no auth in front);
+  // set SADBOX_FORWARD_HOST=localhost to keep them on this machine only.
+  forwardHost: process.env.SADBOX_FORWARD_HOST ?? "0.0.0.0",
   // how long a blocked request is held awaiting an approve/deny decision
   approvalTimeoutMs: Number(process.env.SADBOX_APPROVAL_TIMEOUT_MS ?? 120_000),
   // per-user state dir — works the same for a repo checkout or an installed binary

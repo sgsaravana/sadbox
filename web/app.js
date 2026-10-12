@@ -516,12 +516,14 @@ function showDetailSkeleton() {
        <div class="loading-bar"><span class="spinner"></span> Loading VM details…</div>
        <div class="detail-grid">${skeletonPanel(6) + skeletonPanel(6) + skeletonPanel(5) + skeletonPanel(4)}</div>
      </div>
+     <div id="detail-ports"></div>
      <div id="detail-net">${skeletonNet()}</div>
      <div class="sync-result"></div>`;
 }
 
 async function openDetail(id) {
   showDetailSkeleton();
+  openPorts(id);
   openNet(id);
   await renderDetail(id);
   clearInterval(detailTimer);
@@ -597,6 +599,62 @@ async function renderDetail(id) {
       </div>
     </div>
     ${d.error ? `<div class="panel" style="color:var(--bad)">${escapeHtml(d.error)}</div>` : ""}`;
+}
+
+// ---- port forwards panel (host port → VM port) ----
+async function openPorts(id) {
+  const el = $("#detail-ports");
+  if (!el) return;
+  el.innerHTML = `
+  <div class="panel net-panel">
+    <div class="net-head"><h3>Port forwards</h3></div>
+    <div class="net-section">
+      <div class="net-subhead">Open an app running in the VM <span class="hint">the app must listen on 0.0.0.0, not 127.0.0.1</span></div>
+      <div id="port-list"></div>
+      <form id="port-add" class="net-form">
+        <input name="guestPort" type="number" min="1" max="65535" placeholder="VM port (e.g. 8000)" required>
+        <span class="hint">→</span>
+        <input name="hostPort" type="number" min="1024" max="65535" placeholder="port on this host" required>
+        <button type="submit">Forward</button>
+      </form>
+    </div>
+  </div>`;
+  el.addEventListener("click", async (e) => {
+    const del = e.target.closest("[data-del-port]");
+    if (!del) return;
+    try { await api(`/api/projects/${id}/forwards/${del.dataset.delPort}`, { method: "DELETE" }); } catch {}
+    renderPorts(id);
+  });
+  el.querySelector("#port-add").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try {
+      await api(`/api/projects/${id}/forwards`, {
+        method: "POST",
+        body: { guestPort: Number(f.get("guestPort")), hostPort: Number(f.get("hostPort")) },
+      });
+      e.target.reset(); renderPorts(id);
+    } catch (err) { alert(err.message); }
+  });
+  renderPorts(id);
+}
+
+async function renderPorts(id) {
+  const el = $("#port-list");
+  if (!el) return;
+  let data;
+  try { data = await api(`/api/projects/${id}/forwards`); }
+  catch (e) { el.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  if (!data.forwards.length) { el.innerHTML = `<div class="empty">no ports forwarded</div>`; return; }
+  el.innerHTML = data.forwards.map((f) => {
+    const url = `http://${location.hostname}:${f.host_port}`;
+    return `<div class="rule">
+      <span class="ract ${f.active ? "allow" : "block"}">${f.active ? "open" : "down"}</span>
+      <span class="rspec"><a href="${url}" target="_blank" rel="noopener">${escapeHtml(location.hostname)}:${f.host_port}</a> → VM port ${f.guest_port}${
+        f.active ? "" : ` <span class="hint">host port was in use at startup</span>`}</span>
+      <button class="link-del" data-del-port="${f.id}" title="remove">✕</button>
+    </div>`;
+  }).join("");
 }
 
 // ---- network activity panel (per-project egress proxy) ----

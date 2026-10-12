@@ -171,6 +171,18 @@ db.run("CREATE INDEX IF NOT EXISTS net_header_rules_lookup ON net_header_rules(s
   if (!has) db.run("ALTER TABLE net_header_rules ADD COLUMN value_secret_id TEXT");
 }
 
+// Inbound port forwards: a listener on the supervisor host (host_port) piped to
+// a port inside one project's VM (guest_port). host_port is unique across all
+// projects — it is a real socket on this machine.
+db.run(`
+  CREATE TABLE IF NOT EXISTS port_forwards (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    host_port INTEGER NOT NULL UNIQUE,
+    guest_port INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
 export function logEvent(projectId: string | null, type: string, detail = "") {
   db.query("INSERT INTO events (project_id, type, detail) VALUES (?, ?, ?)").run(
     projectId, type, detail,
