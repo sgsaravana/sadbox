@@ -190,6 +190,19 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   which is everything the agent uses; a program making raw non-proxy sockets is
   not yet forced through it. Transparent nftables enforcement is a follow-up.)*
 
+- **Port forwards** (inbound): on the detail view, map a port on the supervisor
+  host to a port inside the VM (e.g. host `8080` → VM `8000`) and open the app
+  the agent is running at `<supervisor-host>:8080`. It is a raw TCP passthrough
+  (HTTP, WebSockets, anything) to the VM's vmnet address, so the app in the VM
+  must listen on `0.0.0.0`, not `127.0.0.1`. Forwards persist across supervisor
+  restarts and rebuilds and are removed with the project. They listen on all
+  interfaces, so a forward is reachable on the **same domain as the web UI**
+  with just the port changed (`http://sadbox.internal.example.com:8080`), even
+  when the UI itself is on localhost behind a reverse proxy. They are plain,
+  unauthenticated TCP — not behind that proxy's TLS or auth — so anyone who can
+  reach the host can reach a forwarded port; set `SADBOX_FORWARD_HOST=localhost`
+  to keep forwards on this machine only.
+
 ## API
 
 | Method | Path | |
@@ -211,6 +224,7 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 | POST | `/api/projects/:id/net/approvals/:aid` | resolve a held request (`{action, duration}`) |
 | GET/POST | `/api/projects/:id/net/rules`, DELETE `…/:rid` | per-project allow/block rules |
 | GET/POST | `/api/projects/:id/net/headers`, DELETE `…/:hid` | per-project header rewrites |
+| GET/POST | `/api/projects/:id/forwards`, DELETE `…/:fid` | port forwards (`{hostPort, guestPort}`) — host port → VM port |
 | GET/POST | `/api/net/rules`, DELETE `/api/net/rules/:id` | global allow/block rules |
 | GET/POST | `/api/net/headers`, DELETE `/api/net/headers/:id` | global header rewrites |
 | GET | `/api/net/pending` | `{projectId: count}` pending approvals (nav badges) |

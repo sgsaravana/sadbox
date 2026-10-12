@@ -5,6 +5,7 @@ import { config, VERSION } from "./config";
 import { baseImageFiles } from "./assets";
 import { startServer } from "./api/http";
 import { startProxy } from "./net/proxy";
+import { startForwards } from "./net/forwards";
 
 const BIN = config.containerBin;
 
@@ -87,7 +88,7 @@ Usage: sadbox <command>
   help       Show this help
 
 Env: SADBOX_PORT, SADBOX_HOST, SADBOX_PROXY_PORT, SADBOX_PROXY_HOST,
-     SADBOX_DATA, SADBOX_BASE_IMAGE`;
+     SADBOX_FORWARD_HOST, SADBOX_DATA, SADBOX_BASE_IMAGE`;
 
 export async function main(argv: string[]) {
   const cmd = argv[2] ?? "serve";
@@ -98,6 +99,7 @@ export async function main(argv: string[]) {
       // start (e.g. openssl missing) — the UI/API still work, egress just isn't
       // filtered until it's available.
       startProxy().catch((e) => console.error(`⚠ proxy not started: ${e instanceof Error ? e.message : e}`));
+      startForwards().catch((e) => console.error(`⚠ port forwards not started: ${e instanceof Error ? e.message : e}`));
       break;
     case "setup": await setup(); break;
     case "doctor": await doctor(); break;

@@ -14,6 +14,7 @@ import { createRule, deleteRule, listRules, createHeaderRule, deleteHeaderRule, 
 import { resolveApproval, listPending, pendingCounts } from "../net/approvals";
 import { recentRequests, subscribe } from "../net/events";
 import { caCertPem } from "../net/ca";
+import { createForward, deleteForward, listForwards } from "../net/forwards";
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
@@ -147,6 +148,16 @@ export function startServer() {
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/net\/headers\/([\w-]+)$/);
         if (m && req.method === "DELETE") { deleteHeaderRule(m[2]); return json({ ok: true }); }
+
+        // --- per-project port forwards (host port → VM port) ---
+        m = p.match(/^\/api\/projects\/([\w-]+)\/forwards$/);
+        if (m && req.method === "GET") return json({ host: config.forwardHost, forwards: listForwards(m[1]) });
+        if (m && req.method === "POST") {
+          const b = await req.json();
+          return json(await createForward(m[1], { hostPort: b.hostPort, guestPort: b.guestPort }), 201);
+        }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/forwards\/([\w-]+)$/);
+        if (m && req.method === "DELETE") { deleteForward(m[1], m[2]); return json({ ok: true }); }
 
         // --- global network rules + shared proxy endpoints ---
         if (p === "/api/net/rules" && req.method === "GET") return json(listRules());

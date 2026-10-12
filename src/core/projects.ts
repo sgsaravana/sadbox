@@ -9,6 +9,7 @@ import { installGuestProxy } from "../net/proxy";
 import { purgeProjectNet } from "../net/rules";
 import { clearProjectApprovals } from "../net/approvals";
 import { clearProjectFeed } from "../net/events";
+import { purgeProjectForwards } from "../net/forwards";
 import { vmToolchain, type ToolInfo } from "./toolchain";
 
 const driver = getDriver();
@@ -409,6 +410,7 @@ export async function destroyProject(id: string): Promise<void> {
   await driver.destroy(refFor(p.name));
   purgeProjectSecrets(id); // project-specific secrets die with the VM
   purgeProjectNet(id);     // per-project net rules die with the VM too
+  purgeProjectForwards(id); // …and so do its port forwards (frees the host ports)
   clearProjectApprovals(id);
   clearProjectFeed(id);
   db.query("UPDATE projects SET state = 'destroyed' WHERE id = ?").run(id);
