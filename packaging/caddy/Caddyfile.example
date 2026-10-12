@@ -6,10 +6,11 @@
 #
 #   - WebSocket (the browser terminal) is proxied automatically by Caddy v2.
 #   - `flush_interval -1` keeps the SSE network-activity feed streaming.
-#   - sadbox has NO auth of its own — protect it here (or with Tailscale /
-#     forward_auth). It can create/destroy VMs and open shells.
-#   - Only port 7070 is routed. Port 7071 is the VMs' internal egress proxy on
-#     the vmnet gateway (192.168.64.1) — leave it alone, never proxy it.
+#   - sadbox has its own password sign-in; basic_auth here (or Tailscale /
+#     forward_auth) is an optional second layer. It can create/destroy VMs
+#     and open shells, so always serve it over TLS.
+#   - Only port 7070 is routed. Port 7071 is the egress proxy for older VMs
+#     still on a network (it refuses anything else) — never proxy it.
 #   - Use a dedicated hostname (or root), not a subpath: sadbox serves from "/".
 
 # --- Option A: slot into an existing wildcard block (recommended) -------------

@@ -1,7 +1,8 @@
 // Apple `container` CLI driver (macOS). Every recipe here was proven in
 // spikes/a-terminal and spikes/b-image — see their READMEs for the gotchas.
+import { rm } from "fs/promises";
 import { config } from "../config";
-import type { ExecResult, TerminalHandle, ProjectDriver, ProjectInfo, ProjectStats } from "./types";
+import type { ByteStream, ExecResult, TerminalHandle, ProjectDriver, ProjectInfo, ProjectStats } from "./types";
 
 const BIN = config.containerBin;
 const volname = (ref: string) => `${ref}-workdir`;
@@ -27,10 +28,16 @@ function parseInfo(c: any): ProjectInfo | null {
   const ref = c?.configuration?.id;
   if (!ref) return null;
   const res = c?.configuration?.resources;
+  // status.networks is live; a stopped VM only has the configured attachment
+  const net = c?.status?.networks?.[0];
+  const configured = c?.configuration?.networks ?? [];
   return {
     ref,
     state: c?.status?.state === "running" ? "running" : "stopped",
-    address: (c?.status?.networks?.[0]?.ipv4Address as string | undefined)?.split("/")[0],
+    address: (net?.ipv4Address as string | undefined)?.split("/")[0],
+    gateway: net?.ipv4Gateway,
+    network: net?.network ?? configured[0]?.network,
+    isolated: !net && configured.length === 0,
     cpus: res?.cpus,
     memoryLimitBytes: res?.memoryInBytes,
   };
@@ -52,6 +59,13 @@ export const containerDriver: ProjectDriver = {
       const v = await run(["volume", "create", "-s", `${opts.diskGB}G`, vol]);
       if (v.exitCode !== 0) throw new Error(`volume create failed: ${v.stderr.trim()}`);
       res.push("--mount", `type=volume,source=${vol},target=${config.guestWorkdir}`);
+    }
+    if (opts?.network) res.push("--network", opts.network);
+    if (opts?.socket) {
+      // verified on container 1.4.1: the host side survives failed dials, the
+      // guest listener restarting, and the VM being stopped and started
+      await rm(opts.socket.host, { force: true }); // the runtime creates it
+      res.push("--publish-socket", `${opts.socket.host}:${opts.socket.guest}`);
     }
     const r = await run(["run", "--name", ref, "--detach", ...res, image]);
     if (r.exitCode !== 0) throw new Error(`container run failed: ${r.stderr.trim()}`);
@@ -118,8 +132,29 @@ export const containerDriver: ProjectDriver = {
     return run(["exec", ...user, ref, ...cmd]);
   },
 
-  async execWithStdin(ref, shellCmd, stdin) {
-    return run(["exec", "-i", ref, "sh", "-c", shellCmd], stdin);
+  async execWithStdin(ref, shellCmd, stdin, opts) {
+    const user = opts?.user ? ["-u", opts.user] : [];
+    return run(["exec", "-i", ...user, ref, "sh", "-c", shellCmd], stdin);
+  },
+
+  stream(ref, shellCmd): ByteStream {
+    let dataCb: (chunk: Uint8Array) => void = () => {};
+    let closeCb: () => void = () => {};
+    const proc = Bun.spawn([BIN, "exec", "-i", ref, "sh", "-c", shellCmd], {
+      stdin: "pipe", stdout: "pipe", stderr: "ignore",
+    });
+    (async () => {
+      try { for await (const chunk of proc.stdout) dataCb(chunk); } catch {}
+      await proc.exited.catch(() => {});
+      closeCb();
+    })();
+    return {
+      write(chunk) { try { proc.stdin.write(chunk); proc.stdin.flush(); } catch {} },
+      end() { try { proc.stdin.end(); } catch {} },
+      kill() { try { proc.kill(); } catch {} },
+      onData(cb) { dataCb = cb; },
+      onClose(cb) { closeCb = cb; },
+    };
   },
 
   async execCaptureBytes(ref, shellCmd) {

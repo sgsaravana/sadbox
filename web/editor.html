@@ -152,6 +152,7 @@
         headers: opts.body ? { "content-type": "application/json" } : undefined,
         body: opts.body ? JSON.stringify(opts.body) : undefined,
       });
+      if (r.status === 401) throw Object.assign(new Error("Signed out — sign in again in another tab, then retry"), { status: 401, data: {} });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw Object.assign(new Error(data.error || r.statusText), { status: r.status, data });
       return data;

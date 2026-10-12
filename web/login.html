@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in — sadbox</title>
+<style>
+  html, body { height: 100%; margin: 0; background: #0b0b0f; color: #e6e6ef; font: 14px/1.5 system-ui, -apple-system, sans-serif; }
+  body { display: flex; align-items: center; justify-content: center; }
+  form { width: min(340px, 88vw); background: #14141c; border: 1px solid #262636; border-radius: 12px; padding: 26px; }
+  h1 { margin: 0 0 4px; font-size: 18px; } h1 span { color: #5b8cff; }
+  p { margin: 0 0 18px; color: #8a8aa0; font-size: 13px; }
+  input { width: 100%; box-sizing: border-box; padding: 9px 11px; background: #0b0b0f; color: inherit;
+          border: 1px solid #262636; border-radius: 8px; font: inherit; outline: none; }
+  input:focus { border-color: #5b8cff; }
+  button { width: 100%; margin-top: 12px; padding: 9px; background: #5b8cff; color: #fff; border: 0; border-radius: 8px;
+           font: inherit; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .6; cursor: default; }
+  #err { min-height: 20px; margin-top: 10px; color: #ff6b6b; font-size: 13px; }
+  .hint { margin: 14px 0 0; font-size: 12px; } code { background: #0b0b0f; padding: 1px 5px; border-radius: 4px; }
+</style>
+<body>
+  <form id="f">
+    <h1><span>◈</span> sadbox</h1>
+    <p>Sign in to manage your project VMs.</p>
+    <input id="pw" type="password" placeholder="Password" autocomplete="current-password" autofocus required>
+    <button id="go" type="submit">Sign in</button>
+    <div id="err"></div>
+    <p class="hint">First time? The password is in <code>~/.sadbox/initial-password</code> on the machine running sadbox. Change it with <code>sadbox passwd</code>.</p>
+  </form>
+  <script>
+    const next = new URLSearchParams(location.search).get("next");
+    const dest = next && next.startsWith("/") && !next.startsWith("//") && !next.includes("\\") ? next : "/";
+    document.getElementById("f").onsubmit = async (e) => {
+      e.preventDefault();
+      const go = document.getElementById("go"), err = document.getElementById("err");
+      go.disabled = true; err.textContent = "";
+      try {
+        const r = await fetch("/api/auth/login", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ password: document.getElementById("pw").value }),
+        });
+        if (r.ok) { location.replace(dest); return; }
+        err.textContent = (await r.json().catch(() => ({}))).error || "Sign-in failed";
+      } catch { err.textContent = "Could not reach sadbox"; }
+      go.disabled = false;
+      document.getElementById("pw").select();
+    };
+  </script>
+</body>
+</html>

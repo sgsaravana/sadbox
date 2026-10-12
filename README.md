@@ -130,7 +130,9 @@ sadbox setup     # checks dependencies, starts the container system, builds the 
 sadbox serve     # http://localhost:7070
 ```
 
-Then, in the browser:
+The first `sadbox serve` generates a sign-in password, prints it once, and
+saves it in `~/.sadbox/initial-password`. Use it to sign in, or set your own
+with `sadbox passwd`. Then, in the browser:
 
 1. **Add a Claude credential** under **Secrets**: run `claude setup-token` on
    your Mac and save the result as `CLAUDE_CODE_OAUTH_TOKEN` (or save an
@@ -147,8 +149,8 @@ Then, in the browser:
    tree is never touched.
 
 `sadbox doctor` reports what is missing if something does not start. sadbox
-listens on localhost only and has no login of its own; see
-[Deploying](#deploying) before exposing it to other machines.
+listens on localhost only by default; see [Deploying](#deploying) before
+exposing it to other machines.
 
 To update, re-run the install script (or `git pull && bun install` from
 source), then `sadbox setup` again if the release notes mention a new base
@@ -160,6 +162,7 @@ image. To uninstall, remove the binary and `~/.sadbox`.
 sadbox serve     start the supervisor (default)
 sadbox setup     check deps, start container system, build the base image
 sadbox doctor    report environment health
+sadbox passwd    set the sign-in password
 sadbox version
 ```
 
@@ -263,22 +266,55 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   host, path, status, decision, size) over SSE. Wiring: guest tools honor
   `HTTP(S)_PROXY` → `net` proxy on the host catches `CONNECT`, MITMs via a
   per-host `https` server, filters/rewrites, forwards upstream, logs.
-  *(Cooperative: it covers proxy-aware tooling — curl, git, bun/node, pip —
-  which is everything the agent uses; a program making raw non-proxy sockets is
-  not yet forced through it. Transparent nftables enforcement is a follow-up.)*
+  **Isolated, not advisory:** a VM has **no network interface at all** — only
+  its own loopback. It cannot reach the internet, this machine, your LAN or
+  another VM, whatever runs in it and as whichever user (root included); there
+  is nothing to route around. Its single way out is a private socket to the
+  proxy: a small relay on the VM's loopback (what `HTTP(S)_PROXY` points at)
+  hands each connection to one the supervisor has dialed in, so the proxy
+  always knows exactly which project is asking. The proxy then decides
+  everything:
+  - **the internet** — by your rules and approvals, as above;
+  - **this machine** (loopback or any of its addresses) — never, whatever the
+    rules say;
+  - **your LAN** (private and link-local ranges) — only with a rule or approval
+    that names that host; a catch-all `*` rule does not cover it.
+
+  Destinations are judged by the address they resolve to, and the connection
+  is made to that same address, so a hostname cannot be used to dodge this.
+  Only HTTP(S) leaves a VM — no DNS, SSH or other protocols (use `https://`
+  git remotes). A VM that cannot be wired to the proxy fails to create. The
+  supervisor's own setup traffic (cloning the repo, extra apt packages) goes
+  through the proxy too, is logged, and skips the prompt only while setup
+  runs. If the supervisor restarts, running VMs wait and carry on; if the
+  relay in a VM dies, it is restarted within about half a minute. Projects
+  created before this still sit on Apple's NAT network with direct internet —
+  the detail view marks them **not isolated** — until you **Rebuild** them.
+  `SADBOX_NETWORK=default` opts out for new projects.
 
 - **Port forwards** (inbound): on the detail view, map a port on the supervisor
   host to a port inside the VM (e.g. host `8080` → VM `8000`) and open the app
-  the agent is running at `<supervisor-host>:8080`. It is a raw TCP passthrough
-  (HTTP, WebSockets, anything) to the VM's vmnet address, so the app in the VM
-  must listen on `0.0.0.0`, not `127.0.0.1`. Forwards persist across supervisor
-  restarts and rebuilds and are removed with the project. They listen on all
-  interfaces, so a forward is reachable on the **same domain as the web UI**
-  with just the port changed (`http://sadbox.internal.example.com:8080`), even
-  when the UI itself is on localhost behind a reverse proxy. They are plain,
-  unauthenticated TCP — not behind that proxy's TLS or auth — so anyone who can
-  reach the host can reach a forwarded port; set `SADBOX_FORWARD_HOST=localhost`
-  to keep forwards on this machine only.
+  the agent is running at `<supervisor-host>:8080`. Since a VM has no network
+  address, each connection is carried into the VM over `container exec` and
+  connected to the VM's own loopback — so it reaches whatever listens on that
+  port, bound to `127.0.0.1` or `0.0.0.0` alike, for HTTP, WebSockets or any
+  other TCP. Forwards persist across supervisor restarts and rebuilds and are
+  removed with the project. They listen on all interfaces of the host, so a
+  forward is reachable on the **same domain as the web UI** with just the port
+  changed (`http://sadbox.internal.example.com:8080`), even when the UI itself
+  is on localhost behind a reverse proxy. They are plain, unauthenticated TCP —
+  not behind that proxy's TLS or sadbox's sign-in — so anyone who can reach the
+  host can reach a forwarded port; set `SADBOX_FORWARD_HOST=localhost` to keep
+  forwards on this machine only.
+- **Sign-in**: the UI and API require a password (one user). A session is an
+  HttpOnly, `SameSite=Strict` cookie, valid 30 days; only the login page and
+  static scripts are served without one, and that includes the terminal
+  WebSocket, the editor and the file API. Requests carrying another site's
+  `Origin` are refused outright, so a web page you happen to visit cannot drive
+  a sadbox on your localhost. `sadbox passwd` changes the password and signs
+  every browser out; repeated wrong passwords are throttled. `SADBOX_PASSWORD`
+  sets the password from the environment instead; `SADBOX_AUTH=off` disables
+  sign-in (only sensible when something in front authenticates every request).
 
 ## API
 
@@ -310,6 +346,11 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 | GET/POST | `/api/net/headers`, DELETE `/api/net/headers/:id` | global header rewrites |
 | GET | `/api/net/pending` | `{projectId: count}` pending approvals (nav badges) |
 | GET | `/api/net/ca` | download the proxy CA (`.crt`) |
+| POST | `/api/auth/login`, `/api/auth/logout` | sign in (`{password}` → session cookie) / sign out |
+| GET | `/api/auth/status` | `{enabled, signedIn}` |
+
+Every endpoint except `/api/auth/login` and `/api/auth/status` needs the session
+cookie (`401` otherwise).
 
 ## Deploying
 
@@ -344,10 +385,11 @@ deployment path once the `kvm` driver lands, and it runs the UI/API anywhere.
 
 ### Serving to the LAN behind Caddy (Mac mini home server)
 
-sadbox binds **`localhost:7070`** by default and has **no auth**, so the right
+sadbox binds **`localhost:7070`** by default and speaks plain HTTP, so the right
 shape is: run it natively, leave it on localhost, and let the Caddy already on
-your Mac mini be the only network-facing piece — it terminates TLS, adds auth,
-and reverse-proxies to `127.0.0.1:7070`. A ready-to-adapt block is in
+your Mac mini be the only network-facing piece — it terminates TLS and
+reverse-proxies to `127.0.0.1:7070`. sadbox's own sign-in still applies behind
+it; Caddy's `basic_auth` is an optional second layer. A ready-to-adapt block is in
 [`packaging/caddy/Caddyfile.example`](packaging/caddy/Caddyfile.example).
 
 If you already terminate a **wildcard** cert (e.g. Cloudflare DNS challenge),
@@ -362,7 +404,7 @@ cert — then `wss://` (terminal) and SSE work with no client cert-trust steps:
 
     @sadbox host sadbox.internal.example.com
     handle @sadbox {
-        basic_auth {                 # sadbox has no auth — add it here
+        basic_auth {                 # optional — sadbox has its own sign-in
             admin $2a$14$…           # caddy hash-password
         }
         reverse_proxy 127.0.0.1:7070 {
@@ -383,11 +425,12 @@ Notes:
   streaming instead of buffering.
 - **Keep sadbox on localhost.** Since Caddy is on the same host you don't need
   `SADBOX_HOST=0.0.0.0`; leaving it on localhost means the only way in is
-  through Caddy (and its auth). Set `SADBOX_HOST` only if Caddy runs on a
+  through Caddy (and so over TLS — the sign-in password should never cross
+  the network in plain HTTP). Set `SADBOX_HOST` only if Caddy runs on a
   different machine.
-- **Only route 7070.** Port 7071 is the VMs' internal egress proxy on the vmnet
-  gateway (`192.168.64.1`) — it must stay reachable from the guests and must not
-  be proxied or exposed.
+- **Only route 7070.** Port 7071 is the egress proxy for older VMs that still
+  sit on a network (new ones use a private socket instead); it refuses any
+  client that is not a project VM and must not be proxied.
 - Use a **dedicated hostname** (or the root), not a subpath — sadbox serves its
   assets and API from `/`.
 - Run it under **launchd** so it survives reboots (or `brew services` once the
@@ -398,18 +441,26 @@ Notes:
 - A **local-folder** source must be a git repo with ≥ 1 commit (tar-out fallback
   for non-git folders is designed in `docs/research/06`, not built); or create
   from a **git URL** and the VM clones it instead.
-- Web UI has no auth — bind it to localhost (default) and, to reach it from
-  other machines, front it with an authenticating reverse proxy (see the Caddy
-  setup under [Deploying](#deploying)). Never expose `SADBOX_HOST=0.0.0.0`
-  without one.
+- The web UI speaks plain HTTP. It is password-protected, but to reach it from
+  other machines put a TLS reverse proxy in front (see the Caddy setup under
+  [Deploying](#deploying)) rather than exposing `SADBOX_HOST=0.0.0.0` directly,
+  or the password and session cookie cross the network unencrypted.
+- **Forwarded ports are not covered by sign-in**: they are raw TCP to the app
+  in the VM, reachable by anyone who can reach this machine on that port.
 - Apple silicon + macOS 26 only (see [Supported platforms](#supported-platforms));
   the Linux/Cloud Hypervisor driver and docker-compose packaging are designed
   (`docs/research/02`) but not built.
 - Secret rotation reaches new shells/panes only (env-file semantics).
-- The egress proxy is **cooperative** (VM tools honor `HTTP(S)_PROXY`): it
-  covers curl/git/bun/node/pip, but a program opening raw non-proxy sockets
-  bypasses it. Transparent nftables enforcement is designed, not built. Proxy
-  env + CA reach new shells only (same env-file semantics as secrets).
+- Egress is HTTP(S)-only, through the proxy; tools find it via
+  `HTTP(S)_PROXY` (curl, git, bun, pip do; Node's built-in `fetch` does with
+  `NODE_USE_ENV_PROXY=1`, which is set). A program that ignores those variables
+  has no network at all. WebSockets *out of* a VM are not supported by the
+  proxy. Projects created before isolation stay on the NAT network until
+  rebuilt. Proxy env + CA reach new shells only (same env-file semantics as
+  secrets).
+- VMs must be started by sadbox. One started by hand with `container start`
+  comes up without its proxy relay; sadbox restarts the relay within about
+  half a minute while the supervisor is running.
 - Claude Code auth: create a `CLAUDE_CODE_OAUTH_TOKEN` secret (from
   `claude setup-token` on the host) and assign it to projects — or an
   `ANTHROPIC_API_KEY`. See `docs/research/05`.

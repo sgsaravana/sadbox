@@ -12,6 +12,7 @@ const dir = mkdtempSync(join(tmpdir(), "sadbox-test-"));
 // guest shell snippets on this machine against a scratch workdir.
 const workdir = join(dir, "workdir");
 mkdirSync(workdir);
+const guestTools = join(dir, "guest-tools"); // stands in for /usr/local/lib/sadbox in the VM
 const bin = join(dir, "container");
 writeFileSync(bin, `#!/bin/sh
 case "$1" in
@@ -23,9 +24,9 @@ case "$1" in
   # preload) and the script must mention the workdir, so a snippet can never
   # run against wherever the test happened to be started from.
   exec) for last; do :; done
-        case "$last" in *"/home/agent/workdir"*) ;; *) echo "stub: script does not target the workdir" >&2; exit 97;; esac
+        case "$last" in *"/home/agent/workdir"*|*"/usr/local/lib/sadbox"*) ;; *) echo "stub: script does not target the workdir or the guest tools" >&2; exit 97;; esac
         cd "${workdir}" || exit 98
-        exec sh -c "$(printf %s "$last" | sed "s#/home/agent/workdir#${workdir}#g")";;
+        exec sh -c "$(printf %s "$last" | sed -e "s#/home/agent/workdir#${workdir}#g" -e "s#/usr/local/lib/sadbox#${guestTools}#g" -e "s#/home/agent/.bun/bin/bun#${process.execPath}#g")";;
   *) exit 1;;
 esac
 `);

@@ -5,11 +5,13 @@ import { db, logEvent } from "../db";
 import { getDriver } from "../driver";
 import { injectSecrets, assignSecrets, purgeProjectSecrets } from "./secrets";
 import { getSettings } from "./settings";
-import { installGuestProxy } from "../net/proxy";
+import { installGuestProxy, openProjectSocket, closeProjectSocket } from "../net/proxy";
+import { forgetGuestTools } from "../net/guest";
 import { purgeProjectNet } from "../net/rules";
 import { clearProjectApprovals } from "../net/approvals";
 import { clearProjectFeed } from "../net/events";
 import { purgeProjectForwards } from "../net/forwards";
+import { duringSetup } from "../net/setup";
 import { vmToolchain, type ToolInfo } from "./toolchain";
 
 const driver = getDriver();
@@ -135,15 +137,17 @@ async function configureGitRemote(ref: string, project: ProjectRow) {
 }
 
 /** Clone an external repo into the guest workdir (the "git only" create mode).
- *  Runs via a non-login `sh -c`, which doesn't source the proxy env — so the
- *  setup clone egresses directly through NAT rather than the block-by-default
- *  proxy (which has no approver during create). Clones to a temp dir then copies
- *  in, so it works even when workdir is a sized volume with a lost+found.
+ *  Goes out through the supervisor proxy like everything else — the VM has no
+ *  other route — so the proxy env is sourced here and the caller holds the
+ *  provisioning window open (nobody is there to approve the clone). Clones to a
+ *  temp dir then copies in, so it works even when workdir is a sized volume
+ *  with a lost+found.
  *  Returns the cloned default branch + its HEAD (the project's base). */
 async function cloneIntoWorkdir(ref: string, url: string, name: string): Promise<{ base: string; branch: string }> {
   const wd = config.guestWorkdir;
   const script =
     `set -e; ` +
+    `[ -f ${config.guestNetEnvFile} ] && . ${config.guestNetEnvFile}; ` +
     `tmp=$(mktemp -d); ` +
     `git clone --quiet ${shellArg(url)} "$tmp/repo"; ` +
     `mkdir -p ${wd}; ` +
@@ -183,8 +187,14 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   const ref = refFor(p.name);
   const cloneMode = !p.source_path; // no local folder → clone the git remote
   const s = getSettings();          // default resource allocation
+  // No network interface at all: the VM cannot reach the internet, this
+  // machine, the LAN or other VMs — whatever it runs, as whichever user. Its one
+  // way out is this project's own socket to the egress proxy.
+  const isolated = config.network === "none";
+  forgetGuestTools(ref); // a new VM under this name has a fresh filesystem
   await driver.create(ref, p.image, {
-    cpus: s.defaultCpus, memoryMB: s.defaultMemoryMB, diskGB: s.defaultDiskGB,
+    cpus: s.defaultCpus, memoryMB: s.defaultMemoryMB, diskGB: s.defaultDiskGB, network: config.network,
+    socket: isolated ? { host: openProjectSocket(p.id), guest: config.guestCarrierSocket } : undefined,
   });
 
   // a sized workdir volume mounts root-owned — hand it to the agent user
@@ -192,11 +202,24 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
     await driver.exec(ref, ["chown", "agent:agent", config.guestWorkdir], { user: "root" });
   }
 
+  // Trust the proxy CA + point the guest's tools at the proxy — before anything
+  // below needs the network. For a network-less VM the proxy is the only way
+  // out, so one that cannot be wired to it is a failed create. (On the
+  // unenforced NAT network it stays best-effort.)
+  try {
+    await installGuestProxy(ref);
+    logEvent(p.id, "proxy.configure", isolated ? "CA installed, egress only via supervisor" : "CA installed, egress routed via supervisor (not enforced)");
+  } catch (e) {
+    logEvent(p.id, "proxy.configure.error", String(e));
+    if (isolated) throw new Error(`could not connect the VM to the egress proxy: ${e instanceof Error ? e.message : e}`);
+  }
+
   if (cloneMode) {
     if (!p.git_remote) throw new Error("no git remote to clone from");
     // creds first (private repos), then clone straight into the workdir
     if (p.git_token_enc) await writeGitCredentials(ref, p.git_remote, decrypt(p.git_token_enc));
-    const info = await cloneIntoWorkdir(ref, p.git_remote, p.name);
+    const remote = p.git_remote;
+    const info = await duringSetup(p.id, () => cloneIntoWorkdir(ref, remote, p.name));
     db.query("UPDATE projects SET base_sha = ?, last_synced_sha = ?, source_branch = ? WHERE id = ?")
       .run(info.base, info.base, info.branch, p.id);
   } else {
@@ -225,27 +248,26 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   // secrets + proxy env source-hooks for the guest's shells (both modes)
   await installShellHooks(ref);
 
-  // route the VM's egress through the supervisor proxy: trust the CA + set
-  // proxy env for the agent's shells. Best-effort — a VM without it just
-  // egresses directly rather than failing to boot.
-  try {
-    await installGuestProxy(ref);
-    logEvent(p.id, "proxy.configure", "CA installed, egress routed via supervisor");
-  } catch (e) {
-    logEvent(p.id, "proxy.configure.error", String(e));
-  }
-
   // external git remote + credentials — local mode only; clone mode already has
   // origin (from the clone) and credentials written above.
   if (!cloneMode) await configureGitRemote(ref, p);
 
-  // extra apps (best effort — base toolchain is baked into the image)
-  for (const app of JSON.parse(p.apps || "[]") as string[]) {
-    const pkg = app.replace(/[^a-zA-Z0-9._+-]/g, "");
-    if (!pkg) continue;
-    const r = await driver.exec(ref, ["sh", "-c",
-      `command -v ${pkg} >/dev/null 2>&1 || sudo apt-get install -y -qq ${pkg}`]);
-    logEvent(p.id, "app.install", `${pkg}: exit ${r.exitCode}`);
+  // extra apps (best effort — base toolchain is baked into the image). Run as
+  // root with the proxy env, inside the provisioning window; the image ships
+  // without package lists, so refresh them first.
+  const apps = (JSON.parse(p.apps || "[]") as string[])
+    .map((a) => a.replace(/[^a-zA-Z0-9._+-]/g, "")).filter(Boolean);
+  if (apps.length) {
+    const env = `[ -f ${config.guestNetEnvFile} ] && . ${config.guestNetEnvFile}; export DEBIAN_FRONTEND=noninteractive; `;
+    await duringSetup(p.id, async () => {
+      const up = await driver.exec(ref, ["sh", "-c", env + "apt-get update -qq"], { user: "root" });
+      if (up.exitCode !== 0) logEvent(p.id, "app.install", `apt-get update: exit ${up.exitCode}`);
+      for (const pkg of apps) {
+        const r = await driver.exec(ref, ["sh", "-c",
+          env + `command -v ${pkg} >/dev/null 2>&1 || apt-get install -y -qq ${pkg}`], { user: "root" });
+        logEvent(p.id, "app.install", `${pkg}: exit ${r.exitCode}`);
+      }
+    });
   }
 
   // assign (create only) then (re)write the env file from whatever's assigned
@@ -411,6 +433,7 @@ export async function destroyProject(id: string): Promise<void> {
   purgeProjectSecrets(id); // project-specific secrets die with the VM
   purgeProjectNet(id);     // per-project net rules die with the VM too
   purgeProjectForwards(id); // …and so do its port forwards (frees the host ports)
+  closeProjectSocket(id);
   clearProjectApprovals(id);
   clearProjectFeed(id);
   db.query("UPDATE projects SET state = 'destroyed' WHERE id = ?").run(id);

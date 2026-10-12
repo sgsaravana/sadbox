@@ -6,6 +6,7 @@ import { baseImageFiles } from "./assets";
 import { startServer } from "./api/http";
 import { startProxy } from "./net/proxy";
 import { startForwards } from "./net/forwards";
+import { MIN_PASSWORD, authEnabled, ensurePassword, initialPasswordFile, setPassword } from "./core/auth";
 
 const BIN = config.containerBin;
 
@@ -77,6 +78,29 @@ async function doctor() {
   console.log(`proxy port:   ${config.proxyPort}`);
 }
 
+/** Read a line from the terminal without echoing it (falls back to a plain
+ *  read when stdin is not a TTY, e.g. `echo pw | sadbox passwd`). */
+async function readSecret(label: string): Promise<string> {
+  const tty = process.stdin.isTTY;
+  process.stdout.write(label);
+  if (tty) Bun.spawnSync(["stty", "-echo"], { stdin: "inherit" });
+  try {
+    for await (const line of console) return line;
+    return "";
+  } finally {
+    if (tty) { Bun.spawnSync(["stty", "echo"], { stdin: "inherit" }); process.stdout.write("\n"); }
+  }
+}
+
+async function passwd() {
+  const pw = await readSecret("New password: ");
+  if (pw.length < MIN_PASSWORD) { console.error(`✗ password must be at least ${MIN_PASSWORD} characters`); process.exit(1); }
+  if (process.stdin.isTTY && (await readSecret("Again: ")) !== pw) { console.error("✗ passwords do not match"); process.exit(1); }
+  await setPassword(pw);
+  console.log("✓ password set — every browser has been signed out");
+  if (process.env.SADBOX_PASSWORD) console.log("⚠ SADBOX_PASSWORD is set in this environment and takes precedence over the stored password");
+}
+
 const HELP = `sadbox v${VERSION} — supervisor for microVM AI-agent sandboxes
 
 Usage: sadbox <command>
@@ -84,16 +108,26 @@ Usage: sadbox <command>
   serve      Start the web supervisor (default)   http://localhost:${config.port}
   setup      Check deps, start container system, build the base image
   doctor     Report environment health
+  passwd     Set the sign-in password (signs every browser out)
   version    Print version
   help       Show this help
 
-Env: SADBOX_PORT, SADBOX_HOST, SADBOX_PROXY_PORT, SADBOX_PROXY_HOST,
+Env: SADBOX_PORT, SADBOX_HOST, SADBOX_PASSWORD, SADBOX_AUTH=off, SADBOX_NETWORK, SADBOX_PROXY_PORT, SADBOX_PROXY_HOST,
      SADBOX_FORWARD_HOST, SADBOX_DATA, SADBOX_BASE_IMAGE`;
 
 export async function main(argv: string[]) {
   const cmd = argv[2] ?? "serve";
   switch (cmd) {
     case "serve":
+      if (authEnabled()) {
+        const generated = await ensurePassword();
+        if (generated) {
+          console.log(`sadbox sign-in password (generated): ${generated}`);
+          console.log(`  also saved in ${initialPasswordFile()} — change it with 'sadbox passwd'`);
+        }
+      } else {
+        console.log("⚠ sign-in is OFF (SADBOX_AUTH=off): anyone who can reach this port controls every VM");
+      }
       startServer();
       // egress proxy for the VMs; runs alongside the API. Non-fatal if it can't
       // start (e.g. openssl missing) — the UI/API still work, egress just isn't
@@ -103,6 +137,7 @@ export async function main(argv: string[]) {
       break;
     case "setup": await setup(); break;
     case "doctor": await doctor(); break;
+    case "passwd": await passwd(); break;
     case "version": case "--version": case "-v": console.log(VERSION); break;
     case "help": case "--help": case "-h": console.log(HELP); break;
     default:

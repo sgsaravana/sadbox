@@ -25,6 +25,9 @@
         <a href="#settings" class="nav-item nav-bottom" data-view="settings">
           <span class="nav-ico">⚙</span> Settings
         </a>
+        <a href="#" class="nav-item" id="nav-signout" hidden>
+          <span class="nav-ico">⏻</span> Sign out
+        </a>
       </nav>
     </aside>
 
@@ -67,8 +70,8 @@
           <div class="feature">
             <span class="feat-ico">🛡️</span>
             <h3>Network firewall</h3>
-            <p>All egress routes through a filtering MITM proxy: block-by-default with time-boxed
-              approvals, allow/block + header rules, and a live request log.</p>
+            <p>VMs have no network at all; their only way out is a filtering MITM proxy:
+              block-by-default with time-boxed approvals, allow/block + header rules, and a live request log.</p>
           </div>
           <div class="feature">
             <span class="feat-ico">🔑</span>
@@ -107,7 +110,8 @@
             <li>Set default VM CPU / memory / disk and global network rules in <a href="#settings">Settings</a>.</li>
             <li>Add shared API keys and tokens under <a href="#secrets">Secrets</a>, then assign them to projects.</li>
             <li>For Claude Code auth, create a <code>CLAUDE_CODE_OAUTH_TOKEN</code> (or <code>ANTHROPIC_API_KEY</code>) secret and assign it to the project.</li>
-            <li>The web UI is localhost-only and has no auth — keep it on your machine.</li>
+            <li>VMs have no network of their own: they cannot reach the internet, this machine, your LAN or each other except through the proxy's rules. Projects created before this show <b>not isolated</b> on their detail page until you Rebuild them.</li>
+            <li>The web UI needs a password (<code>sadbox passwd</code> to change it) and listens on localhost only; put a TLS reverse proxy in front before reaching it from other machines.</li>
           </ul>
         </div>
       </section>

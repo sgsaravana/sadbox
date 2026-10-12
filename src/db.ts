@@ -183,6 +183,13 @@ db.run(`
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
 
+// Browser sessions (see core/auth.ts). Only a hash of each token is stored.
+db.run(`
+  CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    expires_at INTEGER NOT NULL                -- ms since epoch
+  )`);
+
 export function logEvent(projectId: string | null, type: string, detail = "") {
   db.query("INSERT INTO events (project_id, type, detail) VALUES (?, ?, ?)").run(
     projectId, type, detail,

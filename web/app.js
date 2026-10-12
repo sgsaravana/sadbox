@@ -5,6 +5,10 @@ const api = async (path, opts = {}) => {
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
+  if (r.status === 401) { // session ended — back to the login page, then return here
+    location.href = `/login?next=${encodeURIComponent(location.pathname + location.search + location.hash)}`;
+    return new Promise(() => {});
+  }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || r.statusText);
   return data;
@@ -561,7 +565,11 @@ async function renderDetail(id) {
         <h3>Status</h3>
         <dl>
           <dt>State</dt><dd><span class="dot ${state}"></span>${state}</dd>
-          <dt>IP address</dt><dd>${d.live?.address || "—"}</dd>
+          <dt>Network</dt><dd>${d.live?.isolated
+            ? `<span class="ok">isolated</span> <span class="hint">no network — proxy only</span>`
+            : d.live?.network
+              ? `<span style="color:var(--warn)">not isolated</span> <span class="hint">${escapeHtml(d.live.address || d.live.network)} · direct internet — Rebuild to isolate</span>`
+              : "—"}</dd>
           <dt>Uptime</dt><dd>${fmtDur(r.uptimeSec)}</dd>
           <dt>Image</dt><dd>${escapeHtml(d.image)}</dd>
           <dt>Active terminal</dt><dd>${term}</dd>
@@ -613,7 +621,7 @@ async function openPorts(id) {
   <div class="panel net-panel">
     <div class="net-head"><h3>Port forwards</h3></div>
     <div class="net-section">
-      <div class="net-subhead">Open an app running in the VM <span class="hint">the app must listen on 0.0.0.0, not 127.0.0.1</span></div>
+      <div class="net-subhead">Open an app running in the VM <span class="hint">any app listening on that port in the VM, on localhost or 0.0.0.0</span></div>
       <div id="port-list"></div>
       <form id="port-add" class="net-form">
         <input name="guestPort" type="number" min="1" max="65535" placeholder="VM port (e.g. 8000)" required>
@@ -963,6 +971,14 @@ async function sendApproval(aid, action, duration) {
 }
 
 const fmtClock = (ts) => new Date(ts).toTimeString().slice(0, 8);
+
+// sign out (the link only shows when sign-in is enabled)
+fetch("/api/auth/status").then((r) => r.json()).then((s) => { $("#nav-signout").hidden = !s.enabled; }).catch(() => {});
+$("#nav-signout").onclick = async (e) => {
+  e.preventDefault();
+  await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+  location.href = "/login";
+};
 
 // boot: secrets cache first (for create-form checkboxes), then route
 refreshSecrets().then(() => { if (!location.hash) location.hash = "home"; else route(); });
