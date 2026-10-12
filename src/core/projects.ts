@@ -3,14 +3,18 @@ import { config } from "../config";
 import { encrypt, decrypt } from "../crypto";
 import { db, logEvent } from "../db";
 import { getDriver } from "../driver";
+import type { ProjectStats } from "../driver/types";
 import { injectSecrets, assignSecrets, purgeProjectSecrets } from "./secrets";
 import { getSettings } from "./settings";
-import { installGuestProxy } from "../net/proxy";
+import { installGuestProxy, openProjectSocket, closeProjectSocket } from "../net/proxy";
+import { forgetGuestTools } from "../net/guest";
 import { purgeProjectNet } from "../net/rules";
 import { clearProjectApprovals } from "../net/approvals";
 import { clearProjectFeed } from "../net/events";
 import { purgeProjectForwards } from "../net/forwards";
-import { vmToolchain, type ToolInfo } from "./toolchain";
+import { duringSetup } from "../net/setup";
+import { type ToolInfo } from "./toolchain";
+import { forgetVitals, liveStats, liveToolchain, QUERY_TIMEOUT_MS } from "./vitals";
 
 const driver = getDriver();
 
@@ -26,6 +30,7 @@ export interface ProjectRow {
   apps: string;
   git_remote: string | null;
   git_token_enc: string | null;
+  sync_path: string | null;   // local folder connected to a cloned project (sync target only)
   error: string | null;
   created_at: string;
 }
@@ -36,6 +41,9 @@ export interface GitSetup {
 }
 
 export const refFor = (name: string) => `sadbox-${name}`;
+/** The local folder a project's work is synced into: the folder it was created
+ *  from, or one connected later to a project cloned from a git URL. */
+export const syncFolderOf = (p: Pick<ProjectRow, "source_path" | "sync_path">) => p.source_path || p.sync_path || "";
 export const branchFor = (name: string) => `sadbox/${name}`;
 
 async function hostGit(repo: string, args: string[]): Promise<{ code: number; out: string }> {
@@ -135,15 +143,17 @@ async function configureGitRemote(ref: string, project: ProjectRow) {
 }
 
 /** Clone an external repo into the guest workdir (the "git only" create mode).
- *  Runs via a non-login `sh -c`, which doesn't source the proxy env — so the
- *  setup clone egresses directly through NAT rather than the block-by-default
- *  proxy (which has no approver during create). Clones to a temp dir then copies
- *  in, so it works even when workdir is a sized volume with a lost+found.
+ *  Goes out through the supervisor proxy like everything else — the VM has no
+ *  other route — so the proxy env is sourced here and the caller holds the
+ *  provisioning window open (nobody is there to approve the clone). Clones to a
+ *  temp dir then copies in, so it works even when workdir is a sized volume
+ *  with a lost+found.
  *  Returns the cloned default branch + its HEAD (the project's base). */
 async function cloneIntoWorkdir(ref: string, url: string, name: string): Promise<{ base: string; branch: string }> {
   const wd = config.guestWorkdir;
   const script =
     `set -e; ` +
+    `[ -f ${config.guestNetEnvFile} ] && . ${config.guestNetEnvFile}; ` +
     `tmp=$(mktemp -d); ` +
     `git clone --quiet ${shellArg(url)} "$tmp/repo"; ` +
     `mkdir -p ${wd}; ` +
@@ -183,8 +193,14 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   const ref = refFor(p.name);
   const cloneMode = !p.source_path; // no local folder → clone the git remote
   const s = getSettings();          // default resource allocation
+  // No network interface at all: the VM cannot reach the internet, this
+  // machine, the LAN or other VMs — whatever it runs, as whichever user. Its one
+  // way out is this project's own socket to the egress proxy.
+  const isolated = config.network === "none";
+  forgetGuestTools(ref); // a new VM under this name has a fresh filesystem
   await driver.create(ref, p.image, {
-    cpus: s.defaultCpus, memoryMB: s.defaultMemoryMB, diskGB: s.defaultDiskGB,
+    cpus: s.defaultCpus, memoryMB: s.defaultMemoryMB, diskGB: s.defaultDiskGB, network: config.network,
+    socket: isolated ? { host: openProjectSocket(p.id), guest: config.guestCarrierSocket } : undefined,
   });
 
   // a sized workdir volume mounts root-owned — hand it to the agent user
@@ -192,11 +208,24 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
     await driver.exec(ref, ["chown", "agent:agent", config.guestWorkdir], { user: "root" });
   }
 
+  // Trust the proxy CA + point the guest's tools at the proxy — before anything
+  // below needs the network. For a network-less VM the proxy is the only way
+  // out, so one that cannot be wired to it is a failed create. (On the
+  // unenforced NAT network it stays best-effort.)
+  try {
+    await installGuestProxy(ref);
+    logEvent(p.id, "proxy.configure", isolated ? "CA installed, egress only via supervisor" : "CA installed, egress routed via supervisor (not enforced)");
+  } catch (e) {
+    logEvent(p.id, "proxy.configure.error", String(e));
+    if (isolated) throw new Error(`could not connect the VM to the egress proxy: ${e instanceof Error ? e.message : e}`);
+  }
+
   if (cloneMode) {
     if (!p.git_remote) throw new Error("no git remote to clone from");
     // creds first (private repos), then clone straight into the workdir
     if (p.git_token_enc) await writeGitCredentials(ref, p.git_remote, decrypt(p.git_token_enc));
-    const info = await cloneIntoWorkdir(ref, p.git_remote, p.name);
+    const remote = p.git_remote;
+    const info = await duringSetup(p.id, () => cloneIntoWorkdir(ref, remote, p.name));
     db.query("UPDATE projects SET base_sha = ?, last_synced_sha = ?, source_branch = ? WHERE id = ?")
       .run(info.base, info.base, info.branch, p.id);
   } else {
@@ -225,27 +254,26 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   // secrets + proxy env source-hooks for the guest's shells (both modes)
   await installShellHooks(ref);
 
-  // route the VM's egress through the supervisor proxy: trust the CA + set
-  // proxy env for the agent's shells. Best-effort — a VM without it just
-  // egresses directly rather than failing to boot.
-  try {
-    await installGuestProxy(ref);
-    logEvent(p.id, "proxy.configure", "CA installed, egress routed via supervisor");
-  } catch (e) {
-    logEvent(p.id, "proxy.configure.error", String(e));
-  }
-
   // external git remote + credentials — local mode only; clone mode already has
   // origin (from the clone) and credentials written above.
   if (!cloneMode) await configureGitRemote(ref, p);
 
-  // extra apps (best effort — base toolchain is baked into the image)
-  for (const app of JSON.parse(p.apps || "[]") as string[]) {
-    const pkg = app.replace(/[^a-zA-Z0-9._+-]/g, "");
-    if (!pkg) continue;
-    const r = await driver.exec(ref, ["sh", "-c",
-      `command -v ${pkg} >/dev/null 2>&1 || sudo apt-get install -y -qq ${pkg}`]);
-    logEvent(p.id, "app.install", `${pkg}: exit ${r.exitCode}`);
+  // extra apps (best effort — base toolchain is baked into the image). Run as
+  // root with the proxy env, inside the provisioning window; the image ships
+  // without package lists, so refresh them first.
+  const apps = (JSON.parse(p.apps || "[]") as string[])
+    .map((a) => a.replace(/[^a-zA-Z0-9._+-]/g, "")).filter(Boolean);
+  if (apps.length) {
+    const env = `[ -f ${config.guestNetEnvFile} ] && . ${config.guestNetEnvFile}; export DEBIAN_FRONTEND=noninteractive; `;
+    await duringSetup(p.id, async () => {
+      const up = await driver.exec(ref, ["sh", "-c", env + "apt-get update -qq"], { user: "root" });
+      if (up.exitCode !== 0) logEvent(p.id, "app.install", `apt-get update: exit ${up.exitCode}`);
+      for (const pkg of apps) {
+        const r = await driver.exec(ref, ["sh", "-c",
+          env + `command -v ${pkg} >/dev/null 2>&1 || apt-get install -y -qq ${pkg}`], { user: "root" });
+        logEvent(p.id, "app.install", `${pkg}: exit ${r.exitCode}`);
+      }
+    });
   }
 
   // assign (create only) then (re)write the env file from whatever's assigned
@@ -329,8 +357,19 @@ function kv(text: string): Record<string, string> {
 }
 
 /** Full detail view for one project: DB record + live VM state, resource
- *  usage (incl. sampled CPU %), and in-guest probes (disk, workdir, tmux). */
-export async function projectDetails(id: string) {
+ *  usage (incl. CPU %), and in-guest probes (disk, workdir, tmux). Requests for
+ *  the same project that overlap share one round of queries. */
+export function projectDetails(id: string) {
+  let pending = detailsInFlight.get(id);
+  if (!pending) {
+    pending = loadDetails(id).finally(() => detailsInFlight.delete(id));
+    detailsInFlight.set(id, pending);
+  }
+  return pending;
+}
+const detailsInFlight = new Map<string, ReturnType<typeof loadDetails>>();
+
+async function loadDetails(id: string) {
   const p = getProject(id);
   if (!p) throw new Error("project not found");
   const ref = refFor(p.name);
@@ -339,25 +378,21 @@ export async function projectDetails(id: string) {
   const running = info?.state === "running";
 
   let cpuPercent: number | null = null;
-  let stats = running ? await driver.stats(ref).catch(() => null) : null;
+  let stats: ProjectStats | null = null;
   let guest: Record<string, string> = {};
   let toolchain: ToolInfo[] | null = null;
+  let partial = false; // some readings are still on their way — ask again shortly
   if (running) {
-    const s0 = stats;
-    await Bun.sleep(700);
-    const s1 = await driver.stats(ref).catch(() => null);
-    if (s0?.cpuUsageUsec != null && s1?.cpuUsageUsec != null && info?.cpus) {
-      const delta = s1.cpuUsageUsec - s0.cpuUsageUsec; // usec of CPU time
-      cpuPercent = Math.max(0, Math.min(100, (delta / (700_000 * info.cpus)) * 100));
-    }
-    stats = s1 ?? s0;
-    // guest resource probe + installed-toolchain probe run in parallel
-    const [g, tc] = await Promise.all([
-      driver.exec(ref, ["sh", "-c", GUEST_PROBE]).catch(() => null),
-      vmToolchain(ref).catch(() => null),
+    // only the guest probe is waited for; see vitals.ts for the other two
+    const [g, live, tc] = await Promise.all([
+      driver.exec(ref, ["sh", "-c", GUEST_PROBE], { timeoutMs: QUERY_TIMEOUT_MS }).catch(() => null),
+      liveStats(ref, info?.cpus),
+      liveToolchain(ref),
     ]);
     if (g?.exitCode === 0) guest = kv(g.stdout);
-    toolchain = tc;
+    ({ stats, cpuPercent } = live);
+    toolchain = tc.tools;
+    partial = live.pending || tc.pending;
   }
 
   const num = (v: string | undefined) => (v ? Number(v) : null);
@@ -367,6 +402,8 @@ export async function projectDetails(id: string) {
     state: p.state,
     image: p.image,
     source_path: p.source_path,
+    sync_path: p.sync_path,           // folder connected to a cloned project, if any
+    sync_folder: syncFolderOf(p),     // where Sync back delivers ('' = nowhere yet)
     source_branch: p.source_branch,
     workdir: config.guestWorkdir,
     branch: branchFor(p.name),
@@ -377,6 +414,7 @@ export async function projectDetails(id: string) {
     has_git_token: p.git_token_enc != null,
     error: p.error,
     created_at: p.created_at,
+    partial,
     live: info,
     resources: {
       cpus: info?.cpus ?? null,
@@ -404,6 +442,36 @@ export async function projectDetails(id: string) {
   };
 }
 
+/** Connect a local folder to a project that was created from a git URL, so its
+ *  work can be synced back there (`path: null` disconnects). The folder must be
+ *  a git repository; it does not have to be a clone of the same remote, though
+ *  a sync is only a few commits when it is. Nothing in the folder is touched
+ *  here — or by a sync, which only adds a ref. A Rebuild still re-clones the
+ *  remote: this is where work goes, not where the VM comes from. */
+export async function connectSyncFolder(id: string, path: string | null) {
+  const p = getProject(id);
+  if (!p || p.state === "destroyed") throw new Error("project not found");
+  if (p.source_path) throw new Error("this project was created from a local folder and already syncs there");
+  if (path == null || !String(path).trim()) {
+    db.query("UPDATE projects SET sync_path = NULL WHERE id = ?").run(id);
+    logEvent(id, "sync.disconnect", p.sync_path ?? "");
+    return { sync_path: null, hasBase: null };
+  }
+  const given = String(path).trim();
+  if (!existsSync(given)) throw new Error(`folder not found: ${given}`);
+  const top = await hostGit(given, ["rev-parse", "--show-toplevel"]);
+  if (top.code !== 0) throw new Error("that folder is not a git repository — run `git init` in it (or clone the repo there) first");
+  const repo = top.out;
+  // does it already have the commit the VM started from? (true for a clone of
+  // the same remote that is reasonably up to date)
+  const hasBase = p.base_sha != null &&
+    (await hostGit(repo, ["cat-file", "-e", `${p.base_sha}^{commit}`])).code === 0;
+  // start over from the VM's base for this folder: it has received nothing yet
+  db.query("UPDATE projects SET sync_path = ?, last_synced_sha = base_sha WHERE id = ?").run(repo, id);
+  logEvent(id, "sync.connect", repo);
+  return { sync_path: repo, hasBase };
+}
+
 export async function destroyProject(id: string): Promise<void> {
   const p = getProject(id);
   if (!p) throw new Error("project not found");
@@ -411,8 +479,10 @@ export async function destroyProject(id: string): Promise<void> {
   purgeProjectSecrets(id); // project-specific secrets die with the VM
   purgeProjectNet(id);     // per-project net rules die with the VM too
   purgeProjectForwards(id); // …and so do its port forwards (frees the host ports)
+  closeProjectSocket(id);
   clearProjectApprovals(id);
   clearProjectFeed(id);
+  forgetVitals(refFor(getProject(id)?.name ?? ""));
   db.query("UPDATE projects SET state = 'destroyed' WHERE id = ?").run(id);
   logEvent(id, "destroy");
 }
@@ -443,6 +513,7 @@ export async function rebuildProject(id: string): Promise<ProjectRow> {
   db.query("UPDATE projects SET state = 'creating', error = NULL, image = ? WHERE id = ?").run(image, id);
   try {
     await driver.destroy(refFor(p.name)); // tear down the old VM; keep row + secrets + rules
+    forgetVitals(refFor(p.name));
     clearProjectApprovals(id);
     clearProjectFeed(id);
     await provisionVM(getProject(id)!); // fresh row (current image) → secrets re-injected inside
@@ -469,6 +540,7 @@ export async function projectsWithLiveState() {
     image: r.image,
     state: r.state,
     source_path: r.source_path,
+    sync_folder: syncFolderOf(r),
     source_branch: r.source_branch,
     git_remote: r.git_remote,
     has_git_token: r.git_token_enc != null,

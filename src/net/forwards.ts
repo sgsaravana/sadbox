@@ -1,13 +1,16 @@
 // Inbound port forwards: a TCP listener on the supervisor host (host_port) that
-// pipes every connection to a port inside one project's VM (guest_port), so an
-// app the agent is running in the VM can be opened at <supervisor-host>:<port>.
-// Plain TCP passthrough — works for HTTP, WebSockets, anything — reaching the
-// guest over its routable vmnet address, resolved per connection so a forward
-// survives a rebuild (new VM, new IP).
+// carries every connection to a port inside one project's VM (guest_port), so
+// an app the agent is running in the VM can be opened at <supervisor-host>:<port>.
+// VMs have no network interface, so there is no address to dial: each
+// connection rides an `exec` into the VM, where a small bridge connects it to
+// the guest's own loopback. That reaches apps bound to 127.0.0.1 as well as
+// 0.0.0.0, and survives a rebuild (the VM is looked up by name each time).
 import net from "node:net";
 import { config } from "../config";
 import { db, logEvent } from "../db";
 import { getDriver } from "../driver";
+import type { ByteStream } from "../driver/types";
+import { ensureGuestTools, guestConnectCmd } from "./guest";
 
 const driver = getDriver();
 // local copy of core/projects' refFor to avoid a forwards<->projects import cycle
@@ -25,20 +28,11 @@ export interface PortForward {
 type Live = { server: net.Server; sockets: Set<net.Socket> };
 const live = new Map<string, Live>();
 
-// ---- guest address, cached briefly per project ----
-const addrCache = new Map<string, { ip: string; at: number }>();
-
-async function guestAddress(projectId: string): Promise<string | null> {
-  const hit = addrCache.get(projectId);
-  if (hit && Date.now() - hit.at < 3000) return hit.ip;
+function refOf(projectId: string): string | null {
   const p = db.query<{ name: string }, [string]>(
     "SELECT name FROM projects WHERE id=? AND state != 'destroyed'",
   ).get(projectId);
-  if (!p) return null;
-  const info = await driver.inspect(refFor(p.name)).catch(() => null);
-  if (!info?.address) return null;
-  addrCache.set(projectId, { ip: info.address, at: Date.now() });
-  return info.address;
+  return p ? refFor(p.name) : null;
 }
 
 // ---- listeners ----
@@ -47,31 +41,32 @@ function listen(f: PortForward): Promise<void> {
     const sockets = new Set<net.Socket>();
     const server = net.createServer(async (client) => {
       sockets.add(client);
-      client.on("close", () => sockets.delete(client));
       client.on("error", () => {});
-      // Queue the client's bytes until the guest side is connected. Not
+      // Queue the client's bytes until the bridge into the VM is up. Not
       // pause()+pipe(): under Bun a socket paused before it ever flowed is not
       // resumed by pipe(), and the connection hangs with nothing forwarded.
-      let up: net.Socket | null = null;
-      let queue: Buffer[] | null = [];
-      client.on("data", (d: Buffer) => {
-        if (queue) { queue.push(d); return; }
-        if (!up!.write(d)) client.pause();
-      });
-      client.on("end", () => { if (!queue) up?.end(); });
-      const ip = await guestAddress(f.project_id);
-      if (!ip || client.destroyed) { client.destroy(); return; }
-      const conn = up = net.connect(f.guest_port, ip, () => {
-        for (const d of queue!) conn.write(d);
-        queue = null;
-        if (client.readableEnded) conn.end();
-        conn.pipe(client);
-      });
-      up.on("drain", () => client.resume());
-      sockets.add(up);
-      up.on("close", () => { sockets.delete(up); client.destroy(); });
-      up.on("error", () => { addrCache.delete(f.project_id); client.destroy(); });
-      client.on("close", () => conn.destroy());
+      let tunnel: ByteStream | null = null;
+      let queue: Uint8Array[] | null = [];
+      let ended = false;
+      client.on("data", (d: Buffer) => { if (queue) queue.push(d); else tunnel!.write(d); });
+      client.on("end", () => { ended = true; if (!queue) tunnel!.end(); });
+      client.on("close", () => { sockets.delete(client); tunnel?.kill(); });
+
+      const ref = refOf(f.project_id);
+      try {
+        if (!ref) throw new Error("project is gone");
+        await ensureGuestTools(ref);
+      } catch { client.destroy(); return; }
+      if (client.destroyed) return;
+
+      tunnel = driver.stream(ref, guestConnectCmd(f.guest_port));
+      tunnel.onData((chunk) => { try { client.write(chunk); } catch {} });
+      // the bridge exits when the app closes the connection, or at once when
+      // nothing is listening on that port in the VM
+      tunnel.onClose(() => { try { client.end(); } catch {} });
+      for (const d of queue!) tunnel.write(d);
+      queue = null;
+      if (ended) tunnel.end();
     });
     server.once("error", reject);
     server.listen(f.host_port, config.forwardHost, () => {
@@ -145,7 +140,6 @@ export function deleteForward(projectId: string, id: string): void {
 export function purgeProjectForwards(projectId: string): void {
   for (const f of listForwards(projectId)) unlisten(f.id);
   db.query("DELETE FROM port_forwards WHERE project_id=?").run(projectId);
-  addrCache.delete(projectId);
 }
 
 /** Re-open every stored forward at supervisor start. A port that is no longer

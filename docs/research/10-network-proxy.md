@@ -116,11 +116,31 @@ and reading it back as `req.socket.remotePort` in the handler.
 
 ## Not built yet
 
-- **Transparent enforcement.** The proxy is cooperative (env-var based): it
-  covers proxy-aware tooling (curl/git/bun/node/pip — everything the agent
-  uses), but a program opening raw non-proxy sockets bypasses it. A guest
-  nftables ruleset that forces all egress through the proxy port (and blocks the
-  rest) is the follow-up for a hard boundary.
-- **Ingress.** VMs have no public inbound on the NAT network; "incoming" today
-  means the response half of egress (captured and logged). Port-forwarded
-  inbound would be a separate feature.
+- ~~**Transparent enforcement.**~~ **Built 2026-10-12**, differently from the
+  plan. A guest nftables ruleset would not have held: the agent has passwordless
+  sudo and could flush it. What was built instead, each step verified on a real
+  VM (container 1.4.1):
+  1. *Host-only vmnet network* (`container network create --internal`): blocks
+     the internet, but the guest still reaches every service on the host (by
+     its LAN address too) and every other VM. Rejected — the requirement is
+     that a VM reaches nothing but the proxy.
+  2. *No network interface* (`--network none`): the guest has only `lo`. This
+     is the model. It needs a non-IP channel for the proxy.
+  3. *Channel, first try — SSH-agent forwarding as a generic socket relay*
+     (`--ssh` with `SSH_AUTH_SOCK` pointed at a proxy socket). Works, but if a
+     guest connects while the host socket is absent (supervisor restarting) the
+     runtime's relay dies until the VM is restarted. Rejected.
+  4. *Channel, final — `--publish-socket`*, the documented guest→host socket.
+     A relay in the guest listens on a unix socket (published to the host) and
+     on the guest's loopback (the HTTP proxy address). The host keeps a small
+     pool of idle connections dialed into the published socket; the relay joins
+     each guest client to one, and its first bytes are an ordinary proxy
+     request. No framing, the host always dials, and the published socket
+     recovers from failed dials, a restarted guest listener, and VM stop/start.
+     Attribution is by socket, not source address.
+  Port forwards go the other way over `container exec -i` into a stdin/stdout ↔
+  loopback bridge, per connection (~100 ms to connect; 30 MB in ~0.2 s).
+  The proxy runs on the host, so it must not become the way back in: targets
+  are classified by resolved address (self / private / public) and the upstream
+  connection is pinned to that address.
+- ~~**Ingress.**~~ Port forwards (host port → VM port) are built; see the README.

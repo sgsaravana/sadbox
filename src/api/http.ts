@@ -6,8 +6,9 @@ import { staticRoutes, aceFiles } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
 import { assignSecrets, createGlobalSecret, createProjectSecret, deleteSecret, injectSecrets, listGlobalSecrets, projectSecretView } from "../core/secrets";
-import { createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject } from "../core/projects";
+import { connectSyncFolder, createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject } from "../core/projects";
 import { syncStatus, syncProject } from "../core/sync";
+import { terminalLinks } from "../core/links";
 import { getSettings, updateSettings } from "../core/settings";
 import { baseImageToolchain } from "../core/toolchain";
 import { createRule, deleteRule, listRules, createHeaderRule, deleteHeaderRule, listHeaderRules } from "../net/rules";
@@ -15,6 +16,7 @@ import { resolveApproval, listPending, pendingCounts } from "../net/approvals";
 import { recentRequests, subscribe } from "../net/events";
 import { caCertPem } from "../net/ca";
 import { createForward, deleteForward, listForwards } from "../net/forwards";
+import { AuthError, authEnabled, clearCookie, crossOrigin, login, logout, safeNext, sessionCookie, signedIn, tokenFrom } from "../core/auth";
 import { FileError, deletePath, fileIndex, listDir, makeDir, readFile, renamePath, writeFile } from "../core/files";
 
 const json = (data: unknown, status = 200) =>
@@ -63,8 +65,50 @@ export function startServer() {
       const url = new URL(req.url);
       const p = url.pathname;
 
-      // terminal websocket: /projects/:id/term?cols=N&rows=N
       const termMatch = p.match(/^\/projects\/([\w-]+)\/term$/);
+
+      // Another site's page must never drive this API or open a terminal, even
+      // when sign-in is off: browsers attach an Origin to exactly these requests.
+      if ((termMatch || !["GET", "HEAD", "OPTIONS"].includes(req.method)) && crossOrigin(req)) {
+        return json({ error: "cross-origin request refused" }, 403);
+      }
+
+      // --- sign-in ---
+      if (p === "/api/auth/login" && req.method === "POST") {
+        try {
+          const b = await req.json().catch(() => ({}));
+          const token = await login(b.password);
+          return new Response(JSON.stringify({ ok: true }), {
+            headers: { "content-type": "application/json", "set-cookie": sessionCookie(req, token) },
+          });
+        } catch (e) {
+          return json({ error: e instanceof Error ? e.message : String(e) }, e instanceof AuthError ? e.status : 400);
+        }
+      }
+      if (p === "/api/auth/logout" && req.method === "POST") {
+        logout(tokenFrom(req));
+        return new Response(JSON.stringify({ ok: true }), {
+          headers: { "content-type": "application/json", "set-cookie": clearCookie() },
+        });
+      }
+      if (p === "/api/auth/status" && req.method === "GET") {
+        return json({ enabled: authEnabled(), signedIn: signedIn(req) });
+      }
+      // Everything else needs a session, except the login page and the static
+      // script/style/vendor files (which are just this public repo's assets).
+      const page = p === "/" || p === "/terminal" || p === "/editor";
+      const needsSession = page || termMatch != null || p.startsWith("/api/");
+      if (needsSession && !signedIn(req)) {
+        if (page) {
+          return new Response(null, { status: 302, headers: { location: `/login?next=${encodeURIComponent(p + url.search)}` } });
+        }
+        return json({ error: "not signed in" }, 401);
+      }
+      if (p === "/login" && signedIn(req)) {
+        return new Response(null, { status: 302, headers: { location: safeNext(url.searchParams.get("next")) } });
+      }
+
+      // terminal websocket: /projects/:id/term?cols=N&rows=N
       if (termMatch) {
         const cols = Math.max(2, Number(url.searchParams.get("cols")) || 80);
         const rows = Math.max(2, Number(url.searchParams.get("rows")) || 24);
@@ -118,8 +162,16 @@ export function startServer() {
           const b = await req.json().catch(() => ({}));
           return json(await syncProject(m[1], { autocommit: b.autocommit ?? true }));
         }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/term\/links$/);
+        if (m && req.method === "GET") return json(await terminalLinks(m[1]));
         m = p.match(/^\/api\/projects\/([\w-]+)\/rebuild$/);
         if (m && req.method === "POST") return json(await rebuildProject(m[1]));
+        m = p.match(/^\/api\/projects\/([\w-]+)\/sync-folder$/);
+        if (m && req.method === "PUT") {            // connect a local folder to a cloned project
+          const b = await req.json();
+          return json(await connectSyncFolder(m[1], b.path ?? null));
+        }
+        if (m && req.method === "DELETE") return json(await connectSyncFolder(m[1], null));
         m = p.match(/^\/api\/projects\/([\w-]+)\/sync\/status$/);
         if (m && req.method === "GET") return json(await syncStatus(m[1]));
 
@@ -277,7 +329,9 @@ export function startServer() {
         // up mirroring the same session and fighting over its size.
         const term = driver.terminal(
           refFor(proj.name),
-          ["tmux", "new-session", "-A", "-D", "-s", config.tmuxSession],
+          // -c: if the session has to be created here (the last shell was exited,
+          // or the VM was restarted), start it in the workdir like the original
+          ["tmux", "new-session", "-A", "-D", "-s", config.tmuxSession, "-c", config.guestWorkdir],
           { cols: ws.data.cols, rows: ws.data.rows },
         );
         term.onData((chunk) => ws.send(chunk));

@@ -6,9 +6,11 @@
 // bundles it into the executable — the import resolves to a path Bun.file() can
 // read both in dev (real path on disk) and in the single-binary build.
 import indexHtml from "../web/index.html" with { type: "file" };
+import loginHtml from "../web/login.html" with { type: "file" };
 import terminalHtml from "../web/terminal.html" with { type: "file" };
 import appJs from "../web/app.js" with { type: "file" };
 import styleCss from "../web/style.css" with { type: "file" };
+import netAsksJs from "../web/net-asks.js" with { type: "file" };
 import xtermJs from "../node_modules/@xterm/xterm/lib/xterm.js" with { type: "file" };
 import xtermCss from "../node_modules/@xterm/xterm/css/xterm.css" with { type: "file" };
 import addonFitJs from "../node_modules/@xterm/addon-fit/lib/addon-fit.js" with { type: "file" };
@@ -84,8 +86,10 @@ import baseTmuxConf from "../images/base/tmux.conf" with { type: "file" };
 export const staticRoutes: Record<string, [string, string]> = {
   "/": [indexHtml, "text/html; charset=utf-8"],
   "/terminal": [terminalHtml, "text/html; charset=utf-8"],
+  "/login": [loginHtml, "text/html; charset=utf-8"],
   "/app.js": [appJs, "text/javascript"],
   "/style.css": [styleCss, "text/css"],
+  "/net-asks.js": [netAsksJs, "text/javascript"],
   "/vendor/xterm.js": [xtermJs, "text/javascript"],
   "/vendor/xterm.css": [xtermCss, "text/css"],
   "/vendor/addon-fit.js": [addonFitJs, "text/javascript"],

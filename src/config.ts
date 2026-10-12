@@ -5,13 +5,33 @@ export const VERSION = "0.2.0";
 
 export const config = {
   port: Number(process.env.SADBOX_PORT ?? 7070),
-  // localhost by default (no auth yet) — set SADBOX_HOST=0.0.0.0 to expose
+  // localhost by default (plain HTTP; front it with TLS before exposing it) —
+  // SADBOX_HOST=0.0.0.0 listens on every interface
   host: process.env.SADBOX_HOST ?? "localhost",
+  // sign-in for the UI/API: on unless SADBOX_AUTH=off (only sensible when
+  // something in front already authenticates every request, WebSockets included)
+  auth: process.env.SADBOX_AUTH === "off" ? "off" : "on",
+  // when set, this is the password (instead of the one stored in the data dir)
+  password: process.env.SADBOX_PASSWORD || undefined,
   // the egress proxy that every project VM routes its traffic through.
   proxyPort: Number(process.env.SADBOX_PROXY_PORT ?? 7071),
-  // where the proxy binds on the host. Default: the vmnet gateway (guest-only,
-  // e.g. 192.168.64.1) auto-detected at start; SADBOX_PROXY_HOST overrides.
+  // where the proxy binds on the host. All interfaces by default — a VM
+  // network's gateway address only exists while a VM is up, so it cannot be
+  // bound at start — and the proxy itself refuses any client that is not a
+  // project VM. SADBOX_PROXY_HOST overrides.
   proxyHost: process.env.SADBOX_PROXY_HOST || undefined,
+  // New project VMs get NO network interface ("none"): they cannot reach the
+  // internet, this machine, the LAN or each other. The only way out is a private
+  // socket to the egress proxy, which decides what may pass. Set
+  // SADBOX_NETWORK=default for Apple's NAT network instead (direct internet,
+  // rules not enforced).
+  network: process.env.SADBOX_NETWORK ?? "none",
+  // the proxy as a network-less VM sees it: a relay on the guest's own loopback,
+  // fed by connections the host dials into guestCarrierSocket
+  guestProxyPort: 7071,
+  guestCarrierSocket: "/run/sadbox/proxy.sock",
+  guestToolsDir: "/usr/local/lib/sadbox",
+  guestBun: "/home/agent/.bun/bin/bun",
   // where inbound port forwards (host port → VM port) listen. All interfaces by
   // default, so a forwarded app is reachable at <web UI's domain>:<port> from
   // wherever the UI is — including when the UI itself sits on localhost behind
@@ -38,6 +58,8 @@ export const config = {
   tmuxSession: "main",
 };
 
+// per-project proxy sockets (one per VM, so the proxy knows who is asking)
+export const runDir = () => join(config.dataDir, "run");
 export const dbPath = () => join(config.dataDir, "sadbox.db");
 export const keyPath = () => join(config.dataDir, "master.key");
 

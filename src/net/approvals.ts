@@ -35,7 +35,10 @@ const DURATIONS: Record<string, number | null> = {
 };
 
 function view(p: Pending): PendingView {
-  return { id: p.id, projectId: p.projectId, host: p.host, method: p.method, scheme: p.scheme, path: p.path, ts: p.ts };
+  return {
+    id: p.id, projectId: p.projectId, host: p.host, method: p.method, scheme: p.scheme, path: p.path, ts: p.ts,
+    expiresAt: p.ts + config.approvalTimeoutMs,
+  };
 }
 
 /** Hold a request until it is approved or denied. Resolves with the decision. */

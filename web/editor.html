@@ -135,6 +135,7 @@
   <script src="/vendor/ace/ext-modelist.js"></script>
   <script src="/vendor/ace/ext-searchbox.js"></script>
   <script src="/vendor/ace/theme-one_dark.js"></script>
+  <script src="/net-asks.js"></script>
   <script>
     const $ = (s) => document.querySelector(s);
     const params = new URLSearchParams(location.search);
@@ -152,6 +153,7 @@
         headers: opts.body ? { "content-type": "application/json" } : undefined,
         body: opts.body ? JSON.stringify(opts.body) : undefined,
       });
+      if (r.status === 401) throw Object.assign(new Error("Signed out — sign in again in another tab, then retry"), { status: 401, data: {} });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw Object.assign(new Error(data.error || r.statusText), { status: r.status, data });
       return data;
@@ -543,6 +545,13 @@
     }, true);
     addEventListener("beforeunload", (e) => { if (tabs.some((t) => t.dirty)) { e.preventDefault(); e.returnValue = ""; } });
     addEventListener("resize", () => editor.resize());
+
+    // popups for requests from this VM that the proxy is holding (see /net-asks.js)
+    sadboxNetAsks({
+      projectId,
+      notify: (msg, warn) => flash(msg, warn ? "bad" : "ok"),
+      onAnswered: () => { if (active) editor.focus(); },
+    });
 
     // ---- boot ----
     activate(null);

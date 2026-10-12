@@ -1,23 +1,37 @@
 // Apple `container` CLI driver (macOS). Every recipe here was proven in
 // spikes/a-terminal and spikes/b-image — see their READMEs for the gotchas.
+import { rm } from "fs/promises";
 import { config } from "../config";
-import type { ExecResult, TerminalHandle, ProjectDriver, ProjectInfo, ProjectStats } from "./types";
+import type { ByteStream, ExecResult, TerminalHandle, ProjectDriver, ProjectInfo, ProjectStats } from "./types";
 
 const BIN = config.containerBin;
 const volname = (ref: string) => `${ref}-workdir`;
 
-async function run(args: string[], stdin?: Blob | Uint8Array): Promise<ExecResult> {
+/** `timeoutMs` gives up on the command if it has not finished by then (it is
+ *  killed and reported as exit 124) — for status queries, which hang rather
+ *  than fail when a VM or the container service is stuck. */
+async function run(args: string[], stdin?: Blob | Uint8Array, timeoutMs?: number): Promise<ExecResult> {
   const proc = Bun.spawn([BIN, ...args], {
     stdin: stdin ?? "ignore",
     stdout: "pipe",
     stderr: "pipe",
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
+  const done = Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
     proc.exited,
-  ]);
-  return { exitCode, stdout, stderr };
+  ]).then(([stdout, stderr, exitCode]) => ({ exitCode, stdout, stderr }));
+  if (!timeoutMs) return done;
+  let timer: Timer | undefined;
+  // not waited for after the kill: a child of the command may still hold its pipes
+  const gaveUp = new Promise<ExecResult>((resolve) => {
+    timer = setTimeout(() => {
+      proc.kill("SIGKILL");
+      done.catch(() => {});
+      resolve({ exitCode: 124, stdout: "", stderr: `timed out after ${timeoutMs} ms` });
+    }, timeoutMs);
+  });
+  return Promise.race([done, gaveUp]).finally(() => clearTimeout(timer));
 }
 
 // inspect/list element shape (verified against container CLI 1.4.1):
@@ -27,10 +41,16 @@ function parseInfo(c: any): ProjectInfo | null {
   const ref = c?.configuration?.id;
   if (!ref) return null;
   const res = c?.configuration?.resources;
+  // status.networks is live; a stopped VM only has the configured attachment
+  const net = c?.status?.networks?.[0];
+  const configured = c?.configuration?.networks ?? [];
   return {
     ref,
     state: c?.status?.state === "running" ? "running" : "stopped",
-    address: (c?.status?.networks?.[0]?.ipv4Address as string | undefined)?.split("/")[0],
+    address: (net?.ipv4Address as string | undefined)?.split("/")[0],
+    gateway: net?.ipv4Gateway,
+    network: net?.network ?? configured[0]?.network,
+    isolated: !net && configured.length === 0,
     cpus: res?.cpus,
     memoryLimitBytes: res?.memoryInBytes,
   };
@@ -52,6 +72,13 @@ export const containerDriver: ProjectDriver = {
       const v = await run(["volume", "create", "-s", `${opts.diskGB}G`, vol]);
       if (v.exitCode !== 0) throw new Error(`volume create failed: ${v.stderr.trim()}`);
       res.push("--mount", `type=volume,source=${vol},target=${config.guestWorkdir}`);
+    }
+    if (opts?.network) res.push("--network", opts.network);
+    if (opts?.socket) {
+      // verified on container 1.4.1: the host side survives failed dials, the
+      // guest listener restarting, and the VM being stopped and started
+      await rm(opts.socket.host, { force: true }); // the runtime creates it
+      res.push("--publish-socket", `${opts.socket.host}:${opts.socket.guest}`);
     }
     const r = await run(["run", "--name", ref, "--detach", ...res, image]);
     if (r.exitCode !== 0) throw new Error(`container run failed: ${r.stderr.trim()}`);
@@ -91,8 +118,8 @@ export const containerDriver: ProjectDriver = {
     }
   },
 
-  async stats(ref): Promise<ProjectStats | null> {
-    const r = await run(["stats", "--no-stream", "--format", "json", ref]);
+  async stats(ref, timeoutMs): Promise<ProjectStats | null> {
+    const r = await run(["stats", "--no-stream", "--format", "json", ref], undefined, timeoutMs);
     if (r.exitCode !== 0) return null;
     try {
       const j = JSON.parse(r.stdout);
@@ -115,11 +142,32 @@ export const containerDriver: ProjectDriver = {
 
   async exec(ref, cmd, opts) {
     const user = opts?.user ? ["-u", opts.user] : [];
-    return run(["exec", ...user, ref, ...cmd]);
+    return run(["exec", ...user, ref, ...cmd], undefined, opts?.timeoutMs);
   },
 
-  async execWithStdin(ref, shellCmd, stdin) {
-    return run(["exec", "-i", ref, "sh", "-c", shellCmd], stdin);
+  async execWithStdin(ref, shellCmd, stdin, opts) {
+    const user = opts?.user ? ["-u", opts.user] : [];
+    return run(["exec", "-i", ...user, ref, "sh", "-c", shellCmd], stdin);
+  },
+
+  stream(ref, shellCmd): ByteStream {
+    let dataCb: (chunk: Uint8Array) => void = () => {};
+    let closeCb: () => void = () => {};
+    const proc = Bun.spawn([BIN, "exec", "-i", ref, "sh", "-c", shellCmd], {
+      stdin: "pipe", stdout: "pipe", stderr: "ignore",
+    });
+    (async () => {
+      try { for await (const chunk of proc.stdout) dataCb(chunk); } catch {}
+      await proc.exited.catch(() => {});
+      closeCb();
+    })();
+    return {
+      write(chunk) { try { proc.stdin.write(chunk); proc.stdin.flush(); } catch {} },
+      end() { try { proc.stdin.end(); } catch {} },
+      kill() { try { proc.kill(); } catch {} },
+      onData(cb) { dataCb = cb; },
+      onClose(cb) { closeCb = cb; },
+    };
   },
 
   async execCaptureBytes(ref, shellCmd) {

@@ -5,6 +5,10 @@ const api = async (path, opts = {}) => {
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
+  if (r.status === 401) { // session ended — back to the login page, then return here
+    location.href = `/login?next=${encodeURIComponent(location.pathname + location.search + location.hash)}`;
+    return new Promise(() => {});
+  }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || r.statusText);
   return data;
@@ -127,7 +131,7 @@ async function refreshProjects() {
         <button data-details="${p.id}">Details</button>
         <button data-term="${p.id}" data-name="${p.name}">Terminal ↗</button>
         <button data-edit="${p.id}" data-name="${p.name}">Editor ↗</button>
-        ${p.source_path ? `<button data-sync="${p.id}">Sync back</button>` : ""}
+        ${p.sync_folder ? `<button data-sync="${p.id}">Sync back</button>` : ""}
         <button data-secrets="${p.id}" data-name="${p.name}">Secrets…</button>
         <button class="danger" data-destroy="${p.id}" data-name="${p.name}">Destroy</button>
       </div>
@@ -151,11 +155,21 @@ document.addEventListener("click", async (e) => {
       const r = await api(`/api/projects/${b.dataset.sync}/sync`, { method: "POST", body: {} });
       const out = r.upToDate
         ? "Already up to date."
-        : `Fetched into ${r.ref} (${r.bundleBytes} bytes)\n\n${r.commits}\n\n${r.diffstat}\n\nApply with e.g.:\n  git merge ${r.ref}`;
+        : `Fetched into ${r.ref} in ${r.folder} (${r.bundleBytes} bytes${r.fullHistory ? ", full history — the folder did not have the starting commit" : ""})\n\n${r.commits}\n\n${r.diffstat}\n\nApply with e.g.:\n  git -C ${r.folder} merge ${r.ref}`;
       const container = b.closest(".card") || $("#view-detail");
       container.querySelector(".sync-result").innerHTML =
         `<pre class="result">${escapeHtml(out)}</pre>`;
       b.disabled = false; b.textContent = "Sync back";
+    } else if (b.dataset.linkFolder) {
+      // connect a local folder to a project cloned from a git URL (reuses the folder picker)
+      const id = b.dataset.linkFolder;
+      pickerOnSelect = (path) => { setSyncFolder(id, path); };
+      picker.showModal();
+      loadDir(b.dataset.current || null).catch(() => loadDir(null));
+    } else if (b.dataset.unlinkFolder) {
+      if (confirm("Disconnect this folder? Nothing in it is changed; the project just stops syncing there.")) {
+        setSyncFolder(b.dataset.unlinkFolder, null);
+      }
     } else if (b.dataset.secrets) {
       openProjectSecrets(b.dataset.secrets, b.dataset.name || b.closest(".card")?.querySelector("h3").textContent.trim() || "project");
     } else if (b.dataset.rebuild) {
@@ -247,6 +261,7 @@ $("#psec-apply").onclick = async () => {
 // ---- folder picker ----
 const picker = $("#picker");
 let pickerPath = null;
+let pickerOnSelect = null; // what to do with the chosen folder (default: fill the create form)
 
 async function loadDir(path) {
   const q = path ? `?path=${encodeURIComponent(path)}` : "";
@@ -264,6 +279,7 @@ async function loadDir(path) {
 }
 
 $("#btn-browse").onclick = () => {
+  pickerOnSelect = null;
   picker.showModal();
   loadDir($("#create-form").sourcePath.value.trim() || null).catch(() => loadDir(null));
 };
@@ -274,7 +290,8 @@ $("#picker-list").onclick = (e) => {
   if (li) loadDir(li.dataset.dir).catch((err) => alert(err.message));
 };
 $("#picker-select").onclick = () => {
-  if (pickerPath) $("#create-form").sourcePath.value = pickerPath;
+  const done = pickerOnSelect; pickerOnSelect = null;
+  if (pickerPath) { if (done) done(pickerPath); else $("#create-form").sourcePath.value = pickerPath; }
   picker.close();
 };
 
@@ -535,11 +552,64 @@ async function openDetail(id) {
   }, 4000);
 }
 
+// Loading a project's details takes a few seconds (live VM stats), so a change
+// to its connected folder is shown at once instead of waiting for that:
+//   folderPending — a connect/disconnect is in flight (the row shows a spinner)
+//   folderKnown   — its outcome, applied over any details that were requested
+//                   before it happened and would otherwise flip the row back
+let lastDetail = null;
+let folderPending = null; // { id, label }
+let folderKnown = null;   // { id, path: string | null, at: ms }
+
 async function renderDetail(id) {
   let d;
   const stats = $("#detail-stats") || $("#detail-body");
+  const asked = Date.now();
   try { d = await api(`/api/projects/${id}/details`); }
   catch (e) { stats.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  if (folderKnown && folderKnown.id === id && asked < folderKnown.at) {
+    d.sync_path = folderKnown.path;
+    d.sync_folder = d.source_path || folderKnown.path || "";
+  }
+  lastDetail = d;
+  paintDetail(d);
+  // usage and tool versions were still being read — fetch again shortly rather
+  // than leaving the gaps until the regular refresh
+  if (d.partial) {
+    clearTimeout(partialTimer);
+    partialTimer = setTimeout(() => { if (location.hash === `#project/${id}`) renderDetail(id); }, 1000);
+  }
+}
+let partialTimer = null;
+
+/** Change the connected folder of a cloned project (path null = disconnect),
+ *  with the row showing progress straight away. */
+async function setSyncFolder(id, path) {
+  folderPending = { id, label: path ? "Connecting…" : "Disconnecting…" };
+  if (lastDetail?.id === id) paintDetail(lastDetail);
+  try {
+    const r = path
+      ? await api(`/api/projects/${id}/sync-folder`, { method: "PUT", body: { path } })
+      : await api(`/api/projects/${id}/sync-folder`, { method: "DELETE" });
+    folderKnown = { id, path: r.sync_path, at: Date.now() };
+    folderPending = null;
+    if (lastDetail?.id === id) {
+      lastDetail.sync_path = r.sync_path;
+      lastDetail.sync_folder = lastDetail.source_path || r.sync_path || "";
+      paintDetail(lastDetail);
+    }
+    if (r.hasBase === false) {
+      alert(`Connected ${r.sync_path}.\n\nThis folder does not contain the commit the VM started from, so the first sync will bring the branch's full history rather than just the new commits. (If it is a clone of the same repository, a 'git fetch' there first keeps syncs small.)`);
+    }
+  } catch (err) {
+    folderPending = null;
+    if (lastDetail?.id === id) paintDetail(lastDetail);
+    alert(err.message);
+  }
+}
+
+function paintDetail(d) {
+  const stats = $("#detail-stats") || $("#detail-body");
   $("#detail-name").textContent = d.name;
   const state = d.live?.state === "running" ? "running" : d.state;
   const r = d.resources;
@@ -550,7 +620,7 @@ async function renderDetail(id) {
   $("#detail-actions").innerHTML = `
     <button data-term="${d.id}" data-name="${d.name}">Terminal ↗</button>
     <button data-edit="${d.id}" data-name="${d.name}" title="Browse and edit the workdir">Editor ↗</button>
-    ${d.source_path ? `<button data-sync="${d.id}">Sync back</button>` : ""}
+    ${d.sync_folder ? `<button data-sync="${d.id}">Sync back</button>` : ""}
     <button data-secrets="${d.id}">Secrets…</button>
     <button data-rebuild="${d.id}" data-name="${d.name}" title="Destroy the VM and recreate it from the original source">Rebuild</button>
     <button class="danger" data-destroy="${d.id}" data-name="${d.name}">Destroy</button>`;
@@ -561,7 +631,11 @@ async function renderDetail(id) {
         <h3>Status</h3>
         <dl>
           <dt>State</dt><dd><span class="dot ${state}"></span>${state}</dd>
-          <dt>IP address</dt><dd>${d.live?.address || "—"}</dd>
+          <dt>Network</dt><dd>${d.live?.isolated
+            ? `<span class="ok">isolated</span> <span class="hint">no network — proxy only</span>`
+            : d.live?.network
+              ? `<span style="color:var(--warn)">not isolated</span> <span class="hint">${escapeHtml(d.live.address || d.live.network)} · direct internet — Rebuild to isolate</span>`
+              : "—"}</dd>
           <dt>Uptime</dt><dd>${fmtDur(r.uptimeSec)}</dd>
           <dt>Image</dt><dd>${escapeHtml(d.image)}</dd>
           <dt>Active terminal</dt><dd>${term}</dd>
@@ -584,7 +658,15 @@ async function renderDetail(id) {
       <div class="panel stat">
         <h3>Folder & git</h3>
         <dl>
-          <dt>Source</dt><dd class="mono">${d.source_path ? escapeHtml(d.source_path) : "git clone (no local folder)"}</dd>
+          <dt>Source</dt><dd class="mono">${d.source_path ? escapeHtml(d.source_path) : "git clone"}</dd>
+          ${d.source_path ? "" : `<dt>Local folder</dt><dd>${folderPending?.id === d.id
+            ? `<span class="spinner"></span> <span class="dim">${folderPending.label}</span>`
+            : d.sync_path
+            ? `<span class="mono">${escapeHtml(d.sync_path)}</span>
+               <button class="mini" data-link-folder="${d.id}" data-current="${escapeHtml(d.sync_path)}" title="Sync into a different folder">Change</button>
+               <button class="mini" data-unlink-folder="${d.id}">Disconnect</button>`
+            : `<span class="dim">not connected</span>
+               <button class="mini" data-link-folder="${d.id}" title="Pick a local git repository to sync this project's work into">Connect a folder…</button>`}</dd>`}
           <dt>Workdir (in VM)</dt><dd class="mono">${escapeHtml(d.workdir)}</dd>
           <dt>Work branch</dt><dd class="mono">${escapeHtml(d.branch)}</dd>
           <dt>Uncommitted</dt><dd>${d.git.dirty ?? 0} file(s)</dd>
@@ -596,7 +678,7 @@ async function renderDetail(id) {
         <h3>Installed tools</h3>
         <div class="toolchain">${
           state === "running"
-            ? (d.toolchain ? toolchainHtml(d.toolchain) : `<span class="hint">could not probe</span>`)
+            ? (d.toolchain ? toolchainHtml(d.toolchain) : `<span class="hint">${d.partial ? "checking…" : "could not probe"}</span>`)
             : `<span class="hint">start the VM to detect</span>`
         }</div>
         <dl><dt>Extra apt</dt><dd>${d.apps.length ? d.apps.map(escapeHtml).join(", ") : "none"}</dd></dl>
@@ -613,7 +695,7 @@ async function openPorts(id) {
   <div class="panel net-panel">
     <div class="net-head"><h3>Port forwards</h3></div>
     <div class="net-section">
-      <div class="net-subhead">Open an app running in the VM <span class="hint">the app must listen on 0.0.0.0, not 127.0.0.1</span></div>
+      <div class="net-subhead">Open an app running in the VM <span class="hint">any app listening on that port in the VM, on localhost or 0.0.0.0</span></div>
       <div id="port-list"></div>
       <form id="port-add" class="net-form">
         <input name="guestPort" type="number" min="1" max="65535" placeholder="VM port (e.g. 8000)" required>
@@ -963,6 +1045,14 @@ async function sendApproval(aid, action, duration) {
 }
 
 const fmtClock = (ts) => new Date(ts).toTimeString().slice(0, 8);
+
+// sign out (the link only shows when sign-in is enabled)
+fetch("/api/auth/status").then((r) => r.json()).then((s) => { $("#nav-signout").hidden = !s.enabled; }).catch(() => {});
+$("#nav-signout").onclick = async (e) => {
+  e.preventDefault();
+  await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+  location.href = "/login";
+};
 
 // boot: secrets cache first (for create-form checkboxes), then route
 refreshSecrets().then(() => { if (!location.hash) location.hash = "home"; else route(); });

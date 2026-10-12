@@ -47,7 +47,10 @@ db.run(`
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
 // add git columns to a pre-git projects table
-for (const [col, ddl] of [["git_remote", "git_remote TEXT"], ["git_token_enc", "git_token_enc TEXT"]]) {
+// sync_path: a local folder connected after the fact to a project that was
+// created from a git URL (source_path ''), so its work can be synced back. Kept
+// apart from source_path, which is what a Rebuild recreates the VM from.
+for (const [col, ddl] of [["git_remote", "git_remote TEXT"], ["git_token_enc", "git_token_enc TEXT"], ["sync_path", "sync_path TEXT"]]) {
   const has = db.query<{ name: string }, []>("PRAGMA table_info(projects)").all().some((c) => c.name === col);
   if (!has) db.run(`ALTER TABLE projects ADD COLUMN ${ddl}`);
 }
@@ -181,6 +184,13 @@ db.run(`
     host_port INTEGER NOT NULL UNIQUE,
     guest_port INTEGER NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+// Browser sessions (see core/auth.ts). Only a hash of each token is stored.
+db.run(`
+  CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    expires_at INTEGER NOT NULL                -- ms since epoch
   )`);
 
 export function logEvent(projectId: string | null, type: string, detail = "") {
