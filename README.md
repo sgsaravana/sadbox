@@ -1,6 +1,7 @@
 # sadbox
 
-Supervisor for **microVM AI-agent sandboxes** on macOS. Spin up isolated Linux
+Supervisor for **microVM AI-agent sandboxes** on macOS (Apple silicon, macOS 26+
+— see [Supported platforms](#supported-platforms)). Spin up isolated Linux
 microVMs — each one a **project** — with a copy of a source folder and Claude
 Code + toolchain baked in; watch and steer the agent through a browser terminal
 attached to tmux inside the VM; manage per-project secrets; pull the agent's
@@ -37,18 +38,38 @@ pushing a tag — `git tag v0.1.0 && git push --tags`. Publishing a release runs
 rewrites the line above with the newest tag, its date, and a link to the notes.
 Browse them all on the [releases page](https://github.com/sgsaravana/sadbox/releases).
 
+## Supported platforms
+
+**sadbox fully works on one platform today: an Apple silicon Mac running
+macOS 26 (Tahoe) or later.** Everywhere else the binary starts and serves the
+web UI and API, but it cannot create project VMs — which is the whole point —
+so treat those platforms as unsupported.
+
+| Platform | Project VMs | Notes |
+|---|---|---|
+| **Mac, Apple silicon (M1 or later), macOS 26+** | ✅ **Supported** | The only fully working setup. |
+| Mac, Apple silicon, macOS 15 or earlier | ❌ | Apple's `container` CLI requires macOS 26. Upgrade macOS. |
+| Mac, Intel | ❌ | Apple's `container` CLI is Apple silicon only; `brew install container` refuses to install. No Intel backend is planned. |
+| Linux (arm64 / x64) | ❌ Not yet | Needs the KVM / Cloud Hypervisor driver, which is designed (`docs/research/02`) but not built. |
+| Docker / any container, on any host | ❌ | A containerized supervisor cannot reach the host's hypervisor; see [Deploying](#deploying). |
+| Windows | ❌ | No build, none planned. |
+
+Why so narrow: every project is a real microVM, and sadbox creates them through
+Apple's [`container`](https://github.com/apple/container) tool, which only
+exists for Apple silicon on macOS 26+. Release binaries are also published for
+Intel Macs and Linux (`sadbox-darwin-x64`, `sadbox-linux-*`) so the UI can be
+run or demoed there, and for the Linux driver to come — not because projects
+work on them.
+
 ## Requirements
 
-- A Mac with **Apple silicon** running **macOS 26 (Tahoe) or later** — project
-  VMs run on Apple's Virtualization.framework
+On a supported Mac:
+
 - Apple's [`container`](https://github.com/apple/container) CLI:
   `brew install container`
 - `git`, and `openssl` on PATH (both ship with macOS / the Xcode command line
   tools) — the egress proxy uses openssl to mint its CA and certificates
 - [Bun](https://bun.com) ≥ 1.3.5 — only if you run from source
-
-The binaries also build for Intel Macs and Linux, but there they serve the web
-UI and API only: creating project VMs needs the macOS `container` driver.
 
 ## Install
 
@@ -381,8 +402,9 @@ Notes:
   other machines, front it with an authenticating reverse proxy (see the Caddy
   setup under [Deploying](#deploying)). Never expose `SADBOX_HOST=0.0.0.0`
   without one.
-- macOS/`container` driver only; the Linux/Cloud Hypervisor driver and
-  docker-compose packaging are designed (`docs/research/02`) but not built.
+- Apple silicon + macOS 26 only (see [Supported platforms](#supported-platforms));
+  the Linux/Cloud Hypervisor driver and docker-compose packaging are designed
+  (`docs/research/02`) but not built.
 - Secret rotation reaches new shells/panes only (env-file semantics).
 - The egress proxy is **cooperative** (VM tools honor `HTTP(S)_PROXY`): it
   covers curl/git/bun/node/pip, but a program opening raw non-proxy sockets
