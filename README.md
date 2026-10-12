@@ -39,53 +39,99 @@ Browse them all on the [releases page](https://github.com/sgsaravana/sadbox/rele
 
 ## Requirements
 
-- macOS 26+, Apple silicon
-- Apple `container` CLI: `brew install container`
-- `openssl` on PATH (ships with macOS) — the egress proxy mints its CA + certs
-- (dev only) [Bun](https://bun.com) ≥ 1.3.5
+- A Mac with **Apple silicon** running **macOS 26 (Tahoe) or later** — project
+  VMs run on Apple's Virtualization.framework
+- Apple's [`container`](https://github.com/apple/container) CLI:
+  `brew install container`
+- `git`, and `openssl` on PATH (both ship with macOS / the Xcode command line
+  tools) — the egress proxy uses openssl to mint its CA and certificates
+- [Bun](https://bun.com) ≥ 1.3.5 — only if you run from source
+
+The binaries also build for Intel Macs and Linux, but there they serve the web
+UI and API only: creating project VMs needs the macOS `container` driver.
 
 ## Install
 
-The repo is currently **private**, so the public install paths (Homebrew, the
-`curl | sh` script) don't work yet — they need a public repo + release. Install
-from source or from a locally-built binary.
-
-**From source (recommended while private):**
-```sh
-git clone git@github.com:sgsaravana/sadbox.git && cd sadbox
-bun install
-bun run setup      # check deps, start container system, build the base image
-bun run start      # http://localhost:7070
-```
-
-**Self-contained binary** — sadbox compiles to a single file (Bun-compiled; the
-web UI and base-image recipe are embedded, so no repo checkout or `node_modules`
-are needed at runtime):
-```sh
-bun run compile                 # → dist/sadbox for this platform
-cp dist/sadbox ~/.local/bin/    # (ensure ~/.local/bin is on PATH)
-sadbox setup && sadbox serve
-```
-
-<details>
-<summary><b>Public distribution (once the repo is public)</b></summary>
-
-These need `sgsaravana/sadbox` to be public and a published Release with the
-`sadbox-*` binaries attached (built by `release.yml` on tag push), plus a public
-`sgsaravana/homebrew-tap` repo holding `Formula/sadbox.rb` (see
-`packaging/homebrew/sadbox.rb`, with the two `sha256`s filled in from the
-release's `SHA256SUMS`).
+### Option 1 — install script (prebuilt binary)
 
 ```sh
-# Homebrew
-brew install sgsaravana/tap/sadbox
-sadbox setup && sadbox serve            # or: brew services start sadbox
-
-# Install script
+brew install container
 curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh | sh
-sadbox setup && sadbox serve
 ```
-</details>
+
+This downloads the latest release binary for your platform into
+`~/.local/bin/sadbox`. If the script says that directory is not on your `PATH`,
+add it as shown. To pin a version or change the location:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh \
+  | SADBOX_VERSION=v0.1.1 SADBOX_BIN_DIR=/usr/local/bin sh
+```
+
+### Option 2 — download the binary yourself
+
+Grab `sadbox-darwin-arm64` from the
+[releases page](https://github.com/sgsaravana/sadbox/releases/latest), check it
+against `SHA256SUMS`, and put it on your `PATH`:
+
+```sh
+shasum -a 256 sadbox-darwin-arm64        # compare with the line in SHA256SUMS
+chmod +x sadbox-darwin-arm64
+xattr -d com.apple.quarantine sadbox-darwin-arm64 2>/dev/null   # browser downloads only
+mv sadbox-darwin-arm64 ~/.local/bin/sadbox
+```
+
+The binary is not signed or notarized, so a copy downloaded with a browser is
+quarantined by macOS; the `xattr` line clears that. (`curl` downloads, including
+the install script, are not quarantined.)
+
+### Option 3 — from source
+
+For development, or to run changes that are not in a release yet:
+
+```sh
+git clone https://github.com/sgsaravana/sadbox.git && cd sadbox
+bun install
+bun run setup      # same as `sadbox setup`
+bun run start      # same as `sadbox serve`  (bun run dev to reload on change)
+```
+
+`bun run compile` builds the same single-file binary into `dist/sadbox`; the web
+UI and base-image recipe are embedded, so it runs without the checkout.
+
+A Homebrew formula is kept in `packaging/homebrew/sadbox.rb`, but it is not
+published to a tap yet, so `brew install` of sadbox itself is not available.
+
+## First run
+
+```sh
+sadbox setup     # checks dependencies, starts the container system, builds the base image (a few minutes, once)
+sadbox serve     # http://localhost:7070
+```
+
+Then, in the browser:
+
+1. **Add a Claude credential** under **Secrets**: run `claude setup-token` on
+   your Mac and save the result as `CLAUDE_CODE_OAUTH_TOKEN` (or save an
+   `ANTHROPIC_API_KEY`). Skip this if you will use another agent or log in
+   inside the VM.
+2. **Create a project** under **Projects**: give it a name and either a local
+   folder that is a git repository with at least one commit, or a git URL to
+   clone. Tick the secret you just added.
+3. Open **Terminal ↗** and run `claude` (or `omp`, `opencode`). The first
+   requests to each new host wait for you to approve them in the **Network**
+   panel on the project's page — egress is blocked by default.
+4. When you like the result, **Sync back**: the agent's commits arrive in your
+   repo as `refs/remotes/sadbox/<name>`, ready to `git merge`. Your working
+   tree is never touched.
+
+`sadbox doctor` reports what is missing if something does not start. sadbox
+listens on localhost only and has no login of its own; see
+[Deploying](#deploying) before exposing it to other machines.
+
+To update, re-run the install script (or `git pull && bun install` from
+source), then `sadbox setup` again if the release notes mention a new base
+image. To uninstall, remove the binary and `~/.sadbox`.
 
 ### CLI
 
@@ -141,6 +187,16 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   an OAuth URL when authorizing an agent's provider) hold **⌥ and drag** — this
   forces a native selection despite mouse-reporting mode, and finishing the drag
   copies it. **⌘C**/**⌘V** (or Ctrl+Shift+C/V) copy the selection and paste.
+- **Editor**: **Editor ↗** opens the project's workdir in its own tab — a
+  file tree, tabs, syntax highlighting (One Dark, ~55 languages), find
+  (**⌘F**), go-to-file (**⌘P**, over everything git tracks or would add), save
+  (**⌘S**), and new/rename/delete. Like the terminal it needs nothing running
+  in the VM: each read or save is a short `container exec`. The agent edits the
+  same files, so a save is refused if the file changed in the VM since you
+  opened it (reload, or overwrite deliberately), and an unedited tab picks up
+  the agent's changes when you return to it. It is an editor, not an IDE — no
+  language server, debugger or project-wide search — and it handles UTF-8 text
+  files up to 2 MB.
 - **Agents baked in**: Claude Code, [omp](https://omp.sh), and
   [opencode](https://opencode.ai) are installed in the base image (plus Bun +
   git + ripgrep + jq). Run `claude`, `omp`, or `opencode` in the terminal. The
@@ -224,6 +280,10 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 | POST | `/api/projects/:id/net/approvals/:aid` | resolve a held request (`{action, duration}`) |
 | GET/POST | `/api/projects/:id/net/rules`, DELETE `…/:rid` | per-project allow/block rules |
 | GET/POST | `/api/projects/:id/net/headers`, DELETE `…/:hid` | per-project header rewrites |
+| GET/POST | `/api/projects/:id/files?path=` | list a workdir folder / create a folder (`{path}`) |
+| GET | `/api/projects/:id/files/index` | every non-ignored file (editor quick-open) |
+| POST | `/api/projects/:id/files/rename` | rename or move (`{from, to}`) |
+| GET/PUT/DELETE | `/api/projects/:id/file?path=` | read / save (`{path, content, baseHash, force?}` — 409 if it changed in the VM) / delete |
 | GET/POST | `/api/projects/:id/forwards`, DELETE `…/:fid` | port forwards (`{hostPort, guestPort}`) — host port → VM port |
 | GET/POST | `/api/net/rules`, DELETE `/api/net/rules/:id` | global allow/block rules |
 | GET/POST | `/api/net/headers`, DELETE `/api/net/headers/:id` | global header rewrites |
@@ -253,7 +313,7 @@ has no nested virtualization (`docs/research/02`, `docs/research/09`). So:
 For your Mac mini today, run sadbox **natively**, not from the ECR image:
 
 ```sh
-git clone <repo> && cd sadbox && bun install
+git clone https://github.com/sgsaravana/sadbox.git && cd sadbox && bun install
 bun run build:image          # bake the base image
 bun run start                # or a launchd plist for boot persistence
 ```

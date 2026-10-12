@@ -2,7 +2,7 @@ import { join, resolve, dirname } from "path";
 import { homedir } from "os";
 import { existsSync, readdirSync, statSync } from "fs";
 import { config } from "../config";
-import { staticRoutes } from "../assets";
+import { staticRoutes, aceFiles } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
 import { assignSecrets, createGlobalSecret, createProjectSecret, deleteSecret, injectSecrets, listGlobalSecrets, projectSecretView } from "../core/secrets";
@@ -15,6 +15,7 @@ import { resolveApproval, listPending, pendingCounts } from "../net/approvals";
 import { recentRequests, subscribe } from "../net/events";
 import { caCertPem } from "../net/ca";
 import { createForward, deleteForward, listForwards } from "../net/forwards";
+import { FileError, deletePath, fileIndex, listDir, makeDir, readFile, renamePath, writeFile } from "../core/files";
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
@@ -149,6 +150,28 @@ export function startServer() {
         m = p.match(/^\/api\/projects\/([\w-]+)\/net\/headers\/([\w-]+)$/);
         if (m && req.method === "DELETE") { deleteHeaderRule(m[2]); return json({ ok: true }); }
 
+        // --- workdir files, for the browser editor (paths relative to the workdir) ---
+        m = p.match(/^\/api\/projects\/([\w-]+)\/files$/);
+        if (m && req.method === "GET") return json(await listDir(m[1], url.searchParams.get("path") ?? ""));
+        if (m && req.method === "POST") {           // new folder
+          const b = await req.json();
+          return json(await makeDir(m[1], b.path), 201);
+        }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/files\/index$/);
+        if (m && req.method === "GET") return json(await fileIndex(m[1]));
+        m = p.match(/^\/api\/projects\/([\w-]+)\/files\/rename$/);
+        if (m && req.method === "POST") {
+          const b = await req.json();
+          return json(await renamePath(m[1], b.from, b.to));
+        }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/file$/);
+        if (m && req.method === "GET") return json(await readFile(m[1], url.searchParams.get("path")));
+        if (m && req.method === "PUT") {            // save (baseHash guards against clobbering the agent's edits)
+          const b = await req.json();
+          return json(await writeFile(m[1], b.path, b.content, { baseHash: b.baseHash, force: b.force === true }));
+        }
+        if (m && req.method === "DELETE") return json(await deletePath(m[1], url.searchParams.get("path")));
+
         // --- per-project port forwards (host port → VM port) ---
         m = p.match(/^\/api\/projects\/([\w-]+)\/forwards$/);
         if (m && req.method === "GET") return json({ host: config.forwardHost, forwards: listForwards(m[1]) });
@@ -228,9 +251,17 @@ export function startServer() {
           return json({ ok: true });
         }
       } catch (e) {
+        if (e instanceof FileError) return json({ error: e.message, ...e.extra }, e.status);
         return err(e);
       }
 
+      if (p.startsWith("/vendor/ace/")) {
+        const f = aceFiles[p.slice("/vendor/ace/".length)];
+        if (f) return new Response(Bun.file(f), { headers: { "content-type": "text/javascript", "cache-control": "max-age=3600" } });
+      }
+      if (p === "/api/editor/modes") {
+        return json(Object.keys(aceFiles).filter((f) => f.startsWith("mode-")).map((f) => f.slice(5, -3)));
+      }
       const s = staticRoutes[p];
       if (s) return new Response(Bun.file(s[0]), { headers: { "content-type": s[1] } });
       return new Response("not found", { status: 404 });
