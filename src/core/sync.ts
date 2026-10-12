@@ -4,6 +4,7 @@ import { join } from "path";
 import { config } from "../config";
 import { db, logEvent } from "../db";
 import { getDriver } from "../driver";
+import { LONG_TASK_MS } from "../driver/types";
 import { branchFor, getProject, refFor, syncFolderOf } from "./projects";
 
 const driver = getDriver();
@@ -33,7 +34,7 @@ export async function syncProject(id: string, opts?: { autocommit?: boolean }) {
     const c = await driver.exec(ref, ["sh", "-c",
       `cd ${config.guestWorkdir} && ` +
       `if [ -n "$(git status --porcelain)" ]; then git add -A && git commit -qm "sadbox: autocommit before sync"; fi`,
-    ]);
+    ], { timeoutMs: LONG_TASK_MS });
     if (c.exitCode !== 0) throw new Error(`autocommit failed: ${c.stderr}`);
   }
 
@@ -54,7 +55,7 @@ export async function syncProject(id: string, opts?: { autocommit?: boolean }) {
     (await hostGit(folder, ["cat-file", "-e", `${basis}^{commit}`])).code === 0;
   const range = hostHasBasis ? `${basis}..${branch}` : branch;
   const bundle = await driver.execCaptureBytes(ref,
-    `cd ${config.guestWorkdir} && git bundle create - ${range}`);
+    `cd ${config.guestWorkdir} && git bundle create - ${range}`, { timeoutMs: LONG_TASK_MS });
   if (bundle.exitCode !== 0 || bundle.stdout.length === 0) {
     throw new Error("bundle creation failed in guest");
   }

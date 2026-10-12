@@ -6,7 +6,7 @@ import { staticRoutes, aceFiles } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
 import { assignSecrets, createGlobalSecret, createProjectSecret, deleteSecret, injectSecrets, listGlobalSecrets, projectSecretView } from "../core/secrets";
-import { connectSyncFolder, createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject } from "../core/projects";
+import { connectSyncFolder, createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject, startProject, stopProject } from "../core/projects";
 import { syncStatus, syncProject } from "../core/sync";
 import { terminalLinks } from "../core/links";
 import { getSettings, updateSettings } from "../core/settings";
@@ -166,6 +166,8 @@ export function startServer() {
         if (m && req.method === "GET") return json(await terminalLinks(m[1]));
         m = p.match(/^\/api\/projects\/([\w-]+)\/rebuild$/);
         if (m && req.method === "POST") return json(await rebuildProject(m[1]));
+        m = p.match(/^\/api\/projects\/([\w-]+)\/(start|stop)$/);
+        if (m && req.method === "POST") return json(await (m[2] === "start" ? startProject : stopProject)(m[1]));
         m = p.match(/^\/api\/projects\/([\w-]+)\/sync-folder$/);
         if (m && req.method === "PUT") {            // connect a local folder to a cloned project
           const b = await req.json();
@@ -323,6 +325,10 @@ export function startServer() {
       open(ws) {
         const proj = getProject(ws.data.projectId);
         if (!proj) { ws.close(4004, "project not found"); return; }
+        // a stopped VM gets a code the page can offer to start it on, rather
+        // than the CLI's error text (checked from the row: the project list
+        // keeps it in step with the VM)
+        if (proj.state === "stopped" || proj.state === "stopping") { ws.close(4010, "the VM is stopped"); return; }
         // -A: attach to the existing session (create it only if missing) — never
         // a second session. -D: detach any other client on attach, so orphaned
         // clients (e.g. a browser tab closed without a clean detach) don't pile

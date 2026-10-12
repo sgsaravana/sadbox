@@ -65,7 +65,7 @@ async function refreshNavTree() {
   const cur = location.hash.slice(1).split("/");
   const activeId = cur[0] === "project" ? cur[1] : null;
   $("#nav-projects").innerHTML = projects.map((p) => {
-    const state = p.live?.state === "running" ? "running" : p.state;
+    const state = p.state;
     const n = pending[p.id] || 0;
     const badge = n ? `<span class="nav-badge" title="${n} request(s) awaiting approval">${n}</span>` : "";
     return `<li><a href="#project/${p.id}" class="nav-sub ${p.id === activeId ? "active" : ""}">
@@ -116,7 +116,7 @@ async function refreshProjects() {
     return;
   }
   el.innerHTML = projects.map((p) => {
-    const state = p.live?.state === "running" ? "running" : p.state;
+    const state = p.state;
     const gitLine = p.git_remote
       ? `<br>${p.source_path ? "remote" : "cloned from"} ${escapeHtml(p.git_remote)}${p.has_git_token ? " 🔑" : ""}`
       : "";
@@ -129,6 +129,7 @@ async function refreshProjects() {
       </div>
       <div class="row">
         <button data-details="${p.id}">Details</button>
+        ${powerButton(p)}
         <button data-term="${p.id}" data-name="${p.name}">Terminal ↗</button>
         <button data-edit="${p.id}" data-name="${p.name}">Editor ↗</button>
         ${p.sync_folder ? `<button data-sync="${p.id}">Sync back</button>` : ""}
@@ -138,6 +139,31 @@ async function refreshProjects() {
       <div class="sync-result"></div>
     </div>`;
   }).join("");
+}
+
+// Stop / Start for a project's VM, by its state
+const powerBusy = new Map(); // project id -> label, while a request is out
+function powerButton(p) {
+  const busy = powerBusy.get(p.id) || (p.state === "starting" ? "Starting…" : p.state === "stopping" ? "Stopping…" : null);
+  if (busy) return `<button disabled><span class="spinner"></span> ${busy}</button>`;
+  if (p.state === "running") return `<button data-stop="${p.id}" data-name="${p.name}" title="Shut the VM down; its files are kept">Stop</button>`;
+  if (p.state === "stopped") return `<button class="primary" data-start="${p.id}" title="Boot the VM again; its files are as you left them">Start</button>`;
+  return "";
+}
+async function power(id, action) {
+  powerBusy.set(id, action === "start" ? "Starting…" : "Stopping…");
+  const repaint = () => {
+    if (location.hash === `#project/${id}`) { if (lastDetail?.id === id) paintDetail(lastDetail); return renderDetail(id); }
+    refreshNavTree(); return refreshProjects();
+  };
+  if (lastDetail?.id === id && location.hash === `#project/${id}`) paintDetail(lastDetail); else refreshProjects();
+  try {
+    const r = await api(`/api/projects/${id}/${action}`, { method: "POST", body: {} });
+    if (lastDetail?.id === id) lastDetail.state = r.state;
+  } finally {
+    powerBusy.delete(id);
+    await repaint();
+  }
 }
 
 document.addEventListener("click", async (e) => {
@@ -150,6 +176,12 @@ document.addEventListener("click", async (e) => {
       window.open(`/editor?id=${b.dataset.edit}&name=${b.dataset.name}`, "_blank");
     } else if (b.dataset.details) {
       location.hash = `project/${b.dataset.details}`;
+    } else if (b.dataset.start) {
+      await power(b.dataset.start, "start");
+    } else if (b.dataset.stop) {
+      if (confirm(`Stop "${b.dataset.name}"? Its files are kept, but whatever is running in it — agents, terminals, dev servers — ends.`)) {
+        await power(b.dataset.stop, "stop");
+      }
     } else if (b.dataset.sync) {
       b.disabled = true; b.textContent = "Syncing…";
       const r = await api(`/api/projects/${b.dataset.sync}/sync`, { method: "POST", body: {} });
@@ -611,7 +643,7 @@ async function setSyncFolder(id, path) {
 function paintDetail(d) {
   const stats = $("#detail-stats") || $("#detail-body");
   $("#detail-name").textContent = d.name;
-  const state = d.live?.state === "running" ? "running" : d.state;
+  const state = d.state;
   const r = d.resources;
   const term = d.tmux.clients > 0
     ? `<span class="ok">● ${d.tmux.clients} attached</span>`
@@ -622,6 +654,7 @@ function paintDetail(d) {
     <button data-edit="${d.id}" data-name="${d.name}" title="Browse and edit the workdir">Editor ↗</button>
     ${d.sync_folder ? `<button data-sync="${d.id}">Sync back</button>` : ""}
     <button data-secrets="${d.id}">Secrets…</button>
+    ${powerButton(d)}
     <button data-rebuild="${d.id}" data-name="${d.name}" title="Destroy the VM and recreate it from the original source">Rebuild</button>
     <button class="danger" data-destroy="${d.id}" data-name="${d.name}">Destroy</button>`;
 
@@ -630,7 +663,8 @@ function paintDetail(d) {
       <div class="panel stat">
         <h3>Status</h3>
         <dl>
-          <dt>State</dt><dd><span class="dot ${state}"></span>${state}</dd>
+          <dt>State</dt><dd><span class="dot ${d.unresponsive ? "error" : state}"></span>${state}${d.unresponsive
+            ? ` <span style="color:var(--bad)">· not responding</span> <span class="hint">Stop it, then Start — files are kept</span>` : ""}</dd>
           <dt>Network</dt><dd>${d.live?.isolated
             ? `<span class="ok">isolated</span> <span class="hint">no network — proxy only</span>`
             : d.live?.network

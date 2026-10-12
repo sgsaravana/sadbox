@@ -3,11 +3,11 @@ import { config } from "../config";
 import { encrypt, decrypt } from "../crypto";
 import { db, logEvent } from "../db";
 import { getDriver } from "../driver";
-import type { ProjectStats } from "../driver/types";
+import { LONG_TASK_MS, type ProjectInfo, type ProjectStats } from "../driver/types";
 import { injectSecrets, assignSecrets, purgeProjectSecrets } from "./secrets";
 import { getSettings } from "./settings";
-import { installGuestProxy, openProjectSocket, closeProjectSocket } from "../net/proxy";
-import { forgetGuestTools } from "../net/guest";
+import { installGuestProxy, openProjectSocket, closeProjectSocket, redialProjectSocket } from "../net/proxy";
+import { forgetGuestTools, startGuestRelay } from "../net/guest";
 import { purgeProjectNet } from "../net/rules";
 import { clearProjectApprovals } from "../net/approvals";
 import { clearProjectFeed } from "../net/events";
@@ -166,7 +166,7 @@ async function cloneIntoWorkdir(ref: string, url: string, name: string): Promise
     `base=$(git rev-parse HEAD); ` +
     `git checkout -q -b ${branchFor(name)}; ` +
     `echo "defbr=$defbr"; echo "base=$base"`;
-  const r = await driver.exec(ref, ["sh", "-c", script]);
+  const r = await driver.exec(ref, ["sh", "-c", script], { timeoutMs: LONG_TASK_MS });
   if (r.exitCode !== 0) throw new Error(`git clone failed: ${r.stderr || r.stdout}`);
   const info = kv(r.stdout);
   return { base: info.base || "", branch: info.defbr || "HEAD" };
@@ -240,6 +240,7 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
       ref,
       `mkdir -p ${config.guestWorkdir} && tar -xf - -C ${config.guestWorkdir}`,
       tarBytes,
+      { timeoutMs: LONG_TASK_MS },
     );
     if (cp.exitCode !== 0) throw new Error(`copy-in failed: ${cp.stderr}`);
     const setup = await driver.exec(ref, ["sh", "-c",
@@ -266,11 +267,11 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   if (apps.length) {
     const env = `[ -f ${config.guestNetEnvFile} ] && . ${config.guestNetEnvFile}; export DEBIAN_FRONTEND=noninteractive; `;
     await duringSetup(p.id, async () => {
-      const up = await driver.exec(ref, ["sh", "-c", env + "apt-get update -qq"], { user: "root" });
+      const up = await driver.exec(ref, ["sh", "-c", env + "apt-get update -qq"], { user: "root", timeoutMs: LONG_TASK_MS });
       if (up.exitCode !== 0) logEvent(p.id, "app.install", `apt-get update: exit ${up.exitCode}`);
       for (const pkg of apps) {
         const r = await driver.exec(ref, ["sh", "-c",
-          env + `command -v ${pkg} >/dev/null 2>&1 || apt-get install -y -qq ${pkg}`], { user: "root" });
+          env + `command -v ${pkg} >/dev/null 2>&1 || apt-get install -y -qq ${pkg}`], { user: "root", timeoutMs: LONG_TASK_MS });
         logEvent(p.id, "app.install", `${pkg}: exit ${r.exitCode}`);
       }
     });
@@ -376,12 +377,14 @@ async function loadDetails(id: string) {
 
   const info = await driver.inspect(ref).catch(() => null);
   const running = info?.state === "running";
+  const state = settle(p, info);
 
   let cpuPercent: number | null = null;
   let stats: ProjectStats | null = null;
   let guest: Record<string, string> = {};
   let toolchain: ToolInfo[] | null = null;
   let partial = false; // some readings are still on their way — ask again shortly
+  let unresponsive = false; // up as far as the runtime knows, but not answering
   if (running) {
     // only the guest probe is waited for; see vitals.ts for the other two
     const [g, live, tc] = await Promise.all([
@@ -390,6 +393,7 @@ async function loadDetails(id: string) {
       liveToolchain(ref),
     ]);
     if (g?.exitCode === 0) guest = kv(g.stdout);
+    else unresponsive = true;
     ({ stats, cpuPercent } = live);
     toolchain = tc.tools;
     partial = live.pending || tc.pending;
@@ -399,7 +403,7 @@ async function loadDetails(id: string) {
   return {
     id: p.id,
     name: p.name,
-    state: p.state,
+    state,
     image: p.image,
     source_path: p.source_path,
     sync_path: p.sync_path,           // folder connected to a cloned project, if any
@@ -415,6 +419,7 @@ async function loadDetails(id: string) {
     error: p.error,
     created_at: p.created_at,
     partial,
+    unresponsive,
     live: info,
     resources: {
       cpus: info?.cpus ?? null,
@@ -529,6 +534,102 @@ export async function rebuildProject(id: string): Promise<ProjectRow> {
 
 /** Merge live driver state into DB rows for the UI. Degrades to DB-only
  *  rows when the driver is unavailable (e.g. supervisor in a container). */
+// ---- stop / start -----------------------------------------------------------
+// A project's VM can be shut down and booted again without losing anything on
+// its disk (the workdir, installed packages, agent logins); only what was
+// running in it — tmux, the agents — ends. A VM also stops on its own account:
+// the machine restarts, the container service is restarted, someone runs
+// `container stop`. So the recorded state follows what the VM is actually doing.
+
+const changing = new Set<string>(); // projects with a stop/start under way
+
+/** Bring a project's recorded state in line with its VM (given what the driver
+ *  reports for it; nothing is changed without a report). Returns the state. */
+function settle(p: ProjectRow, info: ProjectInfo | null | undefined): string {
+  if (changing.has(p.id) || !info || info.state === "unknown") return p.state;
+  // a stop/start that never finished (the supervisor went away) is settled too
+  if (!["running", "stopped", "starting", "stopping"].includes(p.state) || p.state === info.state) return p.state;
+  logEvent(p.id, info.state === "running" ? "vm.running" : "vm.stopped", "noticed — changed outside sadbox");
+  if (info.state === "running" && p.state === "stopped") {
+    // booted by hand: it has no proxy relay or tmux yet — finish the start
+    startProject(p.id).catch(() => {});
+    return "starting";
+  }
+  db.query("UPDATE projects SET state = ? WHERE id = ?").run(info.state, p.id);
+  if (info.state !== "running") forgetVitals(info.ref);
+  return info.state;
+}
+
+export async function stopProject(id: string): Promise<ProjectRow> {
+  const p = getProject(id);
+  if (!p || p.state === "destroyed") throw new Error("project not found");
+  if (changing.has(id) || p.state === "creating") throw new Error("this project is busy — try again in a moment");
+  const ref = refFor(p.name);
+  changing.add(id);
+  db.query("UPDATE projects SET state = 'stopping' WHERE id = ?").run(id);
+  try {
+    await driver.stop(ref);
+    db.query("UPDATE projects SET state = 'stopped' WHERE id = ?").run(id);
+    logEvent(id, "vm.stop");
+  } catch (e) {
+    db.query("UPDATE projects SET state = ? WHERE id = ?").run(p.state, id);
+    logEvent(id, "vm.stop.error", String(e));
+    throw e;
+  } finally {
+    changing.delete(id);
+    forgetVitals(ref);
+  }
+  return getProject(id)!;
+}
+
+/** Boot a project's stopped VM and put back what does not survive a shutdown:
+ *  the proxy relay (its only way out), current secrets, and the tmux session.
+ *  Also safe on a VM that is already up — it just repairs those. */
+export async function startProject(id: string): Promise<ProjectRow> {
+  const p = getProject(id);
+  if (!p || p.state === "destroyed") throw new Error("project not found");
+  if (changing.has(id) || p.state === "creating") throw new Error("this project is busy — try again in a moment");
+  const ref = refFor(p.name);
+  const before = await driver.inspect(ref);
+  if (before.state === "unknown") {
+    throw new Error("this project's VM no longer exists — use Rebuild to recreate it from its source");
+  }
+  changing.add(id);
+  db.query("UPDATE projects SET state = 'starting', error = NULL WHERE id = ?").run(id);
+  try {
+    if (before.state !== "running") await driver.start(ref);
+    // booted is not yet answering: wait until a command gets through
+    let up = false;
+    for (let i = 0; i < 30 && !up; i++) {
+      up = (await driver.exec(ref, ["sh", "-c", `test -d ${config.guestWorkdir}`], { timeoutMs: 5_000 })).exitCode === 0;
+      if (!up) await Bun.sleep(500);
+    }
+    if (!up) throw new Error("the VM started but is not responding");
+
+    if ((await driver.inspect(ref)).isolated) {
+      openProjectSocket(id);
+      await startGuestRelay(ref);
+      redialProjectSocket(id); // carriers dialed before the shutdown are dead
+    }
+    await injectSecrets(id).catch((e) => logEvent(id, "secrets.inject.error", String(e)));
+    const tmux = await driver.exec(ref, ["sh", "-c",
+      `tmux has-session -t ${config.tmuxSession} 2>/dev/null || ` +
+      `tmux new-session -d -s ${config.tmuxSession} -c ${config.guestWorkdir}`]);
+    if (tmux.exitCode !== 0) throw new Error(`tmux start failed: ${tmux.stderr}`);
+    db.query("UPDATE projects SET state = 'running' WHERE id = ?").run(id);
+    logEvent(id, "vm.start");
+  } catch (e) {
+    const now = await driver.inspect(ref).catch(() => null);
+    db.query("UPDATE projects SET state = ? WHERE id = ?").run(now?.state === "running" ? "running" : "stopped", id);
+    logEvent(id, "vm.start.error", String(e));
+    throw e;
+  } finally {
+    changing.delete(id);
+    forgetVitals(ref);
+  }
+  return getProject(id)!;
+}
+
 export async function projectsWithLiveState() {
   const rows = listProjects();
   const live = new Map(
@@ -538,7 +639,7 @@ export async function projectsWithLiveState() {
     id: r.id,
     name: r.name,
     image: r.image,
-    state: r.state,
+    state: settle(r, live.get(refFor(r.name))),
     source_path: r.source_path,
     sync_folder: syncFolderOf(r),
     source_branch: r.source_branch,
