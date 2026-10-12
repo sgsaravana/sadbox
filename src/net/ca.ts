@@ -24,6 +24,26 @@ async function openssl(args: string[], input?: Uint8Array) {
 let caPem = "";
 let leafKeyPem = "";
 
+// A certificate that becomes valid "now" is rejected by a client whose clock is
+// even slightly behind this machine's — and a VM's clock can lag for a moment
+// after boot, which made the first clone into a new VM fail now and then. So
+// certificates are backdated a day. OpenSSL >= 3.4 can set the start date
+// directly; older builds and LibreSSL (macOS's /usr/bin/openssl) cannot, and
+// there a fresh certificate is instead held back until it is a few seconds old.
+const BACKDATE_MS = 24 * 3600_000;
+const SETTLE_MS = 5000;
+let canBackdate: boolean | null = null;
+async function backdateArgs(): Promise<string[]> {
+  if (canBackdate === null) {
+    const h = await openssl(["x509", "-help"]);
+    canBackdate = (h.out + h.err).includes("-not_before");
+  }
+  if (!canBackdate) return [];
+  // YYYYMMDDHHMMSSZ
+  const d = new Date(Date.now() - BACKDATE_MS).toISOString().replace(/[-:T]/g, "").slice(0, 14) + "Z";
+  return ["-not_before", d];
+}
+
 /** Generate the CA + a reusable leaf key/CSR once; load them into memory. */
 export async function ensureCA(): Promise<void> {
   mkdirSync(config.dataDir, { recursive: true });
@@ -33,6 +53,7 @@ export async function ensureCA(): Promise<void> {
   if (!existsSync(caCrt) || !existsSync(caKey)) {
     const r = await openssl([
       "req", "-x509", "-newkey", "rsa:2048", "-keyout", caKey, "-out", caCrt,
+      ...(await backdateArgs()),
       "-days", "3650", "-nodes", "-subj", "/CN=sadbox proxy CA/O=sadbox",
       "-addext", "basicConstraints=critical,CA:TRUE",
       "-addext", "keyUsage=critical,keyCertSign,cRLSign",
@@ -77,10 +98,13 @@ async function mintCert(host: string): Promise<string> {
   writeFileSync(extFile,
     `subjectAltName=${isIp ? "IP" : "DNS"}:${host}\n` +
     `basicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n`);
+  const backdate = await backdateArgs();
   const r = await openssl([
     "x509", "-req", "-in", proxyLeafCsrPath(), "-CA", caCertPath(), "-CAkey", caKeyPath(),
+    ...backdate,
     "-set_serial", String(serialSeq++), "-days", "825", "-extfile", extFile, "-out", crtFile,
   ]);
   if (r.code !== 0) throw new Error(`cert mint failed for ${host}: ${r.err.trim()}`);
+  if (!backdate.length) await Bun.sleep(SETTLE_MS); // cannot backdate: let it age instead
   return readFileSync(crtFile, "utf8") + caPem;
 }

@@ -142,8 +142,10 @@ with `sadbox passwd`. Then, in the browser:
    folder that is a git repository with at least one commit, or a git URL to
    clone. Tick the secret you just added.
 3. Open **Terminal ↗** and run `claude` (or `omp`, `opencode`). The first
-   requests to each new host wait for you to approve them in the **Network**
-   panel on the project's page — egress is blocked by default.
+   requests to each new host wait for your approval — a popup appears right
+   in the terminal and editor tabs (and in the **Network** panel on the
+   project's page).
+   Egress is blocked by default.
 4. When you like the result, **Sync back**: the agent's commits arrive in your
    repo as `refs/remotes/sadbox/<name>`, ready to `git merge`. Your working
    tree is never touched.
@@ -207,10 +209,18 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   rather than syncing back.
 - **Terminal**: xterm.js ⇄ WS ⇄ `Bun.spawn({terminal})` PTY ⇄
   `container exec -it <project> tmux new -A -s main`. Sessions live in the VM and
-  survive supervisor restarts. tmux runs with `mouse on`, so to grab text (e.g.
-  an OAuth URL when authorizing an agent's provider) hold **⌥ and drag** — this
-  forces a native selection despite mouse-reporting mode, and finishing the drag
-  copies it. **⌘C**/**⌘V** (or Ctrl+Shift+C/V) copy the selection and paste.
+  survive supervisor restarts. **🔗 Links** in the toolbar lists every link
+  currently on the terminal with **Open** and **Copy** buttons — use it for
+  sign-in URLs (e.g. when authorizing an agent's provider): a long URL that a
+  full-screen program wraps over several rows, often inside a drawn panel, is
+  put back together, which selecting it by hand does not do reliably (a URL
+  copied with its tail missing fails with errors like *"Invalid
+  code_challenge_method: missing"*). tmux runs with `mouse on`, so to select
+  other text hold **⌥ and drag** — this forces a native selection despite
+  mouse-reporting mode, and finishing the drag copies it. A selection that is
+  just one URL — broken over several rows, panel borders included, or only
+  its first row — is copied as the complete link. **⌘C**/**⌘V** (or
+  Ctrl+Shift+C/V) copy the selection and paste.
 - **Editor**: **Editor ↗** opens the project's workdir in its own tab — a
   file tree, tabs, syntax highlighting (One Dark, ~55 languages), find
   (**⌘F**), go-to-file (**⌘P**, over everything git tracks or would add), save
@@ -221,6 +231,14 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   the agent's changes when you return to it. It is an editor, not an IDE — no
   language server, debugger or project-wide search — and it handles UTF-8 text
   files up to 2 MB.
+- **Approve where you are working**: when something in the VM asks for a host
+  no rule covers, the proxy holds the request and a popup appears on the
+  terminal and editor tabs with the method, URL and a countdown. **Allow** it
+  for just that request, 1 / 5 / 30 minutes, an hour, or always — or **Deny**
+  it (once, or "always block"). The command is waiting meanwhile and continues
+  as soon as you answer; unanswered requests are denied after 2 minutes. The
+  same prompts still appear on the project's detail page, and answering in one
+  place clears the other.
 - **Agents baked in**: Claude Code, [omp](https://omp.sh), and
   [opencode](https://opencode.ai) are installed in the base image (plus Bun +
   git + ripgrep + jq). Run `claude`, `omp`, or `opencode` in the terminal. The
@@ -324,6 +342,7 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 | GET | `/api/projects/:id/details` | full detail: resources, tmux, git, folder |
 | DELETE | `/api/projects/:id` | destroy VM |
 | POST | `/api/projects/:id/sync` | sync-back (`{autocommit?: bool}`) |
+| GET | `/api/projects/:id/term/links` | links currently on the project's terminal (wrapped URLs re-joined) |
 | POST | `/api/projects/:id/rebuild` | destroy + recreate the VM from the project's original source (keeps secrets + net rules) |
 | GET | `/api/projects/:id/sync/status` | dirty/ahead counts |
 | GET/PUT/POST | `/api/projects/:id/secrets` | view / assign globals / add project-specific |

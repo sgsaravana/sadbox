@@ -23,6 +23,24 @@
            background: #14532d; color: #dcfce7; border: 1px solid #166534; border-radius: 6px; padding: 5px 12px;
            font: 12px system-ui; opacity: 0; transition: opacity .15s, transform .15s; pointer-events: none; }
   #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #toast.warn { background: #4a3f2a; color: #f0dcae; border-color: #7a6a45; }
+
+  /* links found on the terminal screen — open or copy without selecting text */
+  #links { display: none; position: fixed; top: 40px; left: 10px; z-index: 30; width: min(640px, calc(100vw - 20px));
+           max-height: 60vh; overflow-y: auto; background: #14141c; color: #e6e6ef; border: 1px solid #2a2a35;
+           border-radius: 10px; box-shadow: 0 10px 34px #000c; font: 13px system-ui; padding: 6px; }
+  #links.show { display: block; }
+  #links .lhead { padding: 6px 8px 8px; color: #8a8aa0; font-size: 12px; }
+  .link { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 7px; }
+  .link:hover { background: #1a1a24; }
+  .link .u { flex: 1; min-width: 0; font: 12px ui-monospace, "SF Mono", Menlo, monospace; color: #9ec1ff;
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .link .host { color: #e6e6ef; font-weight: 600; }
+  .link button { font: inherit; font-size: 12px; border-radius: 6px; padding: 3px 10px; cursor: pointer;
+                 background: #1a1a24; color: #dbe4ff; border: 1px solid #2a2a35; }
+  .link button.go { background: #5b8cff; border-color: #5b8cff; color: #fff; font-weight: 600; }
+  .link button:hover { filter: brightness(1.15); }
+
 </style>
 <body>
   <div id="toolbar">
@@ -31,14 +49,17 @@
     <button class="tbtn" data-tmux="c" title="New window (Ctrl+b c)">＋ New</button>
     <button class="tbtn" data-tmux="p" title="Previous window (Ctrl+b p)">◀ Prev</button>
     <button class="tbtn" data-tmux="n" title="Next window (Ctrl+b n)">Next ▶</button>
+    <button class="tbtn" id="links-btn" title="Open or copy a link shown in the terminal (e.g. a sign-in URL)">🔗 Links</button>
     <span class="grow"></span>
     <span id="hint"><kbd>⌥</kbd>-drag select · <kbd>⌘</kbd>C copy · <kbd>⌘</kbd>V paste</span>
     <button class="tbtn" id="reconnect">reconnect</button>
   </div>
   <div id="term"></div>
   <div id="toast">copied</div>
+  <div id="links"></div>
   <script src="/vendor/xterm.js"></script>
   <script src="/vendor/addon-fit.js"></script>
+  <script src="/net-asks.js"></script>
   <script>
     const params = new URLSearchParams(location.search);
     const projectId = params.get("id");
@@ -66,11 +87,12 @@
     // --- clipboard: select-to-copy + ⌘/Ctrl+Shift C/V ------------------------
     const toast = document.getElementById("toast");
     let toastTimer;
-    function flash(msg) {
+    function flash(msg, warn = false, ms = 900) {
       toast.textContent = msg;
+      toast.classList.toggle("warn", warn);
       toast.classList.add("show");
       clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => toast.classList.remove("show"), 900);
+      toastTimer = setTimeout(() => toast.classList.remove("show"), ms);
     }
     async function writeClipboard(text) {
       try { await navigator.clipboard.writeText(text); return true; }
@@ -84,11 +106,38 @@
         } catch { return false; }
       }
     }
+    // The terminal is a grid of characters: a program that shows a long URL has
+    // to break it over several rows itself, and often draws a panel around it.
+    // A selection is then those rows as they appear — a line break at every
+    // wrap, the row's padding, and the panel's border bars in the middle of the
+    // URL. So when a selection is nothing but one URL broken up that way, it is
+    // put back together before it reaches the clipboard.
+    const ROW_EDGE = /^[\s│┃║|]+|[\s│┃║|]+$/g;
+    function unwrapUrl(sel) {
+      const rows = sel.split("\n").map((r) => r.replace(ROW_EDGE, "")).filter(Boolean);
+      const joined = rows.join("");
+      return /^https?:\/\/\S+$/.test(joined) ? joined : null;
+    }
+    // Selecting only the first row of a wrapped URL copies a link with its tail
+    // missing. If what was selected is exactly the first row of a longer link
+    // the supervisor can see on this terminal, copy the whole link instead.
+    async function completeUrl(url) {
+      try {
+        const r = await fetch(`/api/projects/${projectId}/term/links`, { signal: AbortSignal.timeout(900) });
+        const links = r.ok ? (await r.json()).links || [] : [];
+        if (!links.includes(url)) return url;
+        return links.find((u) => u.length > url.length && u.startsWith(url)) || url;
+      } catch { return url; }
+    }
     async function copySelection() {
       const sel = term.getSelection();
       if (!sel) return false;
-      if (await writeClipboard(sel)) { flash("copied"); return true; }
-      return false;
+      const url = unwrapUrl(sel);
+      if (!url) { if (await writeClipboard(sel)) { flash("copied"); return true; } return false; }
+      const full = await completeUrl(url);
+      if (!(await writeClipboard(full))) return false;
+      flash(full !== url ? "copied the full link" : url !== sel.trim() ? "copied link (joined)" : "copied", false, 1500);
+      return true;
     }
     // classic terminal behaviour: finishing a drag-selection copies it
     document.getElementById("term").addEventListener("mouseup", () => {
@@ -145,6 +194,56 @@
     });
     addEventListener("resize", () => fit.fit());
     connect();
+
+    // --- links on screen -----------------------------------------------------
+    // Selecting a long URL out of a full-screen program is unreliable (it is
+    // wrapped over several rows, often inside a drawn panel). The supervisor
+    // reads the terminal and stitches such URLs back together; open or copy
+    // them from here instead.
+    const linksEl = document.getElementById("links");
+    const escLink = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    let linkList = [];
+    function closeLinks() { linksEl.classList.remove("show"); term.focus(); }
+    async function openLinks() {
+      linksEl.innerHTML = `<div class="lhead">Looking for links on the terminal…</div>`;
+      linksEl.classList.add("show");
+      try {
+        const r = await fetch(`/api/projects/${projectId}/term/links`);
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || r.statusText);
+        linkList = data.links || [];
+        linksEl.innerHTML = linkList.length
+          ? `<div class="lhead">Links on this terminal, newest first</div>` + linkList.map((u, i) => {
+              let host = ""; try { host = new URL(u).host; } catch {}
+              const rest = host ? u.slice(u.indexOf(host) + host.length) : "";
+              return `<div class="link" title="${escLink(u)}">
+                <span class="u">${host ? `<span class="host">${escLink(host)}</span>${escLink(rest)}` : escLink(u)}</span>
+                <button class="go" data-open="${i}">Open</button><button data-copy="${i}">Copy</button></div>`;
+            }).join("")
+          : `<div class="lhead">No links on this terminal right now.</div>`;
+      } catch (err) {
+        linksEl.innerHTML = `<div class="lhead">Could not read the terminal: ${escLink(err.message)}</div>`;
+      }
+    }
+    document.getElementById("links-btn").addEventListener("click", () => {
+      if (linksEl.classList.contains("show")) closeLinks(); else openLinks();
+    });
+    linksEl.addEventListener("click", async (e) => {
+      const open = e.target.closest("[data-open]"), copy = e.target.closest("[data-copy]");
+      if (open) { window.open(linkList[+open.dataset.open], "_blank", "noopener"); closeLinks(); }
+      else if (copy) { flash((await writeClipboard(linkList[+copy.dataset.copy])) ? "copied" : "copy failed", false, 1200); closeLinks(); }
+    });
+    addEventListener("keydown", (e) => { if (e.key === "Escape" && linksEl.classList.contains("show")) { e.preventDefault(); closeLinks(); } }, true);
+    addEventListener("mousedown", (e) => {
+      if (linksEl.classList.contains("show") && !e.target.closest("#links, #links-btn")) linksEl.classList.remove("show");
+    });
+
+    // popups for requests from this VM that the proxy is holding (see /net-asks.js)
+    sadboxNetAsks({
+      projectId,
+      notify: (msg, warn) => flash(msg, warn, 2500),
+      onAnswered: () => term.focus(),
+    });
   </script>
 </body>
 </html>

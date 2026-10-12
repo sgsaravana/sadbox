@@ -8,6 +8,7 @@ import type { TerminalHandle } from "../driver/types";
 import { assignSecrets, createGlobalSecret, createProjectSecret, deleteSecret, injectSecrets, listGlobalSecrets, projectSecretView } from "../core/secrets";
 import { createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject } from "../core/projects";
 import { syncStatus, syncProject } from "../core/sync";
+import { terminalLinks } from "../core/links";
 import { getSettings, updateSettings } from "../core/settings";
 import { baseImageToolchain } from "../core/toolchain";
 import { createRule, deleteRule, listRules, createHeaderRule, deleteHeaderRule, listHeaderRules } from "../net/rules";
@@ -161,6 +162,8 @@ export function startServer() {
           const b = await req.json().catch(() => ({}));
           return json(await syncProject(m[1], { autocommit: b.autocommit ?? true }));
         }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/term\/links$/);
+        if (m && req.method === "GET") return json(await terminalLinks(m[1]));
         m = p.match(/^\/api\/projects\/([\w-]+)\/rebuild$/);
         if (m && req.method === "POST") return json(await rebuildProject(m[1]));
         m = p.match(/^\/api\/projects\/([\w-]+)\/sync\/status$/);
@@ -320,7 +323,9 @@ export function startServer() {
         // up mirroring the same session and fighting over its size.
         const term = driver.terminal(
           refFor(proj.name),
-          ["tmux", "new-session", "-A", "-D", "-s", config.tmuxSession],
+          // -c: if the session has to be created here (the last shell was exited,
+          // or the VM was restarted), start it in the workdir like the original
+          ["tmux", "new-session", "-A", "-D", "-s", config.tmuxSession, "-c", config.guestWorkdir],
           { cols: ws.data.cols, rows: ws.data.rows },
         );
         term.onData((chunk) => ws.send(chunk));

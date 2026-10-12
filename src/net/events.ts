@@ -25,6 +25,7 @@ export interface RequestEntry {
 
 export interface PendingView {
   id: string; projectId: string; host: string; method: string; scheme: string; path: string; ts: number;
+  expiresAt: number; // when the held request is denied if nobody answers
 }
 
 type Listener = (ev: NetEvent) => void;
