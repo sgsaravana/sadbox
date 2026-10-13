@@ -188,6 +188,73 @@ describe("sync back into a git repository", () => {
     expect(read(local, "other.js")).toBe("also new\n");
   });
 
+  test("a folder that already has some of the VM's work committed still gets the rest", async () => {
+    // the agent commits and pushes; the folder pulls that — so it is no longer
+    // at the commit the project started from — and the agent carries on
+    const local = cloneOfRemote("local");
+    await connectSyncFolder(id, local);
+    writeFileSync(join(WD, "app.js"), "v2\n");
+    const pushed = commit(WD, "engine.js", "first cut\n");
+    git(local, "pull", "-q", WD, branchFor(name)); // stands in for push from the VM + pull here
+    expect(git(local, "rev-parse", "HEAD")).toBe(pushed);
+    writeFileSync(join(WD, "app.js"), "v3, loose\n");
+    writeFileSync(join(WD, "engine.js"), "second cut, loose\n");
+    writeFileSync(join(WD, "extra.js"), "new\n");
+
+    const r = await syncProject(id);
+    expect(r).toMatchObject({ applied: "copied", blocking: [] });
+    expect(read(local, "app.js")).toBe("v3, loose\n");
+    expect(read(local, "engine.js")).toBe("second cut, loose\n");
+    expect(git(local, "rev-parse", "HEAD")).toBe(pushed);
+    // exactly the work that is not committed yet, for review
+    expect(status(local)).toEqual(["?? extra.js", "M app.js", "M engine.js"]);
+    expect(r.changed).not.toContain("README.md");
+  });
+
+  test("…but an uncommitted edit in such a folder still stops the sync", async () => {
+    const local = cloneOfRemote("local");
+    await connectSyncFolder(id, local);
+    commit(WD, "engine.js", "first cut\n");
+    git(local, "pull", "-q", WD, branchFor(name)); // stands in for push from the VM + pull here
+    writeFileSync(join(local, "engine.js"), "my own tweak\n");
+    writeFileSync(join(WD, "engine.js"), "second cut\n");
+    writeFileSync(join(WD, "app.js"), "v2\n");
+
+    const r = await syncProject(id);
+    expect(r).toMatchObject({ applied: "not-applied", blocking: ["engine.js"] });
+    expect(read(local, "engine.js")).toBe("my own tweak\n");
+    expect(read(local, "app.js")).toBe("v1\n");
+    expect(status(local)).toEqual(["M engine.js"]);
+  });
+
+  test("a change you committed to a file the agent also changed is replaced in the folder, and stays in your history", async () => {
+    const local = cloneOfRemote("local");
+    await connectSyncFolder(id, local);
+    const mine = commit(local, "app.js", "my committed version\n");
+    writeFileSync(join(WD, "app.js"), "the agent's version\n");
+
+    const r = await syncProject(id);
+    expect(r).toMatchObject({ applied: "copied", blocking: [] });
+    expect(read(local, "app.js")).toBe("the agent's version\n");
+    expect(git(local, "rev-parse", "HEAD")).toBe(mine);
+    expect(git(local, "show", "HEAD:app.js")).toBe("my committed version");
+    expect(status(local)).toEqual(["M app.js"]);
+  });
+
+  test("a folder where a project file's place is taken by a directory is reported, not half-written", async () => {
+    const local = cloneOfRemote("local");
+    await connectSyncFolder(id, local);
+    mkdirSync(join(local, "notes")); writeFileSync(join(local, "notes/mine.txt"), "mine\n");
+    writeFileSync(join(WD, "notes"), "a file in the VM\n");
+    writeFileSync(join(WD, "app.js"), "v2\n");
+
+    const r = await syncProject(id);
+    expect(r.applied).toBe("not-applied");
+    expect(r.note).toBeTruthy();
+    expect(read(local, "notes/mine.txt")).toBe("mine\n");
+    expect(read(local, "app.js")).toBe("v1\n");
+  });
+
   test("an untracked file of yours with the same name as a new project file blocks the sync", async () => {
     const local = cloneOfRemote("local");
     await connectSyncFolder(id, local);

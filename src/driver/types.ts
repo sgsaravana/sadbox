@@ -76,6 +76,9 @@ export interface ProjectDriver {
   start(ref: string): Promise<void>;
   /** Shut a VM down, keeping its disk. Forces it off if it does not comply. */
   stop(ref: string): Promise<void>;
+  /** Change how much memory a stopped VM boots with next time. Its disk is
+   *  untouched. Throws if this backend cannot do it for that VM. */
+  setMemory(ref: string, memoryMB: number): Promise<void>;
   inspect(ref: string): Promise<ProjectInfo>;
   list(): Promise<ProjectInfo[]>;
   /** Live resource usage, or null if unavailable. */

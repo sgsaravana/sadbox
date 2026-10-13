@@ -14,6 +14,7 @@ const workdir = join(dir, "workdir");
 mkdirSync(workdir);
 const guestTools = join(dir, "guest-tools"); // stands in for /usr/local/lib/sadbox in the VM
 const statsLog = join(dir, "stats.log");
+const containerData = join(dir, "container-data"); // the runtime's own files, per VM
 const bin = join(dir, "container");
 writeFileSync(bin, `#!/bin/sh
 case "$1" in
@@ -29,7 +30,9 @@ case "$1" in
   stats) echo "$5" >> "${statsLog}"
          case "$5" in *stuck*) exec sleep 30;; esac
          sleep 0.5
-         echo '[{"cpuUsageUsec":'"$(date +%s)"'000000,"memoryUsageBytes":1048576,"memoryLimitBytes":4194304,"numProcesses":7}]';;
+         # the limit is the VM's stored size, when a test gave it one
+         limit=$(sed -n 's/.*"memoryInBytes":\\([0-9]*\\).*/\\1/p' "${containerData}/containers/$5/runtime-configuration.json" 2>/dev/null)
+         echo '[{"cpuUsageUsec":'"$(date +%s)"'000000,"memoryUsageBytes":1048576,"memoryLimitBytes":'"\${limit:-4194304}"',"numProcesses":7}]';;
   # exec [-i] [-u user] <ref> sh -c <script>: run the script here, with the
   # guest workdir path swapped for a scratch dir standing in for the VM's disk.
   # The scratch path is baked in (a spawned child does not see env set by this
@@ -50,6 +53,7 @@ process.env.SADBOX_TEST_WORKDIR = workdir; // for the tests themselves, to seed 
 process.env.SADBOX_TEST_STATS_LOG = statsLog;
 process.env.SADBOX_DATA = join(dir, "data");
 process.env.SADBOX_CONTAINER_BIN = bin;
+process.env.SADBOX_CONTAINER_DATA = containerData;
 process.env.SADBOX_FORWARD_HOST = "127.0.0.1";
 
 process.on("exit", () => { try { rmSync(dir, { recursive: true, force: true }); } catch {} });

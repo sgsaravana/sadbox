@@ -7,7 +7,7 @@ import { db, logEvent } from "../db";
 import { getDriver } from "../driver";
 import { LONG_TASK_MS, type ProjectInfo, type ProjectStats } from "../driver/types";
 import { injectSecrets, assignSecrets, purgeProjectSecrets } from "./secrets";
-import { getSettings } from "./settings";
+import { getSettings, validMemoryMB } from "./settings";
 import { installGuestProxy, openProjectSocket, closeProjectSocket, redialProjectSocket } from "../net/proxy";
 import { forgetGuestTools, startGuestRelay } from "../net/guest";
 import { purgeProjectNet } from "../net/rules";
@@ -33,6 +33,7 @@ export interface ProjectRow {
   git_remote: string | null;
   git_token_enc: string | null;
   sync_path: string | null;   // local folder connected to a cloned project (sync target only)
+  memory_mb: number | null;   // the VM's memory (null: created before this was recorded)
   error: string | null;
   created_at: string;
 }
@@ -200,8 +201,10 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   // way out is this project's own socket to the egress proxy.
   const isolated = config.network === "none";
   forgetGuestTools(ref); // a new VM under this name has a fresh filesystem
+  const memoryMB = p.memory_mb ?? s.defaultMemoryMB; // the project's own, once it has one
+  db.query("UPDATE projects SET memory_mb = ? WHERE id = ?").run(memoryMB, p.id);
   await driver.create(ref, p.image, {
-    cpus: s.defaultCpus, memoryMB: s.defaultMemoryMB, diskGB: s.defaultDiskGB, network: config.network,
+    cpus: s.defaultCpus, memoryMB, diskGB: s.defaultDiskGB, network: config.network,
     socket: isolated ? { host: openProjectSocket(p.id), guest: config.guestCarrierSocket } : undefined,
   });
 
@@ -427,7 +430,9 @@ async function loadDetails(id: string) {
       cpus: info?.cpus ?? null,
       cpuPercent,
       memoryUsageBytes: stats?.memoryUsageBytes ?? null,
-      memoryLimitBytes: stats?.memoryLimitBytes ?? info?.memoryLimitBytes ?? null,
+      // the runtime's own record (info) lags behind a memory change made here
+      memoryLimitBytes: stats?.memoryLimitBytes ?? (p.memory_mb ? p.memory_mb * MB : info?.memoryLimitBytes) ?? null,
+      memoryMB: p.memory_mb ?? (info?.memoryLimitBytes ? Math.round(info.memoryLimitBytes / MB) : null),
       numProcesses: stats?.numProcesses ?? null,
       networkRxBytes: stats?.networkRxBytes ?? null,
       networkTxBytes: stats?.networkTxBytes ?? null,
@@ -637,6 +642,41 @@ export async function startProject(id: string): Promise<ProjectRow> {
     forgetVitals(ref);
   }
   return getProject(id)!;
+}
+
+const MB = 1024 * 1024;
+
+/** Give a project's VM a different amount of memory. A VM takes its size when
+ *  it boots, so a running one is shut down and started again: what was running
+ *  in it (agents, terminals) ends, everything on its disk stays. A stopped VM
+ *  just boots with the new size next time. */
+export async function setProjectMemory(id: string, memory: unknown) {
+  const memoryMB = validMemoryMB(memory);
+  const p = getProject(id);
+  if (!p || p.state === "destroyed") throw new Error("project not found");
+  if (changing.has(id) || !["running", "stopped"].includes(p.state)) throw new Error("this project is busy — try again in a moment");
+  const ref = refFor(p.name);
+  const before = await driver.inspect(ref);
+  if (before.state === "unknown") throw new Error("this project's VM no longer exists — use Rebuild to recreate it from its source");
+
+  const wasRunning = before.state === "running";
+  if (wasRunning) await stopProject(id);
+  try {
+    await driver.setMemory(ref, memoryMB);
+    db.query("UPDATE projects SET memory_mb = ? WHERE id = ?").run(memoryMB, id);
+  } finally {
+    // back up either way — with the new size, or as it was
+    if (wasRunning) await startProject(id);
+  }
+
+  // ask the VM itself: null when it is stopped or does not say
+  let applied: boolean | null = null;
+  if (wasRunning) {
+    const limit = (await driver.stats(ref, QUERY_TIMEOUT_MS).catch(() => null))?.memoryLimitBytes;
+    if (limit != null) applied = limit === memoryMB * MB;
+  }
+  logEvent(id, "vm.memory", `${memoryMB} MB` + (wasRunning ? " · restarted" : "") + (applied === false ? " · the VM still reports its old size" : ""));
+  return { id, state: getProject(id)!.state, memoryMB, restarted: wasRunning, applied };
 }
 
 export async function projectsWithLiveState() {

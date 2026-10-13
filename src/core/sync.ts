@@ -9,10 +9,13 @@
 // stdout into a private repository in sadbox's data dir. That repository's work
 // tree is the folder, so checking the snapshot out there writes the files. Git
 // does the writing on this side, which gives two things for free:
-//   · only files that changed since the last sync are touched, and a file the
-//     user has edited meanwhile is never overwritten — the sync stops and says
-//     which files are in the way;
+//   · only files the project changed since the last sync are touched;
 //   · nothing a VM sends can land outside the folder.
+// What is never overwritten is work in the folder that exists nowhere else: a
+// file edited there and not committed, or one of the user's own under a new
+// project file's name. The sync then stops and says which files are in the
+// way. A file the folder's repository has committed is not in the way, however
+// it got there (pulled, pushed from the VM, an earlier sync) — git still has it.
 import { existsSync, mkdirSync, realpathSync } from "fs";
 import { rm } from "fs/promises";
 import { join } from "path";
@@ -27,8 +30,10 @@ const driver = getDriver();
 /** The hidden ref the workdir snapshot lives on, in the VM and in the copy here. */
 const SNAPSHOT_REF = "refs/sadbox/snapshot";
 
-async function hostGit(at: string[], args: string[]) {
-  const proc = Bun.spawn(["git", ...at, ...args], { stdout: "pipe", stderr: "pipe" });
+async function hostGit(at: string[], args: string[], stdin?: string) {
+  const proc = Bun.spawn(["git", ...at, ...args], {
+    stdin: stdin == null ? "ignore" : new Blob([stdin]), stdout: "pipe", stderr: "pipe",
+  });
   const [out, err, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -73,16 +78,58 @@ const SNAPSHOT_SCRIPT =
 
 const firstLines = (text: string, n = 6) => text.split("\n").slice(0, n).join("\n");
 
-/** The files git named when it refused a checkout rather than overwrite them. */
-function filesInTheWay(stderr: string): string[] {
-  const files: string[] = [];
-  let listing = false;
-  for (const line of stderr.split("\n")) {
-    if (/would be overwritten by checkout|would be removed by checkout/.test(line)) { listing = true; continue; }
-    if (listing && /^\t/.test(line)) files.push(line.trim());
-    else listing = false;
+/** path → "mode blob" for every file in NUL-separated `ls-files -s` /
+ *  `ls-tree -r` output. */
+function entries(listing: string): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const rec of listing.split("\0")) {
+    const tab = rec.indexOf("\t");
+    if (tab < 0) continue;
+    const [mode, a, b] = rec.slice(0, tab).split(" ");
+    // ls-files: "mode blob stage" · ls-tree: "mode type blob"
+    map.set(rec.slice(tab + 1), `${mode} ${a === "blob" || a === "commit" ? b : a}`);
   }
-  return files;
+  return map;
+}
+
+/** Work out what bringing the folder from snapshot `from` to snapshot `tip`
+ *  would overwrite. Leaves the private repository's index describing the
+ *  folder as it really is for every file involved, and returns that as a tree
+ *  (`actual`) for git to move on from — plus the files that are in the way. */
+async function plan(at: string[], folder: string, from: string, tip: string) {
+  // the files the project changed: ":oldmode newmode oldblob newblob X\0path\0"
+  const raw = (await hostGit(at, ["diff", "--raw", "-z", "--no-renames", "--no-abbrev", from, tip])).out.split("\0");
+  const touched: { path: string; old: string | null; next: string | null }[] = [];
+  for (let i = 0; i + 1 < raw.length; i += 2) {
+    const [oldMode, newMode, oldBlob, newBlob] = raw[i].replace(/^:/, "").split(" ");
+    touched.push({
+      path: raw[i + 1],
+      old: /^0+$/.test(oldBlob) ? null : `${oldMode} ${oldBlob}`,
+      next: /^0+$/.test(newBlob) ? null : `${newMode} ${newBlob}`,
+    });
+  }
+
+  // what the folder holds for each of them right now, as git sees it
+  await hostGit(at, ["read-tree", from]);
+  await hostGit(at, ["update-index", "--add", "--remove", "-z", "--stdin"], touched.map((t) => t.path + "\0").join(""));
+  const here = entries((await hostGit(at, ["ls-files", "-s", "-z"])).out);
+  // and what the folder's own repository has committed
+  const committed = (await isGitRepo(folder))
+    ? entries((await hostGit(["-C", folder], ["ls-tree", "-r", "-z", "HEAD"])).out)
+    : new Map<string, string>();
+
+  const blocking: string[] = [];
+  for (const t of touched) {
+    const now = here.get(t.path) ?? null;
+    const safe =
+      now === null ||                       // not there: nothing to lose
+      now === t.next ||                     // already what the VM has
+      now === t.old ||                      // untouched since the last sync
+      now === committed.get(t.path);        // committed in the folder's repository
+    if (!safe) blocking.push(t.path);
+  }
+  const actual = (await hostGit(at, ["write-tree"])).out;
+  return { blocking, actual };
 }
 
 export async function syncProject(id: string, opts?: { force?: boolean }) {
@@ -170,29 +217,37 @@ export async function syncProject(id: string, opts?: { force?: boolean }) {
     const n = drift.out ? drift.out.split("\n").length : 0;
     if (n) note = `${n} file${n === 1 ? "" : "s"} in the folder differ${n === 1 ? "s" : ""} from the VM (edited or committed there since the last sync)`;
   } else {
-    let co = await hostGit(at, ["checkout", "-q", ...(opts?.force ? ["-f"] : []), "--detach", tip]);
-    // forced: write every file out again, whatever git believes is already in
-    // place — its changed-file check goes by size and timestamp, and can miss
-    // an edit made in the same instant as the last sync. Rebuilding the index
-    // from the snapshot drops those notes, so nothing is assumed unchanged.
-    if (opts?.force && co.code === 0) {
-      await hostGit(at, ["read-tree", tip]);
-      co = await hostGit(at, ["checkout-index", "-q", "-f", "-a"]);
-      await hostGit(at, ["update-index", "-q", "--refresh"]);
-    }
-    if (co.code === 0) {
-      applied = "copied";
-      // against the previous snapshot, or — the first time into a folder that
-      // held nothing of the project's — against an empty tree
-      const from = previous ?? (await hostGit(at, ["hash-object", "-t", "tree", "/dev/null"])).out;
-      const stat = await hostGit(at, ["diff", "--stat", from, tip]);
-      changed = previous === tip ? "" : stat.out;
-    } else {
+    // from the previous snapshot, or — the first time into a folder that held
+    // nothing of the project's — from an empty tree
+    const from = previous ?? (await hostGit(at, ["hash-object", "-t", "tree", "/dev/null"])).out;
+    const todo = await plan(at, folder, from, tip);
+    if (todo.blocking.length && !opts?.force) {
       applied = "not-applied";
-      blocking = filesInTheWay(co.err);
-      note = blocking.length
-        ? "these files in the folder were changed there too (or already exist), and were not overwritten"
-        : firstLines(co.err);
+      blocking = todo.blocking;
+      note = "these files in the folder have changes that are not committed (or are files of your own), and were not overwritten";
+      await hostGit(at, ["read-tree", from]);
+    } else {
+      // git moves the folder from what it actually holds to the snapshot: it
+      // writes and removes the files, and refuses anything outside the folder
+      let co = await hostGit(at, ["read-tree", "-m", "-u", todo.actual, tip]);
+      if (co.code === 0) await hostGit(at, ["update-ref", "--no-deref", "HEAD", tip]);
+      // forced: write every file out again, whatever git believes is already
+      // in place — its changed-file check goes by size and timestamp, and can
+      // miss an edit made in the same instant as the last sync.
+      if (opts?.force && co.code === 0) {
+        await hostGit(at, ["read-tree", tip]);
+        co = await hostGit(at, ["checkout-index", "-q", "-f", "-a"]);
+        await hostGit(at, ["update-index", "-q", "--refresh"]);
+      }
+      if (co.code === 0) {
+        applied = "copied";
+        // what this sync actually changed in the folder
+        changed = (await hostGit(at, ["diff", "--stat", todo.actual, tip])).out;
+      } else {
+        applied = "not-applied";
+        note = firstLines(co.err);
+        await hostGit(at, ["read-tree", from]);
+      }
     }
   }
 

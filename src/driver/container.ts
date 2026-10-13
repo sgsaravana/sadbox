@@ -1,6 +1,7 @@
 // Apple `container` CLI driver (macOS). Every recipe here was proven in
 // spikes/a-terminal and spikes/b-image — see their READMEs for the gotchas.
-import { rm } from "fs/promises";
+import { readFile, rename, rm, writeFile } from "fs/promises";
+import { join } from "path";
 import { config } from "../config";
 import type { ByteStream, ExecResult, TerminalHandle, ProjectDriver, ProjectInfo, ProjectStats } from "./types";
 
@@ -144,6 +145,31 @@ export const containerDriver: ProjectDriver = {
     await unloadRuntime(ref);
     if (await settledOff(this, ref, 8_000)) return;
     throw new Error(`could not stop the VM${r.stderr.trim() ? `: ${r.stderr.trim()}` : " (it is not responding)"}`);
+  },
+
+  // The CLI has no way to resize an existing container, and recreating one
+  // loses everything outside the workdir volume (agent logins, installed
+  // packages). The runtime reads the VM's size from its stored configuration
+  // each time it boots, though, so that is edited in place. Verified on
+  // container 1.4.1: the guest boots with the new size and the disk as it was.
+  // `inspect`/`list` keep reporting the old size until the container service
+  // restarts; `stats` and the guest itself report the new one.
+  async setMemory(ref, memoryMB) {
+    if ((await this.inspect(ref)).state === "running") throw new Error("the VM must be stopped to change its memory");
+    const dir = join(config.containerDataDir, "containers", ref);
+    const field = /("memoryInBytes"\s*:\s*)\d+/g;
+    const edits: { path: string; text: string }[] = [];
+    for (const name of ["config.json", "runtime-configuration.json"]) {
+      const path = join(dir, name);
+      const text = await readFile(path, "utf8").catch(() => null);
+      // a textual edit, so nothing else in the file is reformatted
+      if (text == null || !text.match(field)) throw new Error(`cannot change this VM's memory in place (${name} is not as expected) — Rebuild applies it instead`);
+      edits.push({ path, text: text.replace(field, `$1${memoryMB * 1024 * 1024}`) });
+    }
+    for (const { path, text } of edits) {
+      await writeFile(`${path}.sadbox-tmp`, text);
+      await rename(`${path}.sadbox-tmp`, path);
+    }
   },
 
   async inspect(ref) {

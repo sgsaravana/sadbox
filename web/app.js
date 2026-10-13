@@ -192,6 +192,33 @@ async function power(id, action) {
   }
 }
 
+// Change how much memory a project's VM has. A running VM restarts to take it.
+async function changeMemory(id, name, currentMB, running) {
+  const nowGB = currentMB ? +(currentMB / 1024).toFixed(2) : null;
+  const answer = prompt(
+    `Memory for "${name}", in GB${nowGB ? ` (now ${nowGB})` : ""}.\n\n` +
+    (running
+      ? "The VM restarts to apply it: agents and terminals running in it end. Its files, installed packages and logins are kept."
+      : "It applies the next time the VM starts."),
+    String(nowGB && nowGB >= 4 ? nowGB : 4));
+  if (answer == null) return;
+  const gb = Number(answer.trim().replace(/\s*gb?$/i, ""));
+  if (!Number.isFinite(gb) || gb <= 0) throw new Error("Enter a number of GB, for example 4");
+  const memoryMB = Math.round(gb * 1024);
+  if (memoryMB === currentMB) return;
+  if (running) {
+    powerBusy.set(id, "Restarting…");
+    if (lastDetail?.id === id) paintDetail(lastDetail);
+  }
+  try {
+    const r = await api(`/api/projects/${id}/memory`, { method: "PUT", body: { memoryMB } });
+    if (r.applied === false) alert("The setting is saved, but the VM still reports its old memory size. A Rebuild will apply it.");
+  } finally {
+    powerBusy.delete(id);
+    if (location.hash === `#project/${id}`) await renderDetail(id);
+  }
+}
+
 document.addEventListener("click", async (e) => {
   const b = e.target.closest("button");
   if (!b) return;
@@ -228,6 +255,8 @@ document.addEventListener("click", async (e) => {
       }
     } else if (b.dataset.secrets) {
       openProjectSecrets(b.dataset.secrets, b.dataset.name || b.closest(".card")?.querySelector("h3").textContent.trim() || "project");
+    } else if (b.dataset.memory) {
+      await changeMemory(b.dataset.memory, b.dataset.name, Number(b.dataset.mb) || null, b.dataset.running === "1");
     } else if (b.dataset.rebuild) {
       if (confirm(`Rebuild "${b.dataset.name}"? The VM is destroyed and recreated from the project's original source (local folder re-copied, or git remote re-cloned). Unsynced work inside the VM will be lost.`)) {
         b.disabled = true; b.textContent = "Rebuilding…";
@@ -708,7 +737,9 @@ function paintDetail(d) {
         <h3>Resources</h3>
         <dl>
           <dt>CPU</dt><dd>${r.cpuPercent != null ? r.cpuPercent.toFixed(1) + "%" : "—"} of ${r.cpus ?? "?"} vCPU</dd>
-          <dt>Memory</dt><dd class="metered">${fmtBytes(r.memoryUsageBytes)} / ${fmtBytes(r.memoryLimitBytes)} ${bar(r.memoryUsageBytes, r.memoryLimitBytes)}</dd>
+          <dt>Memory</dt><dd class="metered">${fmtBytes(r.memoryUsageBytes)} / ${fmtBytes(r.memoryLimitBytes)} ${bar(r.memoryUsageBytes, r.memoryLimitBytes)}
+            ${["running", "stopped"].includes(state) && !powerBusy.has(d.id)
+              ? `<button class="mini" data-memory="${d.id}" data-name="${d.name}" data-mb="${r.memoryMB ?? ""}" data-running="${state === "running" ? 1 : 0}" title="Give this VM more (or less) memory">Change…</button>` : ""}</dd>
           <dt>Disk</dt><dd class="metered">${fmtBytes(r.diskUsedBytes)} / ${fmtBytes(r.diskTotalBytes)} ${bar(r.diskUsedBytes, r.diskTotalBytes)}</dd>
           <dt>Workdir size</dt><dd>${fmtBytes(r.workdirBytes)}</dd>
           <dt>Processes</dt><dd>${r.numProcesses ?? "—"}</dd>

@@ -1,3 +1,4 @@
+import { totalmem } from "os";
 import { db } from "../db";
 
 export interface Settings {
@@ -8,6 +9,17 @@ export interface Settings {
 
 const DEFAULTS: Settings = { defaultCpus: 4, defaultMemoryMB: 1024, defaultDiskGB: 10 };
 const LIMITS = { cpus: [1, 16], memoryMB: [256, 65536], diskGB: [1, 500] };
+
+/** A memory size someone asked for, checked: whole MB, within what sadbox
+ *  allows and what this machine has. */
+export function validMemoryMB(v: unknown): number {
+  const n = Number(v);
+  const [lo, hi] = LIMITS.memoryMB;
+  if (!Number.isInteger(n) || n < lo || n > hi) throw new Error(`memory must be a whole number of MB between ${lo} and ${hi}`);
+  const hostMB = Math.floor(totalmem() / 1024 / 1024);
+  if (n > hostMB) throw new Error(`this machine has ${hostMB} MB of memory — a VM cannot have ${n} MB`);
+  return n;
+}
 
 export function getSettings(): Settings {
   const rows = db.query<{ key: string; value: string }, []>("SELECT key, value FROM settings").all();

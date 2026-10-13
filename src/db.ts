@@ -50,7 +50,10 @@ db.run(`
 // sync_path: a local folder connected after the fact to a project that was
 // created from a git URL (source_path ''), so its work can be synced back. Kept
 // apart from source_path, which is what a Rebuild recreates the VM from.
-for (const [col, ddl] of [["git_remote", "git_remote TEXT"], ["git_token_enc", "git_token_enc TEXT"], ["sync_path", "sync_path TEXT"]]) {
+for (const [col, ddl] of [["git_remote", "git_remote TEXT"], ["git_token_enc", "git_token_enc TEXT"], ["sync_path", "sync_path TEXT"],
+  // memory_mb: the VM's memory, per project (NULL on rows from before it was
+  // recorded — those VMs were created with whatever the default was then)
+  ["memory_mb", "memory_mb INTEGER"]]) {
   const has = db.query<{ name: string }, []>("PRAGMA table_info(projects)").all().some((c) => c.name === col);
   if (!has) db.run(`ALTER TABLE projects ADD COLUMN ${ddl}`);
 }

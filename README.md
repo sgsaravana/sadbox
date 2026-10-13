@@ -149,7 +149,7 @@ with `sadbox passwd`. Then, in the browser:
 4. When you like the result, **Sync back**: the VM's workdir is copied into
    your folder as ordinary, uncommitted file changes — review them with
    `git diff` and commit what you want. Nothing is committed for you, in the VM
-   or in your repo, and a file you changed yourself meanwhile is never
+   or in your repo, and uncommitted work of yours in the folder is never
    overwritten: the sync stops and lists what is in the way.
 
 `sadbox doctor` reports what is missing if something does not start. sadbox
@@ -220,9 +220,11 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   folder (its own `.git` is never written to). You review and commit.
   - Only files that changed since the last sync are written; files the project
     deleted are removed; files it never had are left alone.
-  - A file you edited in the folder that the VM also changed — or a file of
-    yours sitting where a new project file would go — is **not** overwritten:
-    the sync stops, lists those files, and offers to overwrite them.
+  - A file with uncommitted edits in the folder that the VM also changed — or
+    a file of yours sitting where a new project file would go — is **not**
+    overwritten: the sync stops, lists those files, and offers to overwrite
+    them. A file your repository has committed is replaced by the VM's version
+    (it shows up in `git diff`; your version stays in the history).
   - What the folder was last given is tracked in `~/.sadbox/sync/<id>.git`.
 
   A connected folder is only where work goes: **Rebuild** still re-clones the
@@ -284,7 +286,10 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   (via `container stats` + in-guest probes), workdir size, tmux session/window
   counts and attached-terminal count, git branch/dirty state, folder/remote
   info, and the installed-toolchain probe — plus the live **Network** panel
-  (below). A **Rebuild** action destroys the VM and recreates it from the
+  (below). **Change…** next to Memory gives that one VM more (or less) memory:
+  a running VM is shut down and booted again with the new size, so agents and
+  terminals in it end, while its files, installed packages and logins stay.
+  A **Rebuild** action destroys the VM and recreates it from the
   project's original source (local folder re-copied at its current HEAD, or the
   git remote re-cloned), keeping the project's secrets and network rules;
   unsynced work inside the old VM is lost. Rebuild uses the **current** base
@@ -367,6 +372,7 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 | GET | `/api/projects/:id/term/links` | links currently on the project's terminal (wrapped URLs re-joined) |
 | POST | `/api/projects/:id/rebuild` | destroy + recreate the VM from the project's original source (keeps secrets + net rules) |
 | GET | `/api/projects/:id/sync/status` | count of uncommitted files in the VM |
+| PUT | `/api/projects/:id/memory` | `{memoryMB}` — change this VM's memory; a running VM is restarted to take it (disk kept) |
 | PUT/DELETE | `/api/projects/:id/sync-folder` | connect (`{path}`) / disconnect a local folder for a project cloned from a git URL |
 | GET/PUT/POST | `/api/projects/:id/secrets` | view / assign globals / add project-specific |
 | GET/POST | `/api/secrets`, DELETE `/api/secrets/:id` | global secret store |

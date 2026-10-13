@@ -6,7 +6,7 @@ import { staticRoutes, aceFiles } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
 import { assignSecrets, createGlobalSecret, createProjectSecret, deleteSecret, injectSecrets, listGlobalSecrets, projectSecretView } from "../core/secrets";
-import { connectSyncFolder, createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject, startProject, stopProject } from "../core/projects";
+import { connectSyncFolder, createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject, setProjectMemory, startProject, stopProject } from "../core/projects";
 import { syncStatus, syncProject } from "../core/sync";
 import { terminalLinks } from "../core/links";
 import { getSettings, updateSettings } from "../core/settings";
@@ -168,6 +168,11 @@ export function startServer() {
         if (m && req.method === "POST") return json(await rebuildProject(m[1]));
         m = p.match(/^\/api\/projects\/([\w-]+)\/(start|stop)$/);
         if (m && req.method === "POST") return json(await (m[2] === "start" ? startProject : stopProject)(m[1]));
+        m = p.match(/^\/api\/projects\/([\w-]+)\/memory$/);
+        if (m && req.method === "PUT") {            // restarts the VM if it is running
+          const b = await req.json();
+          return json(await setProjectMemory(m[1], b.memoryMB));
+        }
         m = p.match(/^\/api\/projects\/([\w-]+)\/sync-folder$/);
         if (m && req.method === "PUT") {            // connect a local folder to a cloned project
           const b = await req.json();
