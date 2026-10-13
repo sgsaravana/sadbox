@@ -65,7 +65,7 @@ async function refreshNavTree() {
   const cur = location.hash.slice(1).split("/");
   const activeId = cur[0] === "project" ? cur[1] : null;
   $("#nav-projects").innerHTML = projects.map((p) => {
-    const state = p.live?.state === "running" ? "running" : p.state;
+    const state = p.state;
     const n = pending[p.id] || 0;
     const badge = n ? `<span class="nav-badge" title="${n} request(s) awaiting approval">${n}</span>` : "";
     return `<li><a href="#project/${p.id}" class="nav-sub ${p.id === activeId ? "active" : ""}">
@@ -116,7 +116,7 @@ async function refreshProjects() {
     return;
   }
   el.innerHTML = projects.map((p) => {
-    const state = p.live?.state === "running" ? "running" : p.state;
+    const state = p.state;
     const gitLine = p.git_remote
       ? `<br>${p.source_path ? "remote" : "cloned from"} ${escapeHtml(p.git_remote)}${p.has_git_token ? " 🔑" : ""}`
       : "";
@@ -129,6 +129,7 @@ async function refreshProjects() {
       </div>
       <div class="row">
         <button data-details="${p.id}">Details</button>
+        ${powerButton(p)}
         <button data-term="${p.id}" data-name="${p.name}">Terminal ↗</button>
         <button data-edit="${p.id}" data-name="${p.name}">Editor ↗</button>
         ${p.sync_folder ? `<button data-sync="${p.id}">Sync back</button>` : ""}
@@ -138,6 +139,84 @@ async function refreshProjects() {
       <div class="sync-result"></div>
     </div>`;
   }).join("");
+}
+
+// What a Sync back did, in words
+function syncSummary(r) {
+  const review = r.kind === "git" ? `\n\nNothing was committed — review with 'git status' / 'git diff' in that folder and commit what you want.` : "";
+  if (r.applied === "copied") {
+    return `Synced into ${r.folder}${r.forced ? " (overwriting your changes there)" : ""} — its files now match the VM's workdir.${review}` +
+      (r.changed ? `\n\n${r.changed}` : "");
+  }
+  if (r.applied === "current") {
+    return `Already up to date — nothing has changed in the VM since the last sync.` + (r.note ? `\n\nNote: ${r.note}.` : "");
+  }
+  return `Nothing in ${r.folder} was changed: ${r.note}` +
+    (r.blocking.length ? `:\n\n${r.blocking.map((f) => "  " + f).join("\n")}\n\nCommit, stash or move them and press Sync back again — or overwrite them with the VM's versions.` : "");
+}
+/** Run a sync and show what it did under the project (with a way to force it
+ *  when files in the folder were in the way). */
+async function runSync(id, container, force) {
+  const r = await api(`/api/projects/${id}/sync`, { method: "POST", body: { force } });
+  const again = r.applied === "not-applied" && r.blocking.length
+    ? `<button class="danger mini" data-sync="${id}" data-force="1">Overwrite ${r.blocking.length} file${r.blocking.length === 1 ? "" : "s"}</button>`
+    : r.applied === "current" && r.note
+      ? `<button class="mini" data-sync="${id}" data-force="1" title="Write the VM's files over the folder's again">Make the folder match the VM again</button>`
+      : "";
+  container.querySelector(".sync-result").innerHTML =
+    `<pre class="result">${escapeHtml(syncSummary(r))}</pre>${again}`;
+}
+
+// Stop / Start for a project's VM, by its state
+const powerBusy = new Map(); // project id -> label, while a request is out
+function powerButton(p) {
+  const busy = powerBusy.get(p.id) || (p.state === "starting" ? "Starting…" : p.state === "stopping" ? "Stopping…" : null);
+  if (busy) return `<button disabled><span class="spinner"></span> ${busy}</button>`;
+  if (p.state === "running") return `<button data-stop="${p.id}" data-name="${p.name}" title="Shut the VM down; its files are kept">Stop</button>`;
+  if (p.state === "stopped") return `<button class="primary" data-start="${p.id}" title="Boot the VM again; its files are as you left them">Start</button>`;
+  return "";
+}
+async function power(id, action) {
+  powerBusy.set(id, action === "start" ? "Starting…" : "Stopping…");
+  const repaint = () => {
+    if (location.hash === `#project/${id}`) { if (lastDetail?.id === id) paintDetail(lastDetail); return renderDetail(id); }
+    refreshNavTree(); return refreshProjects();
+  };
+  if (lastDetail?.id === id && location.hash === `#project/${id}`) paintDetail(lastDetail); else refreshProjects();
+  try {
+    const r = await api(`/api/projects/${id}/${action}`, { method: "POST", body: {} });
+    if (lastDetail?.id === id) lastDetail.state = r.state;
+  } finally {
+    powerBusy.delete(id);
+    await repaint();
+  }
+}
+
+// Change how much memory a project's VM has. A running VM restarts to take it.
+async function changeMemory(id, name, currentMB, running) {
+  const nowGB = currentMB ? +(currentMB / 1024).toFixed(2) : null;
+  const answer = prompt(
+    `Memory for "${name}", in GB${nowGB ? ` (now ${nowGB})` : ""}.\n\n` +
+    (running
+      ? "The VM restarts to apply it: agents and terminals running in it end. Its files, installed packages and logins are kept."
+      : "It applies the next time the VM starts."),
+    String(nowGB && nowGB >= 4 ? nowGB : 4));
+  if (answer == null) return;
+  const gb = Number(answer.trim().replace(/\s*gb?$/i, ""));
+  if (!Number.isFinite(gb) || gb <= 0) throw new Error("Enter a number of GB, for example 4");
+  const memoryMB = Math.round(gb * 1024);
+  if (memoryMB === currentMB) return;
+  if (running) {
+    powerBusy.set(id, "Restarting…");
+    if (lastDetail?.id === id) paintDetail(lastDetail);
+  }
+  try {
+    const r = await api(`/api/projects/${id}/memory`, { method: "PUT", body: { memoryMB } });
+    if (r.applied === false) alert("The setting is saved, but the VM still reports its old memory size. A Rebuild will apply it.");
+  } finally {
+    powerBusy.delete(id);
+    if (location.hash === `#project/${id}`) await renderDetail(id);
+  }
 }
 
 document.addEventListener("click", async (e) => {
@@ -150,16 +229,20 @@ document.addEventListener("click", async (e) => {
       window.open(`/editor?id=${b.dataset.edit}&name=${b.dataset.name}`, "_blank");
     } else if (b.dataset.details) {
       location.hash = `project/${b.dataset.details}`;
+    } else if (b.dataset.start) {
+      await power(b.dataset.start, "start");
+    } else if (b.dataset.stop) {
+      if (confirm(`Stop "${b.dataset.name}"? Its files are kept, but whatever is running in it — agents, terminals, dev servers — ends.`)) {
+        await power(b.dataset.stop, "stop");
+      }
     } else if (b.dataset.sync) {
-      b.disabled = true; b.textContent = "Syncing…";
-      const r = await api(`/api/projects/${b.dataset.sync}/sync`, { method: "POST", body: {} });
-      const out = r.upToDate
-        ? "Already up to date."
-        : `Fetched into ${r.ref} in ${r.folder} (${r.bundleBytes} bytes${r.fullHistory ? ", full history — the folder did not have the starting commit" : ""})\n\n${r.commits}\n\n${r.diffstat}\n\nApply with e.g.:\n  git -C ${r.folder} merge ${r.ref}`;
+      const force = b.dataset.force === "1";
+      if (force && !confirm("Overwrite the folder's versions of these files with the VM's? Your changes to them in the folder are lost.")) return;
+      const label = b.textContent;
       const container = b.closest(".card") || $("#view-detail");
-      container.querySelector(".sync-result").innerHTML =
-        `<pre class="result">${escapeHtml(out)}</pre>`;
-      b.disabled = false; b.textContent = "Sync back";
+      b.disabled = true; b.textContent = "Syncing…";
+      try { await runSync(b.dataset.sync, container, force); }
+      finally { b.disabled = false; b.textContent = label; }
     } else if (b.dataset.linkFolder) {
       // connect a local folder to a project cloned from a git URL (reuses the folder picker)
       const id = b.dataset.linkFolder;
@@ -172,6 +255,8 @@ document.addEventListener("click", async (e) => {
       }
     } else if (b.dataset.secrets) {
       openProjectSecrets(b.dataset.secrets, b.dataset.name || b.closest(".card")?.querySelector("h3").textContent.trim() || "project");
+    } else if (b.dataset.memory) {
+      await changeMemory(b.dataset.memory, b.dataset.name, Number(b.dataset.mb) || null, b.dataset.running === "1");
     } else if (b.dataset.rebuild) {
       if (confirm(`Rebuild "${b.dataset.name}"? The VM is destroyed and recreated from the project's original source (local folder re-copied, or git remote re-cloned). Unsynced work inside the VM will be lost.`)) {
         b.disabled = true; b.textContent = "Rebuilding…";
@@ -268,8 +353,11 @@ async function loadDir(path) {
   const d = await api(`/api/fs/dirs${q}`);
   pickerPath = d.path;
   $("#picker-current").textContent = d.path;
-  $("#picker-hint").textContent = d.isGitRepo ? "✓ git repository" : "not a git repo (projects need one)";
-  $("#picker-hint").style.color = d.isGitRepo ? "var(--ok)" : "var(--warn)";
+  // a folder being connected for sync may be any folder; a project's source must be a repo
+  const anyFolder = pickerOnSelect != null;
+  $("#picker-hint").textContent = d.isGitRepo ? "✓ git repository"
+    : anyFolder ? "plain folder — files will be copied in" : "not a git repo (projects need one)";
+  $("#picker-hint").style.color = d.isGitRepo || anyFolder ? "var(--ok)" : "var(--warn)";
   const items = [];
   if (d.parent) items.push(`<li data-dir="${d.parent}" class="up">↩ ..</li>`);
   items.push(...d.dirs.map((e) =>
@@ -599,7 +687,7 @@ async function setSyncFolder(id, path) {
       paintDetail(lastDetail);
     }
     if (r.hasBase === false) {
-      alert(`Connected ${r.sync_path}.\n\nThis folder does not contain the commit the VM started from, so the first sync will bring the branch's full history rather than just the new commits. (If it is a clone of the same repository, a 'git fetch' there first keeps syncs small.)`);
+      alert(`Connected ${r.sync_path}.\n\nThis repository does not contain the commit the VM started from, so it looks like a different project. A sync will fetch the VM's branch there (${"refs/remotes/sadbox/…"}) but will not merge it into your files. If it is a clone of the same repository, run 'git pull' there first.`);
     }
   } catch (err) {
     folderPending = null;
@@ -611,7 +699,7 @@ async function setSyncFolder(id, path) {
 function paintDetail(d) {
   const stats = $("#detail-stats") || $("#detail-body");
   $("#detail-name").textContent = d.name;
-  const state = d.live?.state === "running" ? "running" : d.state;
+  const state = d.state;
   const r = d.resources;
   const term = d.tmux.clients > 0
     ? `<span class="ok">● ${d.tmux.clients} attached</span>`
@@ -622,6 +710,7 @@ function paintDetail(d) {
     <button data-edit="${d.id}" data-name="${d.name}" title="Browse and edit the workdir">Editor ↗</button>
     ${d.sync_folder ? `<button data-sync="${d.id}">Sync back</button>` : ""}
     <button data-secrets="${d.id}">Secrets…</button>
+    ${powerButton(d)}
     <button data-rebuild="${d.id}" data-name="${d.name}" title="Destroy the VM and recreate it from the original source">Rebuild</button>
     <button class="danger" data-destroy="${d.id}" data-name="${d.name}">Destroy</button>`;
 
@@ -630,7 +719,8 @@ function paintDetail(d) {
       <div class="panel stat">
         <h3>Status</h3>
         <dl>
-          <dt>State</dt><dd><span class="dot ${state}"></span>${state}</dd>
+          <dt>State</dt><dd><span class="dot ${d.unresponsive ? "error" : state}"></span>${state}${d.unresponsive
+            ? ` <span style="color:var(--bad)">· not responding</span> <span class="hint">Stop it, then Start — files are kept</span>` : ""}</dd>
           <dt>Network</dt><dd>${d.live?.isolated
             ? `<span class="ok">isolated</span> <span class="hint">no network — proxy only</span>`
             : d.live?.network
@@ -647,7 +737,9 @@ function paintDetail(d) {
         <h3>Resources</h3>
         <dl>
           <dt>CPU</dt><dd>${r.cpuPercent != null ? r.cpuPercent.toFixed(1) + "%" : "—"} of ${r.cpus ?? "?"} vCPU</dd>
-          <dt>Memory</dt><dd class="metered">${fmtBytes(r.memoryUsageBytes)} / ${fmtBytes(r.memoryLimitBytes)} ${bar(r.memoryUsageBytes, r.memoryLimitBytes)}</dd>
+          <dt>Memory</dt><dd class="metered">${fmtBytes(r.memoryUsageBytes)} / ${fmtBytes(r.memoryLimitBytes)} ${bar(r.memoryUsageBytes, r.memoryLimitBytes)}
+            ${["running", "stopped"].includes(state) && !powerBusy.has(d.id)
+              ? `<button class="mini" data-memory="${d.id}" data-name="${d.name}" data-mb="${r.memoryMB ?? ""}" data-running="${state === "running" ? 1 : 0}" title="Give this VM more (or less) memory">Change…</button>` : ""}</dd>
           <dt>Disk</dt><dd class="metered">${fmtBytes(r.diskUsedBytes)} / ${fmtBytes(r.diskTotalBytes)} ${bar(r.diskUsedBytes, r.diskTotalBytes)}</dd>
           <dt>Workdir size</dt><dd>${fmtBytes(r.workdirBytes)}</dd>
           <dt>Processes</dt><dd>${r.numProcesses ?? "—"}</dd>
@@ -666,7 +758,7 @@ function paintDetail(d) {
                <button class="mini" data-link-folder="${d.id}" data-current="${escapeHtml(d.sync_path)}" title="Sync into a different folder">Change</button>
                <button class="mini" data-unlink-folder="${d.id}">Disconnect</button>`
             : `<span class="dim">not connected</span>
-               <button class="mini" data-link-folder="${d.id}" title="Pick a local git repository to sync this project's work into">Connect a folder…</button>`}</dd>`}
+               <button class="mini" data-link-folder="${d.id}" title="Pick a local folder (a git repository or any other folder) to sync this project's work into">Connect a folder…</button>`}</dd>`}
           <dt>Workdir (in VM)</dt><dd class="mono">${escapeHtml(d.workdir)}</dd>
           <dt>Work branch</dt><dd class="mono">${escapeHtml(d.branch)}</dd>
           <dt>Uncommitted</dt><dd>${d.git.dirty ?? 0} file(s)</dd>

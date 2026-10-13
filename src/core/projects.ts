@@ -1,13 +1,15 @@
-import { existsSync } from "fs";
+import { existsSync, realpathSync, statSync } from "fs";
+import { rm } from "fs/promises";
+import { join } from "path";
 import { config } from "../config";
 import { encrypt, decrypt } from "../crypto";
 import { db, logEvent } from "../db";
 import { getDriver } from "../driver";
-import type { ProjectStats } from "../driver/types";
+import { LONG_TASK_MS, type ProjectInfo, type ProjectStats } from "../driver/types";
 import { injectSecrets, assignSecrets, purgeProjectSecrets } from "./secrets";
-import { getSettings } from "./settings";
-import { installGuestProxy, openProjectSocket, closeProjectSocket } from "../net/proxy";
-import { forgetGuestTools } from "../net/guest";
+import { getSettings, validMemoryMB } from "./settings";
+import { installGuestProxy, openProjectSocket, closeProjectSocket, redialProjectSocket } from "../net/proxy";
+import { forgetGuestTools, startGuestRelay } from "../net/guest";
 import { purgeProjectNet } from "../net/rules";
 import { clearProjectApprovals } from "../net/approvals";
 import { clearProjectFeed } from "../net/events";
@@ -31,6 +33,7 @@ export interface ProjectRow {
   git_remote: string | null;
   git_token_enc: string | null;
   sync_path: string | null;   // local folder connected to a cloned project (sync target only)
+  memory_mb: number | null;   // the VM's memory (null: created before this was recorded)
   error: string | null;
   created_at: string;
 }
@@ -166,7 +169,7 @@ async function cloneIntoWorkdir(ref: string, url: string, name: string): Promise
     `base=$(git rev-parse HEAD); ` +
     `git checkout -q -b ${branchFor(name)}; ` +
     `echo "defbr=$defbr"; echo "base=$base"`;
-  const r = await driver.exec(ref, ["sh", "-c", script]);
+  const r = await driver.exec(ref, ["sh", "-c", script], { timeoutMs: LONG_TASK_MS });
   if (r.exitCode !== 0) throw new Error(`git clone failed: ${r.stderr || r.stdout}`);
   const info = kv(r.stdout);
   return { base: info.base || "", branch: info.defbr || "HEAD" };
@@ -198,8 +201,10 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   // way out is this project's own socket to the egress proxy.
   const isolated = config.network === "none";
   forgetGuestTools(ref); // a new VM under this name has a fresh filesystem
+  const memoryMB = p.memory_mb ?? s.defaultMemoryMB; // the project's own, once it has one
+  db.query("UPDATE projects SET memory_mb = ? WHERE id = ?").run(memoryMB, p.id);
   await driver.create(ref, p.image, {
-    cpus: s.defaultCpus, memoryMB: s.defaultMemoryMB, diskGB: s.defaultDiskGB, network: config.network,
+    cpus: s.defaultCpus, memoryMB, diskGB: s.defaultDiskGB, network: config.network,
     socket: isolated ? { host: openProjectSocket(p.id), guest: config.guestCarrierSocket } : undefined,
   });
 
@@ -240,6 +245,7 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
       ref,
       `mkdir -p ${config.guestWorkdir} && tar -xf - -C ${config.guestWorkdir}`,
       tarBytes,
+      { timeoutMs: LONG_TASK_MS },
     );
     if (cp.exitCode !== 0) throw new Error(`copy-in failed: ${cp.stderr}`);
     const setup = await driver.exec(ref, ["sh", "-c",
@@ -266,11 +272,11 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   if (apps.length) {
     const env = `[ -f ${config.guestNetEnvFile} ] && . ${config.guestNetEnvFile}; export DEBIAN_FRONTEND=noninteractive; `;
     await duringSetup(p.id, async () => {
-      const up = await driver.exec(ref, ["sh", "-c", env + "apt-get update -qq"], { user: "root" });
+      const up = await driver.exec(ref, ["sh", "-c", env + "apt-get update -qq"], { user: "root", timeoutMs: LONG_TASK_MS });
       if (up.exitCode !== 0) logEvent(p.id, "app.install", `apt-get update: exit ${up.exitCode}`);
       for (const pkg of apps) {
         const r = await driver.exec(ref, ["sh", "-c",
-          env + `command -v ${pkg} >/dev/null 2>&1 || apt-get install -y -qq ${pkg}`], { user: "root" });
+          env + `command -v ${pkg} >/dev/null 2>&1 || apt-get install -y -qq ${pkg}`], { user: "root", timeoutMs: LONG_TASK_MS });
         logEvent(p.id, "app.install", `${pkg}: exit ${r.exitCode}`);
       }
     });
@@ -376,12 +382,14 @@ async function loadDetails(id: string) {
 
   const info = await driver.inspect(ref).catch(() => null);
   const running = info?.state === "running";
+  const state = settle(p, info);
 
   let cpuPercent: number | null = null;
   let stats: ProjectStats | null = null;
   let guest: Record<string, string> = {};
   let toolchain: ToolInfo[] | null = null;
   let partial = false; // some readings are still on their way — ask again shortly
+  let unresponsive = false; // up as far as the runtime knows, but not answering
   if (running) {
     // only the guest probe is waited for; see vitals.ts for the other two
     const [g, live, tc] = await Promise.all([
@@ -390,6 +398,7 @@ async function loadDetails(id: string) {
       liveToolchain(ref),
     ]);
     if (g?.exitCode === 0) guest = kv(g.stdout);
+    else unresponsive = true;
     ({ stats, cpuPercent } = live);
     toolchain = tc.tools;
     partial = live.pending || tc.pending;
@@ -399,7 +408,7 @@ async function loadDetails(id: string) {
   return {
     id: p.id,
     name: p.name,
-    state: p.state,
+    state,
     image: p.image,
     source_path: p.source_path,
     sync_path: p.sync_path,           // folder connected to a cloned project, if any
@@ -415,12 +424,15 @@ async function loadDetails(id: string) {
     error: p.error,
     created_at: p.created_at,
     partial,
+    unresponsive,
     live: info,
     resources: {
       cpus: info?.cpus ?? null,
       cpuPercent,
       memoryUsageBytes: stats?.memoryUsageBytes ?? null,
-      memoryLimitBytes: stats?.memoryLimitBytes ?? info?.memoryLimitBytes ?? null,
+      // the runtime's own record (info) lags behind a memory change made here
+      memoryLimitBytes: stats?.memoryLimitBytes ?? (p.memory_mb ? p.memory_mb * MB : info?.memoryLimitBytes) ?? null,
+      memoryMB: p.memory_mb ?? (info?.memoryLimitBytes ? Math.round(info.memoryLimitBytes / MB) : null),
       numProcesses: stats?.numProcesses ?? null,
       networkRxBytes: stats?.networkRxBytes ?? null,
       networkTxBytes: stats?.networkTxBytes ?? null,
@@ -454,22 +466,28 @@ export async function connectSyncFolder(id: string, path: string | null) {
   if (p.source_path) throw new Error("this project was created from a local folder and already syncs there");
   if (path == null || !String(path).trim()) {
     db.query("UPDATE projects SET sync_path = NULL WHERE id = ?").run(id);
+    await rm(join(config.dataDir, "sync", `${id}.git`), { recursive: true, force: true });
     logEvent(id, "sync.disconnect", p.sync_path ?? "");
-    return { sync_path: null, hasBase: null };
+    return { sync_path: null, hasBase: null, isGitRepo: null };
   }
   const given = String(path).trim();
   if (!existsSync(given)) throw new Error(`folder not found: ${given}`);
+  if (!statSync(given).isDirectory()) throw new Error(`not a folder: ${given}`);
+  // inside a git repository the repository is what gets connected; any other
+  // folder is connected as it is and simply receives the files
   const top = await hostGit(given, ["rev-parse", "--show-toplevel"]);
-  if (top.code !== 0) throw new Error("that folder is not a git repository — run `git init` in it (or clone the repo there) first");
-  const repo = top.out;
+  const isRepo = top.code === 0;
+  const repo = isRepo ? top.out : realpathSync(given);
   // does it already have the commit the VM started from? (true for a clone of
-  // the same remote that is reasonably up to date)
-  const hasBase = p.base_sha != null &&
+  // the same remote that is reasonably up to date; n/a for a plain folder)
+  const hasBase = !isRepo ? null : p.base_sha != null &&
     (await hostGit(repo, ["cat-file", "-e", `${p.base_sha}^{commit}`])).code === 0;
+  // history kept for a previous plain folder describes that folder's files
+  await rm(join(config.dataDir, "sync", `${id}.git`), { recursive: true, force: true });
   // start over from the VM's base for this folder: it has received nothing yet
   db.query("UPDATE projects SET sync_path = ?, last_synced_sha = base_sha WHERE id = ?").run(repo, id);
   logEvent(id, "sync.connect", repo);
-  return { sync_path: repo, hasBase };
+  return { sync_path: repo, hasBase, isGitRepo: isRepo };
 }
 
 export async function destroyProject(id: string): Promise<void> {
@@ -479,6 +497,7 @@ export async function destroyProject(id: string): Promise<void> {
   purgeProjectSecrets(id); // project-specific secrets die with the VM
   purgeProjectNet(id);     // per-project net rules die with the VM too
   purgeProjectForwards(id); // …and so do its port forwards (frees the host ports)
+  await rm(join(config.dataDir, "sync", `${id}.git`), { recursive: true, force: true });
   closeProjectSocket(id);
   clearProjectApprovals(id);
   clearProjectFeed(id);
@@ -529,6 +548,137 @@ export async function rebuildProject(id: string): Promise<ProjectRow> {
 
 /** Merge live driver state into DB rows for the UI. Degrades to DB-only
  *  rows when the driver is unavailable (e.g. supervisor in a container). */
+// ---- stop / start -----------------------------------------------------------
+// A project's VM can be shut down and booted again without losing anything on
+// its disk (the workdir, installed packages, agent logins); only what was
+// running in it — tmux, the agents — ends. A VM also stops on its own account:
+// the machine restarts, the container service is restarted, someone runs
+// `container stop`. So the recorded state follows what the VM is actually doing.
+
+const changing = new Set<string>(); // projects with a stop/start under way
+
+/** Bring a project's recorded state in line with its VM (given what the driver
+ *  reports for it; nothing is changed without a report). Returns the state. */
+function settle(p: ProjectRow, info: ProjectInfo | null | undefined): string {
+  if (changing.has(p.id) || !info || info.state === "unknown") return p.state;
+  // a stop/start that never finished (the supervisor went away) is settled too
+  if (!["running", "stopped", "starting", "stopping"].includes(p.state) || p.state === info.state) return p.state;
+  logEvent(p.id, info.state === "running" ? "vm.running" : "vm.stopped", "noticed — changed outside sadbox");
+  if (info.state === "running" && p.state === "stopped") {
+    // booted by hand: it has no proxy relay or tmux yet — finish the start
+    startProject(p.id).catch(() => {});
+    return "starting";
+  }
+  db.query("UPDATE projects SET state = ? WHERE id = ?").run(info.state, p.id);
+  if (info.state !== "running") forgetVitals(info.ref);
+  return info.state;
+}
+
+export async function stopProject(id: string): Promise<ProjectRow> {
+  const p = getProject(id);
+  if (!p || p.state === "destroyed") throw new Error("project not found");
+  if (changing.has(id) || p.state === "creating") throw new Error("this project is busy — try again in a moment");
+  const ref = refFor(p.name);
+  changing.add(id);
+  db.query("UPDATE projects SET state = 'stopping' WHERE id = ?").run(id);
+  try {
+    await driver.stop(ref);
+    db.query("UPDATE projects SET state = 'stopped' WHERE id = ?").run(id);
+    logEvent(id, "vm.stop");
+  } catch (e) {
+    db.query("UPDATE projects SET state = ? WHERE id = ?").run(p.state, id);
+    logEvent(id, "vm.stop.error", String(e));
+    throw e;
+  } finally {
+    changing.delete(id);
+    forgetVitals(ref);
+  }
+  return getProject(id)!;
+}
+
+/** Boot a project's stopped VM and put back what does not survive a shutdown:
+ *  the proxy relay (its only way out), current secrets, and the tmux session.
+ *  Also safe on a VM that is already up — it just repairs those. */
+export async function startProject(id: string): Promise<ProjectRow> {
+  const p = getProject(id);
+  if (!p || p.state === "destroyed") throw new Error("project not found");
+  if (changing.has(id) || p.state === "creating") throw new Error("this project is busy — try again in a moment");
+  const ref = refFor(p.name);
+  const before = await driver.inspect(ref);
+  if (before.state === "unknown") {
+    throw new Error("this project's VM no longer exists — use Rebuild to recreate it from its source");
+  }
+  changing.add(id);
+  db.query("UPDATE projects SET state = 'starting', error = NULL WHERE id = ?").run(id);
+  try {
+    if (before.state !== "running") await driver.start(ref);
+    // booted is not yet answering: wait until a command gets through
+    let up = false;
+    for (let i = 0; i < 30 && !up; i++) {
+      up = (await driver.exec(ref, ["sh", "-c", `test -d ${config.guestWorkdir}`], { timeoutMs: 5_000 })).exitCode === 0;
+      if (!up) await Bun.sleep(500);
+    }
+    if (!up) throw new Error("the VM started but is not responding");
+
+    if ((await driver.inspect(ref)).isolated) {
+      openProjectSocket(id);
+      await startGuestRelay(ref);
+      redialProjectSocket(id); // carriers dialed before the shutdown are dead
+    }
+    await injectSecrets(id).catch((e) => logEvent(id, "secrets.inject.error", String(e)));
+    const tmux = await driver.exec(ref, ["sh", "-c",
+      `tmux has-session -t ${config.tmuxSession} 2>/dev/null || ` +
+      `tmux new-session -d -s ${config.tmuxSession} -c ${config.guestWorkdir}`]);
+    if (tmux.exitCode !== 0) throw new Error(`tmux start failed: ${tmux.stderr}`);
+    db.query("UPDATE projects SET state = 'running' WHERE id = ?").run(id);
+    logEvent(id, "vm.start");
+  } catch (e) {
+    const now = await driver.inspect(ref).catch(() => null);
+    db.query("UPDATE projects SET state = ? WHERE id = ?").run(now?.state === "running" ? "running" : "stopped", id);
+    logEvent(id, "vm.start.error", String(e));
+    throw e;
+  } finally {
+    changing.delete(id);
+    forgetVitals(ref);
+  }
+  return getProject(id)!;
+}
+
+const MB = 1024 * 1024;
+
+/** Give a project's VM a different amount of memory. A VM takes its size when
+ *  it boots, so a running one is shut down and started again: what was running
+ *  in it (agents, terminals) ends, everything on its disk stays. A stopped VM
+ *  just boots with the new size next time. */
+export async function setProjectMemory(id: string, memory: unknown) {
+  const memoryMB = validMemoryMB(memory);
+  const p = getProject(id);
+  if (!p || p.state === "destroyed") throw new Error("project not found");
+  if (changing.has(id) || !["running", "stopped"].includes(p.state)) throw new Error("this project is busy — try again in a moment");
+  const ref = refFor(p.name);
+  const before = await driver.inspect(ref);
+  if (before.state === "unknown") throw new Error("this project's VM no longer exists — use Rebuild to recreate it from its source");
+
+  const wasRunning = before.state === "running";
+  if (wasRunning) await stopProject(id);
+  try {
+    await driver.setMemory(ref, memoryMB);
+    db.query("UPDATE projects SET memory_mb = ? WHERE id = ?").run(memoryMB, id);
+  } finally {
+    // back up either way — with the new size, or as it was
+    if (wasRunning) await startProject(id);
+  }
+
+  // ask the VM itself: null when it is stopped or does not say
+  let applied: boolean | null = null;
+  if (wasRunning) {
+    const limit = (await driver.stats(ref, QUERY_TIMEOUT_MS).catch(() => null))?.memoryLimitBytes;
+    if (limit != null) applied = limit === memoryMB * MB;
+  }
+  logEvent(id, "vm.memory", `${memoryMB} MB` + (wasRunning ? " · restarted" : "") + (applied === false ? " · the VM still reports its old size" : ""));
+  return { id, state: getProject(id)!.state, memoryMB, restarted: wasRunning, applied };
+}
+
 export async function projectsWithLiveState() {
   const rows = listProjects();
   const live = new Map(
@@ -538,7 +688,7 @@ export async function projectsWithLiveState() {
     id: r.id,
     name: r.name,
     image: r.image,
-    state: r.state,
+    state: settle(r, live.get(refFor(r.name))),
     source_path: r.source_path,
     sync_folder: syncFolderOf(r),
     source_branch: r.source_branch,

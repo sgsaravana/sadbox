@@ -87,7 +87,7 @@ h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 1px; color: var
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex-shrink: 0; }
 .dot.running { background: var(--ok); }
 .dot.error, .dot.stopped { background: var(--bad); }
-.dot.creating { background: var(--warn); }
+.dot.creating, .dot.starting, .dot.stopping { background: var(--warn); }
 .meta { color: var(--dim); font-size: 12px; word-break: break-all; margin-bottom: 10px; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
 

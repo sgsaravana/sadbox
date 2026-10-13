@@ -31,6 +31,10 @@ export interface ProjectStats {
   blockWriteBytes?: number;
 }
 
+/** Timeout for guest work that legitimately takes minutes (cloning, copying a
+ *  repository in, installing packages, bundling history) — still not forever. */
+export const LONG_TASK_MS = 15 * 60_000;
+
 export interface ExecResult {
   exitCode: number;
   stdout: string;
@@ -68,20 +72,29 @@ export interface ProjectDriver {
     socket?: { host: string; guest: string };
   }): Promise<void>;
   destroy(ref: string): Promise<void>;
+  /** Boot a stopped VM again; its disk is as it was left. */
+  start(ref: string): Promise<void>;
+  /** Shut a VM down, keeping its disk. Forces it off if it does not comply. */
+  stop(ref: string): Promise<void>;
+  /** Change how much memory a stopped VM boots with next time. Its disk is
+   *  untouched. Throws if this backend cannot do it for that VM. */
+  setMemory(ref: string, memoryMB: number): Promise<void>;
   inspect(ref: string): Promise<ProjectInfo>;
   list(): Promise<ProjectInfo[]>;
   /** Live resource usage, or null if unavailable. */
   stats(ref: string, timeoutMs?: number): Promise<ProjectStats | null>;
 
+  // Guest commands are given up on (exit 124) if the VM has not answered within
+  // `timeoutMs` — 30 s unless stated; pass more for work that really takes long.
   /** Run a command in the guest, capture output. */
   exec(ref: string, cmd: string[], opts?: { user?: string; timeoutMs?: number }): Promise<ExecResult>;
   /** Run a shell snippet in the guest with a byte stream piped to stdin. */
-  execWithStdin(ref: string, shellCmd: string, stdin: Blob | Uint8Array, opts?: { user?: string }): Promise<ExecResult>;
+  execWithStdin(ref: string, shellCmd: string, stdin: Blob | Uint8Array, opts?: { user?: string; timeoutMs?: number }): Promise<ExecResult>;
   /** Run a shell snippet in the guest with both directions streamed: a raw
    *  byte pipe to a process in the guest (port forwards ride on this). */
   stream(ref: string, shellCmd: string): ByteStream;
   /** Run a shell snippet in the guest and stream stdout back as bytes. */
-  execCaptureBytes(ref: string, shellCmd: string): Promise<{ exitCode: number; stdout: Uint8Array }>;
+  execCaptureBytes(ref: string, shellCmd: string, opts?: { timeoutMs?: number }): Promise<{ exitCode: number; stdout: Uint8Array }>;
   /** Interactive PTY attached to a command in the guest (the terminal bridge). */
   terminal(ref: string, cmd: string[], size: { cols: number; rows: number }): TerminalHandle;
 }

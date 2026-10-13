@@ -53,6 +53,7 @@
     <span class="grow"></span>
     <span id="hint"><kbd>⌥</kbd>-drag select · <kbd>⌘</kbd>C copy · <kbd>⌘</kbd>V paste</span>
     <button class="tbtn" id="reconnect">reconnect</button>
+    <button class="tbtn" id="startvm" style="display:none">start VM</button>
   </div>
   <div id="term"></div>
   <div id="toast">copied</div>
@@ -171,9 +172,26 @@
       ws.onclose = (ev) => {
         term.write(`\r\n\x1b[31m[disconnected: ${ev.reason || ev.code}]\x1b[0m\r\n`);
         document.getElementById("reconnect").style.display = "inline-block";
+        if (ev.code === 4010) {
+          term.write("This project's VM is not running. Press \x1b[1mstart VM\x1b[0m above to boot it — files are as you left them.\r\n");
+          startBtn.style.display = "inline-block";
+        }
       };
     }
     document.getElementById("reconnect").onclick = connect;
+    const startBtn = document.getElementById("startvm");
+    startBtn.onclick = async () => {
+      startBtn.disabled = true; startBtn.textContent = "starting…";
+      term.write("Starting the VM…\r\n");
+      try {
+        const r = await fetch(`/api/projects/${projectId}/start`, { method: "POST" });
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+        startBtn.style.display = "none";
+        connect();
+      } catch (e) {
+        term.write(`\x1b[31mCould not start it: ${e.message}\x1b[0m\r\n`);
+      } finally { startBtn.disabled = false; startBtn.textContent = "start VM"; }
+    };
 
     // tmux shortcut buttons: send the prefix (Ctrl+b = 0x02) then the command key
     function sendKeys(s) {

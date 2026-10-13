@@ -1,8 +1,9 @@
 # Homebrew formula for sadbox. Publish in a tap repo (e.g. sgsaravana/homebrew-tap)
 # as Formula/sadbox.rb, then: brew install sgsaravana/tap/sadbox
 #
-# Update `version`, both `url`s, and both `sha256`s on each release
-# (shasum -a 256 dist/sadbox-darwin-*).
+# `version`, both `url`s, and both `sha256`s are rewritten on each release by
+# .github/workflows/release.yml (scripts/set-formula.sh) — copy this file to the
+# tap after a release; do not edit those lines by hand.
 class Sadbox < Formula
   desc "Supervisor for microVM AI-agent sandboxes"
   homepage "https://github.com/sgsaravana/sadbox"

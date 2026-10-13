@@ -5,6 +5,7 @@
 import { posix } from "path";
 import { config } from "../config";
 import { getDriver } from "../driver";
+import { LONG_TASK_MS } from "../driver/types";
 import { getProject, refFor } from "./projects";
 
 const driver = getDriver();
@@ -166,7 +167,7 @@ export async function deletePath(projectId: string, rawPath: unknown): Promise<{
   const rel = cleanPath(rawPath);
   if (!rel) throw new FileError("refusing to delete the workdir itself");
   const r = await driver.exec(ref, ["sh", "-c", prelude(rel) +
-    `[ -e "$f" ] || [ -L "$f" ] || exit 3; rm -rf -- "$f"`]);
+    `[ -e "$f" ] || [ -L "$f" ] || exit 3; rm -rf -- "$f"`], { timeoutMs: LONG_TASK_MS }); // a big tree takes a while
   if (r.exitCode === 3) throw new FileError(`no such file: ${rel}`, 404);
   if (r.exitCode !== 0) throw new FileError(`could not delete: ${r.stderr.trim()}`, 502);
   return { path: rel };

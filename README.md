@@ -86,7 +86,7 @@ add it as shown. To pin a version or change the location:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh \
-  | SADBOX_VERSION=v0.1.1 SADBOX_BIN_DIR=/usr/local/bin sh
+  | SADBOX_VERSION=v0.2.0 SADBOX_BIN_DIR=/usr/local/bin sh
 ```
 
 ### Option 2 — download the binary yourself
@@ -146,9 +146,11 @@ with `sadbox passwd`. Then, in the browser:
    in the terminal and editor tabs (and in the **Network** panel on the
    project's page).
    Egress is blocked by default.
-4. When you like the result, **Sync back**: the agent's commits arrive in your
-   repo as `refs/remotes/sadbox/<name>`, ready to `git merge`. Your working
-   tree is never touched.
+4. When you like the result, **Sync back**: the VM's workdir is copied into
+   your folder as ordinary, uncommitted file changes — review them with
+   `git diff` and commit what you want. Nothing is committed for you, in the VM
+   or in your repo, and uncommitted work of yours in the folder is never
+   overwritten: the sync stops and lists what is in the way.
 
 `sadbox doctor` reports what is missing if something does not start. sadbox
 listens on localhost only by default; see [Deploying](#deploying) before
@@ -178,14 +180,17 @@ bun run compile:all      # darwin+linux × arm64+x64
 ```
 Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`, which
 cross-compiles all four binaries and attaches them (plus `SHA256SUMS`) to a
-GitHub Release. Update `packaging/homebrew/sadbox.rb` (version + sha256s) in
-your tap to point at the new release.
+GitHub Release. The tag is the version: the workflow stamps it into
+`src/config.ts` and `package.json` before building (via
+`scripts/set-version.sh`) and commits the same bump to `main`, so there is no
+version to edit by hand. The same commit points `packaging/homebrew/sadbox.rb`
+at the new release (version, download URLs and sha256s, via
+`scripts/set-formula.sh`); if you publish a tap, copy that file into it.
 
 Create a project from the dashboard (name + path to a local git repo), click
 **Terminal ↗** for its tmux in a new tab, run `claude` in it, and use
-**Sync back** when you like what you see — the project's commits land in
-`refs/remotes/sadbox/<name>` in your repo, ready to `git merge` (your worktree
-is never touched by sync).
+**Sync back** when you like what you see — the VM's files are copied into
+your folder as uncommitted changes for you to review and commit.
 
 ## How it works
 
@@ -208,11 +213,22 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   project starts with no local folder, so it pushes to the remote from inside
   the VM — or you **connect a local folder** to it later (detail page → Folder
   & git → *Connect a folder…*) and use **Sync back** like any other project.
-  The folder must be a git repository; a clone of the same remote gets just
-  the new commits, any other repository gets the branch's full history. As
-  always, a sync only adds `refs/remotes/sadbox/<name>` there — your branch
-  and working tree are not touched. A connected folder is only where work
-  goes: **Rebuild** still re-clones the remote.
+  The folder can be a git repository or any other folder.
+- **Sync back** makes the folder's files match the VM's workdir — committed
+  or not, minus gitignored files — and commits nothing: not in the VM (the
+  agent's branch, index and loose changes stay as they are) and not in your
+  folder (its own `.git` is never written to). You review and commit.
+  - Only files that changed since the last sync are written; files the project
+    deleted are removed; files it never had are left alone.
+  - A file with uncommitted edits in the folder that the VM also changed — or
+    a file of yours sitting where a new project file would go — is **not**
+    overwritten: the sync stops, lists those files, and offers to overwrite
+    them. A file your repository has committed is replaced by the VM's version
+    (it shows up in `git diff`; your version stays in the history).
+  - What the folder was last given is tracked in `~/.sadbox/sync/<id>.git`.
+
+  A connected folder is only where work goes: **Rebuild** still re-clones the
+  remote.
 - **Terminal**: xterm.js ⇄ WS ⇄ `Bun.spawn({terminal})` PTY ⇄
   `container exec -it <project> tmux new -A -s main`. Sessions live in the VM and
   survive supervisor restarts. **🔗 Links** in the toolbar lists every link
@@ -261,14 +277,19 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   project's `origin` is pointed there with the token stored via git's credential
   helper (`~/.git-credentials`, 0600) so the agent can push/pull. The token is
   encrypted at rest on the host.
-- **Sync-back**: guest autocommit → incremental `git bundle` over exec stdout →
-  host `git fetch` into `refs/remotes/sadbox/<name>` → commits + diffstat
-  returned to the UI.
+- **Sync-back**: the guest records its workdir as a snapshot commit on a hidden
+  ref (throwaway index — branch and working state untouched) → `git bundle`
+  over exec stdout → fetched into a private repo whose work tree is the folder
+  → `git checkout` there writes the changed files; a diffstat is returned to
+  the UI.
 - **Detail view**: per project, live CPU %/memory/disk/network/process usage
   (via `container stats` + in-guest probes), workdir size, tmux session/window
   counts and attached-terminal count, git branch/dirty state, folder/remote
   info, and the installed-toolchain probe — plus the live **Network** panel
-  (below). A **Rebuild** action destroys the VM and recreates it from the
+  (below). **Change…** next to Memory gives that one VM more (or less) memory:
+  a running VM is shut down and booted again with the new size, so agents and
+  terminals in it end, while its files, installed packages and logins stay.
+  A **Rebuild** action destroys the VM and recreates it from the
   project's original source (local folder re-copied at its current HEAD, or the
   git remote re-cloned), keeping the project's secrets and network rules;
   unsynced work inside the old VM is lost. Rebuild uses the **current** base
@@ -347,10 +368,11 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 | GET/POST | `/api/projects` | list (with live VM state) / create (`{name, sourcePath?, apps?, secretIds?, git?: {remote, token?}}` — omit `sourcePath` to clone `git.remote` in the VM) |
 | GET | `/api/projects/:id/details` | full detail: resources, tmux, git, folder |
 | DELETE | `/api/projects/:id` | destroy VM |
-| POST | `/api/projects/:id/sync` | sync-back (`{autocommit?: bool}`) |
+| POST | `/api/projects/:id/sync` | sync-back (`{force?: bool}` overwrites files changed in the folder) |
 | GET | `/api/projects/:id/term/links` | links currently on the project's terminal (wrapped URLs re-joined) |
 | POST | `/api/projects/:id/rebuild` | destroy + recreate the VM from the project's original source (keeps secrets + net rules) |
-| GET | `/api/projects/:id/sync/status` | dirty/ahead counts |
+| GET | `/api/projects/:id/sync/status` | count of uncommitted files in the VM |
+| PUT | `/api/projects/:id/memory` | `{memoryMB}` — change this VM's memory; a running VM is restarted to take it (disk kept) |
 | PUT/DELETE | `/api/projects/:id/sync-folder` | connect (`{path}`) / disconnect a local folder for a project cloned from a git URL |
 | GET/PUT/POST | `/api/projects/:id/secrets` | view / assign globals / add project-specific |
 | GET/POST | `/api/secrets`, DELETE `/api/secrets/:id` | global secret store |
