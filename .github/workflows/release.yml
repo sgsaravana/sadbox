@@ -1,6 +1,11 @@
 name: release
 
 # Tag a version to publish binaries:  git tag v0.1.0 && git push --tags
+#
+# The tag is the version: the binaries are built with it stamped into
+# src/config.ts and package.json, and the same change is then committed to
+# main — along with the README's version-pinning examples and the Homebrew
+# formula, pointed at the new binaries — so nobody has to bump any of it by hand.
 on:
   push:
     tags: ["v*"]
@@ -11,15 +16,26 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      darwin-arm64-sha: ${{ steps.sums.outputs.darwin-arm64 }}
+      darwin-x64-sha: ${{ steps.sums.outputs.darwin-x64 }}
     steps:
       - uses: actions/checkout@v4
+      - name: Stamp the version from the tag
+        run: ./scripts/set-version.sh "$GITHUB_REF_NAME"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
       - run: bun install --frozen-lockfile
       - run: bun run compile:all
       - name: Checksums
-        run: cd dist && shasum -a 256 sadbox-* > SHA256SUMS
+        id: sums
+        run: |
+          cd dist && shasum -a 256 sadbox-* > SHA256SUMS
+          # the two macOS ones go into the Homebrew formula
+          for target in darwin-arm64 darwin-x64; do
+            echo "$target=$(awk -v f="sadbox-$target" '$2 == f { print $1 }' SHA256SUMS)" >> "$GITHUB_OUTPUT"
+          done
       - uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -29,3 +45,47 @@ jobs:
             dist/sadbox-linux-x64
             dist/SHA256SUMS
           generate_release_notes: true
+
+  # Record the released version on main, and point the Homebrew formula at the
+  # binaries just published. Skipped for pre-release tags
+  # (v1.2.3-rc.1) and for a tag older than what main already says.
+  bump-main:
+    needs: build
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-bump-main
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Bump the version on main
+        env:
+          ARM64_SHA: ${{ needs.build.outputs.darwin-arm64-sha }}
+          X64_SHA: ${{ needs.build.outputs.darwin-x64-sha }}
+        run: |
+          set -euo pipefail
+          new="${GITHUB_REF_NAME#v}"
+          current="$(sed -n 's/^export const VERSION = "\(.*\)";/\1/p' src/config.ts)"
+          if [ "$(printf '%s\n%s\n' "$current" "$new" | sort -V | tail -n 1)" != "$new" ]; then
+            echo "main is already at $current, newer than $new — leaving it."
+            exit 0
+          fi
+          ./scripts/set-version.sh "$new"
+          ./scripts/set-formula.sh "$new" "$ARM64_SHA" "$X64_SHA"
+          if git diff --quiet -- src/config.ts package.json README.md packaging/homebrew/sadbox.rb; then
+            echo "main already says $new — nothing to do."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/config.ts package.json README.md packaging/homebrew/sadbox.rb
+          git commit -m "chore: version $new [skip ci]"
+          # the README workflow may push to main at the same moment
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then exit 0; fi
+            git pull --rebase origin main
+          done
+          echo "could not push the version bump to main" >&2
+          exit 1

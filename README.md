@@ -86,7 +86,7 @@ add it as shown. To pin a version or change the location:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh \
-  | SADBOX_VERSION=v0.1.1 SADBOX_BIN_DIR=/usr/local/bin sh
+  | SADBOX_VERSION=v0.2.0 SADBOX_BIN_DIR=/usr/local/bin sh
 ```
 
 ### Option 2 — download the binary yourself
@@ -180,8 +180,12 @@ bun run compile:all      # darwin+linux × arm64+x64
 ```
 Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`, which
 cross-compiles all four binaries and attaches them (plus `SHA256SUMS`) to a
-GitHub Release. Update `packaging/homebrew/sadbox.rb` (version + sha256s) in
-your tap to point at the new release.
+GitHub Release. The tag is the version: the workflow stamps it into
+`src/config.ts` and `package.json` before building (via
+`scripts/set-version.sh`) and commits the same bump to `main`, so there is no
+version to edit by hand. The same commit points `packaging/homebrew/sadbox.rb`
+at the new release (version, download URLs and sha256s, via
+`scripts/set-formula.sh`); if you publish a tap, copy that file into it.
 
 Create a project from the dashboard (name + path to a local git repo), click
 **Terminal ↗** for its tmux in a new tab, run `claude` in it, and use
