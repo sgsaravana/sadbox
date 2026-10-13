@@ -141,6 +141,32 @@ async function refreshProjects() {
   }).join("");
 }
 
+// What a Sync back did, in words
+function syncSummary(r) {
+  const review = r.kind === "git" ? `\n\nNothing was committed — review with 'git status' / 'git diff' in that folder and commit what you want.` : "";
+  if (r.applied === "copied") {
+    return `Synced into ${r.folder}${r.forced ? " (overwriting your changes there)" : ""} — its files now match the VM's workdir.${review}` +
+      (r.changed ? `\n\n${r.changed}` : "");
+  }
+  if (r.applied === "current") {
+    return `Already up to date — nothing has changed in the VM since the last sync.` + (r.note ? `\n\nNote: ${r.note}.` : "");
+  }
+  return `Nothing in ${r.folder} was changed: ${r.note}` +
+    (r.blocking.length ? `:\n\n${r.blocking.map((f) => "  " + f).join("\n")}\n\nCommit, stash or move them and press Sync back again — or overwrite them with the VM's versions.` : "");
+}
+/** Run a sync and show what it did under the project (with a way to force it
+ *  when files in the folder were in the way). */
+async function runSync(id, container, force) {
+  const r = await api(`/api/projects/${id}/sync`, { method: "POST", body: { force } });
+  const again = r.applied === "not-applied" && r.blocking.length
+    ? `<button class="danger mini" data-sync="${id}" data-force="1">Overwrite ${r.blocking.length} file${r.blocking.length === 1 ? "" : "s"}</button>`
+    : r.applied === "current" && r.note
+      ? `<button class="mini" data-sync="${id}" data-force="1" title="Write the VM's files over the folder's again">Make the folder match the VM again</button>`
+      : "";
+  container.querySelector(".sync-result").innerHTML =
+    `<pre class="result">${escapeHtml(syncSummary(r))}</pre>${again}`;
+}
+
 // Stop / Start for a project's VM, by its state
 const powerBusy = new Map(); // project id -> label, while a request is out
 function powerButton(p) {
@@ -183,15 +209,13 @@ document.addEventListener("click", async (e) => {
         await power(b.dataset.stop, "stop");
       }
     } else if (b.dataset.sync) {
-      b.disabled = true; b.textContent = "Syncing…";
-      const r = await api(`/api/projects/${b.dataset.sync}/sync`, { method: "POST", body: {} });
-      const out = r.upToDate
-        ? "Already up to date."
-        : `Fetched into ${r.ref} in ${r.folder} (${r.bundleBytes} bytes${r.fullHistory ? ", full history — the folder did not have the starting commit" : ""})\n\n${r.commits}\n\n${r.diffstat}\n\nApply with e.g.:\n  git -C ${r.folder} merge ${r.ref}`;
+      const force = b.dataset.force === "1";
+      if (force && !confirm("Overwrite the folder's versions of these files with the VM's? Your changes to them in the folder are lost.")) return;
+      const label = b.textContent;
       const container = b.closest(".card") || $("#view-detail");
-      container.querySelector(".sync-result").innerHTML =
-        `<pre class="result">${escapeHtml(out)}</pre>`;
-      b.disabled = false; b.textContent = "Sync back";
+      b.disabled = true; b.textContent = "Syncing…";
+      try { await runSync(b.dataset.sync, container, force); }
+      finally { b.disabled = false; b.textContent = label; }
     } else if (b.dataset.linkFolder) {
       // connect a local folder to a project cloned from a git URL (reuses the folder picker)
       const id = b.dataset.linkFolder;
@@ -300,8 +324,11 @@ async function loadDir(path) {
   const d = await api(`/api/fs/dirs${q}`);
   pickerPath = d.path;
   $("#picker-current").textContent = d.path;
-  $("#picker-hint").textContent = d.isGitRepo ? "✓ git repository" : "not a git repo (projects need one)";
-  $("#picker-hint").style.color = d.isGitRepo ? "var(--ok)" : "var(--warn)";
+  // a folder being connected for sync may be any folder; a project's source must be a repo
+  const anyFolder = pickerOnSelect != null;
+  $("#picker-hint").textContent = d.isGitRepo ? "✓ git repository"
+    : anyFolder ? "plain folder — files will be copied in" : "not a git repo (projects need one)";
+  $("#picker-hint").style.color = d.isGitRepo || anyFolder ? "var(--ok)" : "var(--warn)";
   const items = [];
   if (d.parent) items.push(`<li data-dir="${d.parent}" class="up">↩ ..</li>`);
   items.push(...d.dirs.map((e) =>
@@ -631,7 +658,7 @@ async function setSyncFolder(id, path) {
       paintDetail(lastDetail);
     }
     if (r.hasBase === false) {
-      alert(`Connected ${r.sync_path}.\n\nThis folder does not contain the commit the VM started from, so the first sync will bring the branch's full history rather than just the new commits. (If it is a clone of the same repository, a 'git fetch' there first keeps syncs small.)`);
+      alert(`Connected ${r.sync_path}.\n\nThis repository does not contain the commit the VM started from, so it looks like a different project. A sync will fetch the VM's branch there (${"refs/remotes/sadbox/…"}) but will not merge it into your files. If it is a clone of the same repository, run 'git pull' there first.`);
     }
   } catch (err) {
     folderPending = null;
@@ -700,7 +727,7 @@ function paintDetail(d) {
                <button class="mini" data-link-folder="${d.id}" data-current="${escapeHtml(d.sync_path)}" title="Sync into a different folder">Change</button>
                <button class="mini" data-unlink-folder="${d.id}">Disconnect</button>`
             : `<span class="dim">not connected</span>
-               <button class="mini" data-link-folder="${d.id}" title="Pick a local git repository to sync this project's work into">Connect a folder…</button>`}</dd>`}
+               <button class="mini" data-link-folder="${d.id}" title="Pick a local folder (a git repository or any other folder) to sync this project's work into">Connect a folder…</button>`}</dd>`}
           <dt>Workdir (in VM)</dt><dd class="mono">${escapeHtml(d.workdir)}</dd>
           <dt>Work branch</dt><dd class="mono">${escapeHtml(d.branch)}</dd>
           <dt>Uncommitted</dt><dd>${d.git.dirty ?? 0} file(s)</dd>

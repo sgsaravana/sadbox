@@ -160,7 +160,7 @@ export function startServer() {
         m = p.match(/^\/api\/projects\/([\w-]+)\/sync$/);
         if (m && req.method === "POST") {
           const b = await req.json().catch(() => ({}));
-          return json(await syncProject(m[1], { autocommit: b.autocommit ?? true }));
+          return json(await syncProject(m[1], { force: b.force === true }));
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/term\/links$/);
         if (m && req.method === "GET") return json(await terminalLinks(m[1]));

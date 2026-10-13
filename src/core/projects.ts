@@ -1,4 +1,6 @@
-import { existsSync } from "fs";
+import { existsSync, realpathSync, statSync } from "fs";
+import { rm } from "fs/promises";
+import { join } from "path";
 import { config } from "../config";
 import { encrypt, decrypt } from "../crypto";
 import { db, logEvent } from "../db";
@@ -459,22 +461,28 @@ export async function connectSyncFolder(id: string, path: string | null) {
   if (p.source_path) throw new Error("this project was created from a local folder and already syncs there");
   if (path == null || !String(path).trim()) {
     db.query("UPDATE projects SET sync_path = NULL WHERE id = ?").run(id);
+    await rm(join(config.dataDir, "sync", `${id}.git`), { recursive: true, force: true });
     logEvent(id, "sync.disconnect", p.sync_path ?? "");
-    return { sync_path: null, hasBase: null };
+    return { sync_path: null, hasBase: null, isGitRepo: null };
   }
   const given = String(path).trim();
   if (!existsSync(given)) throw new Error(`folder not found: ${given}`);
+  if (!statSync(given).isDirectory()) throw new Error(`not a folder: ${given}`);
+  // inside a git repository the repository is what gets connected; any other
+  // folder is connected as it is and simply receives the files
   const top = await hostGit(given, ["rev-parse", "--show-toplevel"]);
-  if (top.code !== 0) throw new Error("that folder is not a git repository — run `git init` in it (or clone the repo there) first");
-  const repo = top.out;
+  const isRepo = top.code === 0;
+  const repo = isRepo ? top.out : realpathSync(given);
   // does it already have the commit the VM started from? (true for a clone of
-  // the same remote that is reasonably up to date)
-  const hasBase = p.base_sha != null &&
+  // the same remote that is reasonably up to date; n/a for a plain folder)
+  const hasBase = !isRepo ? null : p.base_sha != null &&
     (await hostGit(repo, ["cat-file", "-e", `${p.base_sha}^{commit}`])).code === 0;
+  // history kept for a previous plain folder describes that folder's files
+  await rm(join(config.dataDir, "sync", `${id}.git`), { recursive: true, force: true });
   // start over from the VM's base for this folder: it has received nothing yet
   db.query("UPDATE projects SET sync_path = ?, last_synced_sha = base_sha WHERE id = ?").run(repo, id);
   logEvent(id, "sync.connect", repo);
-  return { sync_path: repo, hasBase };
+  return { sync_path: repo, hasBase, isGitRepo: isRepo };
 }
 
 export async function destroyProject(id: string): Promise<void> {
@@ -484,6 +492,7 @@ export async function destroyProject(id: string): Promise<void> {
   purgeProjectSecrets(id); // project-specific secrets die with the VM
   purgeProjectNet(id);     // per-project net rules die with the VM too
   purgeProjectForwards(id); // …and so do its port forwards (frees the host ports)
+  await rm(join(config.dataDir, "sync", `${id}.git`), { recursive: true, force: true });
   closeProjectSocket(id);
   clearProjectApprovals(id);
   clearProjectFeed(id);
