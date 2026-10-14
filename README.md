@@ -24,7 +24,8 @@ tmux state. Every VM's egress is routed through the supervisor as a **filtering
 MITM proxy** — block-by-default with interactive, time-boxed approvals, allow/
 block + header-rewrite rules (global or per-project), and a live request log on
 the detail view. See `docs/research/` for the design research and `spikes/` for
-the de-risk experiments behind each piece.
+the de-risk experiments behind each piece, and [`docs/ROADMAP.md`](docs/ROADMAP.md)
+for what's next (Linux support first).
 
 ## Releases
 
