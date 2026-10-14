@@ -88,7 +88,7 @@ add it as shown. To pin a version or change the location:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh \
-  | SADBOX_VERSION=v0.3.1 SADBOX_BIN_DIR=/usr/local/bin sh
+  | SADBOX_VERSION=v0.3.2 SADBOX_BIN_DIR=/usr/local/bin sh
 ```
 
 ### Option 2 — download the binary yourself
