@@ -98,6 +98,10 @@ button {
 button:hover { border-color: var(--accent); }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button.danger { color: var(--bad); }
+button.danger:hover { border-color: var(--bad); }
+button.stop { background: #e5484d; border-color: #e5484d; color: #fff; }
+button.stop:hover { background: #d13b40; border-color: #d13b40; }
+button .ico { vertical-align: -2px; margin-right: 6px; }
 button:disabled { opacity: 0.5; cursor: default; }
 
 .panel {

@@ -17,7 +17,7 @@ import { recentRequests, subscribe } from "../net/events";
 import { caCertPem } from "../net/ca";
 import { createForward, deleteForward, listForwards } from "../net/forwards";
 import { AuthError, authEnabled, clearCookie, crossOrigin, login, logout, safeNext, sessionCookie, signedIn, tokenFrom } from "../core/auth";
-import { FileError, deletePath, fileIndex, listDir, makeDir, readFile, renamePath, writeFile } from "../core/files";
+import { FileError, commitStaged, deletePath, discardPaths, listStashes, stash, fileIndex, gitStatus, headFile, lastCommit, listBranches, listDir, makeDir, pushBranch, readFile, renamePath, stageFile, stagePaths, switchBranch, writeFile } from "../core/files";
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
@@ -218,10 +218,52 @@ export function startServer() {
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/files\/index$/);
         if (m && req.method === "GET") return json(await fileIndex(m[1]));
+        m = p.match(/^\/api\/projects\/([\w-]+)\/files\/status$/);
+        if (m && req.method === "GET") return json(await gitStatus(m[1])); // git state per path, for the tree's colours
+        m = p.match(/^\/api\/projects\/([\w-]+)\/files\/stage$/);
+        if (m && req.method === "POST") {           // stage / unstage whole files
+          const b = await req.json();
+          return json(await stagePaths(m[1], b.paths, b.on));
+        }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/files\/commit$/);
+        if (m && req.method === "POST") {           // commit what is staged
+          const b = await req.json();
+          return json(await commitStaged(m[1], b.message, { amend: b.amend === true }));
+        }
+        if (m && req.method === "GET") return json(await lastCommit(m[1])); // what "amend" would rewrite
+        m = p.match(/^\/api\/projects\/([\w-]+)\/files\/push$/);
+        if (m && req.method === "POST") {           // push the VM's branch to its origin
+          const b = await req.json().catch(() => ({}));
+          return json(await pushBranch(m[1], { force: b.force === true }));
+        }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/files\/discard$/);
+        if (m && req.method === "POST") {           // throw away uncommitted changes
+          const b = await req.json();
+          return json(await discardPaths(m[1], b.paths));
+        }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/files\/stash$/);
+        if (m && req.method === "GET") return json(await listStashes(m[1]));
+        if (m && req.method === "POST") {           // push / pop / drop
+          const b = await req.json();
+          return json(await stash(m[1], b.action, { index: b.index, message: b.message }));
+        }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/files\/branch$/);
+        if (m && req.method === "GET") return json(await listBranches(m[1]));
+        if (m && req.method === "POST") {           // switch branch in the VM (or create one)
+          const b = await req.json();
+          return json(await switchBranch(m[1], b.name, { create: b.create === true }));
+        }
         m = p.match(/^\/api\/projects\/([\w-]+)\/files\/rename$/);
         if (m && req.method === "POST") {
           const b = await req.json();
           return json(await renamePath(m[1], b.from, b.to));
+        }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/file\/head$/);
+        if (m && req.method === "GET") return json(await headFile(m[1], url.searchParams.get("path"))); // as last committed
+        m = p.match(/^\/api\/projects\/([\w-]+)\/file\/index$/);
+        if (m && req.method === "PUT") {            // stage: set what the index holds for this file
+          const b = await req.json();
+          return json(await stageFile(m[1], b.path, b.content, b.expect));
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/file$/);
         if (m && req.method === "GET") return json(await readFile(m[1], url.searchParams.get("path")));
