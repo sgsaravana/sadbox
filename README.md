@@ -29,7 +29,7 @@ the de-risk experiments behind each piece.
 ## Releases
 
 <!-- LATEST_RELEASE:START -->
-**Latest release: [v0.3.0](https://github.com/sgsaravana/sadbox/releases/tag/v0.3.0)** · published 2026-10-13 · [release notes →](https://github.com/sgsaravana/sadbox/releases/tag/v0.3.0)
+**Latest release: [v0.3.1](https://github.com/sgsaravana/sadbox/releases/tag/v0.3.1)** · published 2026-10-14 · [release notes →](https://github.com/sgsaravana/sadbox/releases/tag/v0.3.1)
 <!-- LATEST_RELEASE:END -->
 
 Every release ships prebuilt binaries for macOS/Linux (arm64/x64) plus
