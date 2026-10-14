@@ -30,6 +30,12 @@
   .row .tw { width: 14px; flex: 0 0 auto; text-align: center; font-size: 9px; color: var(--faint); }
   .row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; }
   .row.dir .nm { color: var(--text); }
+  /* git state, as in Zed's project panel: new = green, changed = amber */
+  .row.g-new .nm { color: var(--ok); }
+  .row.g-modified .nm { color: var(--warn); }
+  .row.g-renamed .nm { color: var(--accent); }
+  .row.g-conflict .nm { color: var(--bad); }
+  .row.g-ignored .nm { color: var(--faint); }
   .row .acts { display: none; }
   .row:hover .acts { display: flex; }
   .row .acts button { color: var(--faint); padding: 0 4px; font-size: 12px; border-radius: 3px; }
@@ -51,7 +57,13 @@
   .tab.dirty .x::before { content: "●"; font-size: 10px; color: var(--accent); }
   .tab.dirty .x:hover::before { content: "×"; font-size: 14px; color: var(--text); }
   .tab:not(.dirty) .x::before { content: "×"; }
-  .tab.stale .lbl { color: var(--warn); }
+  .tab.g-new .lbl { color: var(--ok); }
+  .tab.g-modified .lbl { color: var(--warn); }
+  .tab.g-renamed .lbl { color: var(--accent); }
+  .tab.g-conflict .lbl { color: var(--bad); }
+  .tab.g-ignored .lbl { color: var(--faint); }
+  /* changed in the VM under an open tab: amber whatever its git state, and slanted to tell it from "modified" */
+  .tab.stale .lbl { color: var(--warn); font-style: italic; }
   #stage { flex: 1; min-height: 0; position: relative; }
   #editor { position: absolute; inset: 0; }
   #empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -72,18 +84,86 @@
   #status .grow { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #st-msg.ok { color: var(--ok); } #st-msg.bad { color: var(--bad); }
 
+  #st-stage { color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0 8px; font-size: 12px; line-height: 18px; }
+  #st-stage:hover { border-color: var(--accent); }
+
+  /* commit */
+  #commit { display: none; position: fixed; inset: 0; z-index: 50; background: #0006; justify-content: center; align-items: flex-start; padding-top: 10vh; }
+  #commit.show { display: flex; }
+  #commit .box { width: min(640px, 92vw); background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+                 box-shadow: 0 12px 40px #000a; overflow: hidden; display: flex; flex-direction: column; }
+  #commit .bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; color: var(--dim); font-size: 12px; }
+  #commit .bar .grow { flex: 1; }
+  #commit .bar b { color: var(--text); font-size: 13px; }
+  #commit button { color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 2px 10px; font-size: 12px; }
+  #commit button:hover:not(:disabled) { border-color: var(--accent); }
+  #commit button:disabled { opacity: 0.5; cursor: default; }
+  #commit #cm-go { background: var(--accent); border-color: var(--accent); color: #fff; padding: 4px 14px; }
+  #cm-branch { text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #cm-amend-l { display: flex; align-items: center; gap: 6px; color: var(--text); cursor: pointer; white-space: nowrap; }
+  #cm-note.warn { color: var(--warn); }
+  #commit .bar + .bar { padding-top: 0; }
+  #cm-list { max-height: 40vh; overflow: auto; padding: 4px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .cm-row { display: flex; align-items: center; gap: 8px; padding: 3px 8px; border-radius: 5px; cursor: pointer; }
+  .cm-row:hover { background: var(--sel); }
+  .cm-row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cm-row .st { color: var(--faint); font-size: 12px; }
+  .cm-row.g-new .nm { color: var(--ok); } .cm-row.g-modified .nm { color: var(--warn); }
+  .cm-row.g-renamed .nm { color: var(--accent); } .cm-row.g-conflict .nm { color: var(--bad); }
+  .cm-row.g-deleted .nm { color: var(--bad); text-decoration: line-through; }
+  .cm-row .cm-x { visibility: hidden; border: 0 !important; padding: 0 6px !important; color: var(--dim) !important; font-size: 14px !important; }
+  .cm-row:hover .cm-x { visibility: visible; }
+  .cm-row .cm-x:hover { color: var(--bad) !important; }
+  #commit button.bad { color: var(--bad); }
+  #commit button.bad:hover:not(:disabled) { border-color: var(--bad); }
+  #cm-stashes { max-height: 18vh; overflow: auto; padding: 4px; border-bottom: 1px solid var(--border); }
+  #cm-stashes .hd { padding: 2px 8px; color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .st-row { display: flex; align-items: center; gap: 8px; padding: 3px 8px; }
+  .st-row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); }
+  #cm-msg { margin: 10px 12px 0; padding: 8px 10px; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+            border-radius: 5px; font: 13px "SF Mono", Menlo, monospace; resize: vertical; outline: none; }
+  #cm-msg:focus { border-color: var(--accent); }
+
   /* quick open */
-  #palette { display: none; position: fixed; inset: 0; z-index: 50; background: #0006; justify-content: center; align-items: flex-start; padding-top: 12vh; }
-  #palette.show { display: flex; }
-  #palette .box { width: min(620px, 90vw); background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  #palette, #branches { display: none; position: fixed; inset: 0; z-index: 50; background: #0006; justify-content: center; align-items: flex-start; padding-top: 12vh; }
+  #palette.show, #branches.show { display: flex; }
+  #palette .box, #branches .box { width: min(620px, 90vw); background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
                   box-shadow: 0 12px 40px #000a; overflow: hidden; }
-  #palette input { width: 100%; padding: 11px 14px; background: none; border: 0; border-bottom: 1px solid var(--border);
+  #palette input, #branches input { width: 100%; padding: 11px 14px; background: none; border: 0; border-bottom: 1px solid var(--border);
                    color: var(--text); font: 14px system-ui; outline: none; }
-  #pal-list { max-height: 46vh; overflow: auto; padding: 4px; }
+  #pal-list, #br-list { max-height: 46vh; overflow: auto; padding: 4px; }
+  #br-list .cur { color: var(--ok); }
+  #st-branch { color: var(--dim); max-width: 30ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #st-branch:hover { color: var(--text); }
   .pal-item { padding: 5px 10px; border-radius: 5px; cursor: pointer; display: flex; gap: 10px; align-items: baseline; }
   .pal-item.sel { background: var(--sel); }
   .pal-item .dir { color: var(--faint); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pal-empty { padding: 10px 12px; color: var(--faint); }
+
+  /* changed lines, against the last commit: a bar in the gutter — green added,
+     amber modified — and a red wedge where lines were removed */
+  .ace_gutter-cell.gd-add, .ace_gutter-cell.gd-mod, .ace_gutter-cell.gd-del, .ace_gutter-cell.gd-del-below { cursor: pointer; }
+  .ace_gutter-cell.gd-add { box-shadow: inset 3px 0 0 var(--ok); }
+  .ace_gutter-cell.gd-mod { box-shadow: inset 3px 0 0 var(--warn); }
+  .ace_gutter-cell.gd-del::before, .ace_gutter-cell.gd-del-below::after {
+    content: ""; position: absolute; left: 0; border: 4px solid transparent; border-left: 6px solid var(--bad); }
+  /* already staged: the same marks, hollow */
+  .ace_gutter-cell.gd-add.gd-staged { box-shadow: inset 1px 0 0 var(--ok), inset 3px 0 0 var(--bg), inset 4px 0 0 var(--ok); }
+  .ace_gutter-cell.gd-mod.gd-staged { box-shadow: inset 1px 0 0 var(--warn), inset 3px 0 0 var(--bg), inset 4px 0 0 var(--warn); }
+  .ace_gutter-cell.gd-del.gd-staged::before, .ace_gutter-cell.gd-del-below.gd-staged::after { opacity: 0.45; }
+  .ace_gutter-cell.gd-del::before { top: -4px; }
+  .ace_gutter-cell.gd-del-below::after { bottom: -4px; }
+  .gd-peek { box-sizing: border-box; background: #2b2f37; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+             font-family: "SF Mono", Menlo, Monaco, Consolas, monospace; }
+  .gd-peek .hd { display: flex; align-items: center; gap: 10px; padding: 3px 10px; font: 12px system-ui; color: var(--dim); background: var(--panel); }
+  .gd-peek .hd .grow { flex: 1; }
+  .gd-peek .hd button { color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 1px 8px; font-size: 12px; }
+  .gd-peek .hd button:hover { border-color: var(--accent); }
+  .gd-peek .hd button:disabled { opacity: 0.5; }
+  .gd-peek .hd .tag { color: var(--ok); }
+  .gd-peek pre { margin: 0; padding: 2px 0; max-height: 240px; overflow: auto; background: rgba(208, 114, 119, 0.13); color: var(--text); }
+  .gd-peek pre div { padding: 0 10px; white-space: pre; min-height: 1.55em; }
+  .gd-peek pre div::before { content: "−"; color: var(--bad); margin-right: 10px; }
 
   /* blend Ace into the page */
   .ace_editor { font-family: "SF Mono", Menlo, Monaco, Consolas, monospace !important; }
@@ -99,6 +179,7 @@
         <button class="icon-btn" id="btn-open" title="Go to file (⌘P)">⌕</button>
         <button class="icon-btn" id="btn-newfile" title="New file">＋</button>
         <button class="icon-btn" id="btn-newdir" title="New folder">▣</button>
+        <button class="icon-btn" id="btn-commit" title="Commit… — stage files and commit them in the VM">✓</button>
         <button class="icon-btn" id="btn-refresh" title="Refresh the tree">⟳</button>
       </div>
       <div id="tree"></div>
@@ -121,7 +202,9 @@
     </section>
   </div>
   <div id="status">
+    <button id="st-branch" hidden title="Switch branch in the VM"></button>
     <span class="grow" id="st-path"></span>
+    <button id="st-stage" hidden></button>
     <span id="st-msg"></span>
     <span id="st-pos"></span>
     <span id="st-lang"></span>
@@ -129,6 +212,23 @@
   <div id="palette"><div class="box">
     <input id="pal-input" placeholder="Go to file…" autocomplete="off" spellcheck="false">
     <div id="pal-list"></div>
+  </div></div>
+
+  <div id="branches"><div class="box">
+    <input id="br-input" placeholder="Switch to a branch, or type a new name…" autocomplete="off" spellcheck="false">
+    <div id="br-list"></div>
+  </div></div>
+  <div id="commit"><div class="box">
+    <div class="bar"><b>Commit</b><span id="cm-count"></span><span class="grow" id="cm-branch"></span>
+      <button id="cm-all">Stage all</button><button id="cm-none">Unstage all</button>
+      <button id="cm-stash" title="Put every uncommitted change away (new files too) and go back to the last commit; bring it back later">Stash</button>
+      <button id="cm-discard" class="bad" title="Throw away every uncommitted change">Discard all</button></div>
+    <div id="cm-list"></div>
+    <div id="cm-stashes" hidden></div>
+    <textarea id="cm-msg" rows="3" placeholder="Commit message" spellcheck="false"></textarea>
+    <div class="bar"><label id="cm-amend-l" title="Rewrite the last commit: what is staged is added to it, and its message replaced"><input type="checkbox" id="cm-amend"> Amend last commit</label>
+      <span class="grow" id="cm-note"></span></div>
+    <div class="bar"><button id="cm-push" hidden></button><span class="grow"></span><button id="cm-cancel">Cancel</button><button id="cm-go">Commit</button></div>
   </div></div>
 
   <script src="/vendor/ace/ace.js"></script>
@@ -208,6 +308,7 @@
         if (dirty !== tab.dirty) { tab.dirty = dirty; renderTabs(); }
       }, 0));
       s.selection.on("changeCursor", () => { if (tab === active) showPos(); });
+      s.on("change", () => { closePeek(tab); clearTimeout(tab.diffTimer); tab.diffTimer = setTimeout(() => markChanges(tab), 120); });
       tab.session = s;
       applyMode(tab);
     }
@@ -223,11 +324,266 @@
         // show the folder too when two open files share a name
         const twin = tabs.some((o) => o !== t && base(o.path) === base(t.path));
         const label = twin && parent(t.path) ? `${base(t.path)} — ${parent(t.path)}` : base(t.path);
-        return `<div class="tab${t === active ? " active" : ""}${t.dirty ? " dirty" : ""}${t.stale ? " stale" : ""}" data-i="${i}" title="${esc(t.path)}">
+        const g = gitState(t.path, false);
+        return `<div class="tab${t === active ? " active" : ""}${t.dirty ? " dirty" : ""}${t.stale ? " stale" : ""}${g ? ` g-${g}` : ""}" data-i="${i}" title="${esc(t.path)}${g ? ` — ${GIT_LABEL[g]}` : ""}">
           <span class="lbl">${esc(label)}</span><button class="x" data-close="${i}" title="Close"></button></div>`;
       }).join("");
       $("#tabs .tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      showStageBtn();
     }
+
+    // ---- staging whole files, and committing ----
+    /** How much of a file is staged: "all" · "some" · "none" · null when it has no changes. */
+    function fileStage(path) {
+      if (git.staged[path]) return git.staged[path];
+      const st = gitState(path, false);
+      return st && st !== "ignored" ? "none" : null;
+    }
+    function showStageBtn() {
+      const br = $("#st-branch");
+      br.hidden = !git.repo;
+      br.textContent = `⎇ ${git.branch || "detached"}`;
+      const b = $("#st-stage");
+      const st = active && (fileStage(active.path) || (active.dirty ? "none" : null));
+      b.hidden = !st || !git.repo;
+      if (st) {
+        b.textContent = st === "all" ? "Unstage file" : "Stage file";
+        b.title = st === "all" ? "Take this file out of the next commit" : "Put every change in this file in the next commit (saves it first)";
+      }
+    }
+    /** Stage or unstage whole paths ("all" = everything). Open files with unsaved edits are saved first. */
+    async function setStaged(paths, on) {
+      if (on) for (const t of tabs) if (t.dirty && (paths === "all" || paths.includes(t.path))) { await save(t); if (t.dirty) return false; }
+      try { await api("/files/stage", { method: "POST", body: { paths, on } }); }
+      catch (e) { flash(`${on ? "Stage" : "Unstage"} failed: ${e.message}`, "bad"); return false; }
+      if (await loadGit()) renderTree();
+      return true;
+    }
+    $("#st-stage").addEventListener("click", async () => {
+      if (!active) return;
+      const on = fileStage(active.path) !== "all";
+      if (await setStaged([active.path], on)) flash(on ? `Staged ${base(active.path)}` : `Unstaged ${base(active.path)}`, "ok");
+    });
+
+    function renderCommit() {
+      const rows = [
+        ...Object.entries(git.files).filter(([, st]) => st !== "ignored").map(([path, st]) => ({ path, st, staged: git.staged[path] || "none" })),
+        ...Object.entries(git.dirs).filter(([, st]) => st !== "ignored").map(([path, st]) => ({ path, st, staged: "none", dir: true })),
+      ].sort((a, b) => a.path.localeCompare(b.path));
+      const n = rows.filter((r) => r.staged !== "none").length;
+      $("#cm-count").textContent = rows.length ? `${n} of ${rows.length} staged` : "";
+      $("#cm-list").innerHTML = rows.length
+        ? rows.map((r) => `<label class="cm-row g-${r.st}"><input type="checkbox" data-path="${esc(r.path)}"${r.staged === "all" ? " checked" : ""}${r.staged === "some" ? " data-some" : ""}>
+            <span class="nm">${esc(r.path)}${r.dir ? "/" : ""}</span><span class="st">${r.staged === "some" ? "partly staged · " : ""}${r.dir ? "new folder" : r.st}</span><button class="cm-x" data-discard="${esc(r.path)}" title="Discard the changes to this ${r.dir ? "folder" : "file"}">↶</button></label>`).join("")
+        : `<div class="pal-empty">nothing has changed since the last commit</div>`;
+      for (const c of $("#cm-list").querySelectorAll("[data-some]")) c.indeterminate = true;
+      const unsaved = tabs.filter((t) => t.dirty).length;
+      const amend = $("#cm-amend").checked;
+      const pushed = !!git.upstream && git.ahead === 0;
+      $("#cm-note").className = "grow" + (amend && pushed ? " warn" : "");
+      $("#cm-note").textContent = amend && pushed ? "the last commit is already pushed — after amending it, pushing means overwriting the remote branch"
+        : unsaved ? `${unsaved} open file${unsaved === 1 ? " has" : "s have"} unsaved edits — staging a file saves it` : "";
+      $("#cm-branch").textContent = git.branch
+        ? `${git.branch}${git.upstream ? ` ↑${git.ahead}${git.behind ? ` ↓${git.behind}` : ""}` : git.remote ? " · not pushed yet" : ""}` : "";
+      $("#cm-all").disabled = !rows.some((r) => r.staged !== "all");
+      $("#cm-none").disabled = !n;
+      $("#cm-stash").disabled = $("#cm-discard").disabled = !rows.length || busyGit;
+      $("#cm-stashes").hidden = !stashes.length;
+      $("#cm-stashes").innerHTML = `<div class="hd">Stashes</div>` + stashes.map((x) => `<div class="st-row"><span class="nm" title="${esc(x.message)}">${esc(x.message)}</span>
+        <button data-pop="${x.index}" title="Bring these changes back and remove the stash"${busyGit ? " disabled" : ""}>Pop</button><button data-drop="${x.index}" class="bad" title="Delete this stash"${busyGit ? " disabled" : ""}>Drop</button></div>`).join("");
+      const files = n ? ` ${n} file${n === 1 ? "" : "s"}` : "";
+      $("#cm-go").textContent = amend ? `Amend${n ? ` with${files}` : ""}` : `Commit${files}`;
+      $("#cm-go").disabled = (!n && !amend) || !$("#cm-msg").value.trim() || committing;
+      const p = $("#cm-push");
+      p.hidden = !git.remote || !git.branch;
+      p.textContent = pushing ? "Pushing…" : !git.upstream ? `Push ${git.branch}` : git.ahead ? `Push ↑${git.ahead}` : "Nothing to push";
+      p.disabled = pushing || committing || (!!git.upstream && !git.ahead);
+      p.title = `Push ${git.branch} to the project's git remote, from the VM`;
+    }
+    let committing = false, pushing = false, amendFilled = "";
+
+    // ---- stash, discard ----
+    let stashes = [], busyGit = false;
+    async function loadStashes() {
+      try { stashes = (await api("/files/stash")).stashes; } catch { return; }
+      if ($("#commit").classList.contains("show")) renderCommit();
+    }
+    /** The files on disk changed wholesale: bring the tree and the open tabs in
+     *  line. Tabs under `forced` paths ("all" = every tab) lose unsaved edits too. */
+    async function afterDiskChange(forced) {
+      await loadGit();
+      await refreshTree().catch(() => {});
+      for (const t of [...tabs]) {
+        const force = forced === "all" || (forced || []).some((p) => t.path === p || t.path.startsWith(p + "/"));
+        if (t.dirty && !force) { checkDisk(t); continue; }
+        try {
+          const f = await api("/file" + qs(t.path));
+          if (f.hash !== t.hash || t.dirty) reloadInto(t, f);
+        } catch (e) {
+          if (e.status === 404) { t.dirty = false; closeTab(t); } // the file is gone with the change
+        }
+      }
+      renderTabs(); showBanner();
+      for (const t of tabs) loadBase(t);
+    }
+    async function gitAction(run, okMsg, forced) {
+      if (busyGit) return;
+      busyGit = true; renderCommit();
+      let done;
+      try { await run(); done = [okMsg, "ok"]; } catch (e) { done = [e.message, "bad"]; }
+      busyGit = false;
+      await afterDiskChange(done[1] === "ok" ? forced : null);
+      await loadStashes();
+      renderCommit();
+      flash(...done);
+    }
+    function discard(paths) {
+      const what = paths === "all" ? "ALL uncommitted changes in the workdir" : `the changes to ${paths.join(", ")}`;
+      if (!confirm(`Discard ${what}?\n\nChanged files go back to the last commit and new files are deleted. This cannot be undone.`)) return;
+      gitAction(() => api("/files/discard", { method: "POST", body: { paths } }), paths === "all" ? "Discarded all changes" : `Discarded ${paths.map(base).join(", ")}`, paths);
+    }
+    async function stashAll() {
+      const message = prompt("Stash every uncommitted change (new files too) and go back to the last commit.\n\nA note to recognise it by (optional):", "");
+      if (message === null) return;
+      for (const t of tabs) if (t.dirty) { await save(t); if (t.dirty) return; } // unsaved edits belong in the stash
+      gitAction(() => api("/files/stash", { method: "POST", body: { action: "push", message } }), "Stashed", null);
+    }
+    $("#cm-discard").addEventListener("click", () => discard("all"));
+    $("#cm-stash").addEventListener("click", stashAll);
+    $("#cm-list").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-discard]");
+      if (b) { e.preventDefault(); discard([b.dataset.discard]); }
+    });
+    $("#cm-stashes").addEventListener("click", (e) => {
+      const pop = e.target.closest("[data-pop]"), drop = e.target.closest("[data-drop]");
+      if (pop) {
+        if (tabs.some((t) => t.dirty)) return flash("Save the files with unsaved edits before bringing a stash back", "bad");
+        gitAction(() => api("/files/stash", { method: "POST", body: { action: "pop", index: +pop.dataset.pop } }), "Stash brought back", null);
+      } else if (drop && confirm("Delete this stash? The changes in it are lost.")) {
+        gitAction(() => api("/files/stash", { method: "POST", body: { action: "drop", index: +drop.dataset.drop } }), "Stash deleted", null);
+      }
+    });
+    // Amend starts from the last commit's message (unless one is being written already)
+    $("#cm-amend").addEventListener("change", async () => {
+      const m = $("#cm-msg");
+      if ($("#cm-amend").checked) {
+        if (!m.value.trim()) {
+          try { const c = await api("/files/commit"); if (!m.value.trim() && $("#cm-amend").checked) m.value = amendFilled = c.message; } catch {}
+        }
+      } else if (m.value === amendFilled) m.value = "";
+      renderCommit();
+    });
+    async function doPush(force = false) {
+      pushing = true; renderCommit();
+      try {
+        const r = await api("/files/push", { method: "POST", body: { force } });
+        flash(`Pushed ${r.branch}${r.forced ? " (overwrote the remote branch)" : ""}`, "ok");
+      } catch (e) {
+        pushing = false;
+        if (e.data?.rejected && !force) {
+          if (confirm(`The push was rejected: ${e.message}.\n\nOverwrite the remote branch with the VM's? Commits that exist only on the remote are lost.`)) return doPush(true);
+          flash("Not pushed", "bad");
+        } else flash(e.message.startsWith("push failed") ? e.message : `Push failed: ${e.message}`, "bad");
+      }
+      pushing = false;
+      await loadGit();
+      renderCommit();
+    }
+    $("#cm-push").addEventListener("click", () => doPush());
+    function openCommit() {
+      if (gitSeen && !git.repo) return flash("The workdir is not a git repository", "bad");
+      $("#commit").classList.add("show");
+      renderCommit();
+      loadGit();
+      loadStashes();
+      $("#cm-msg").focus();
+    }
+    function closeCommit() { $("#commit").classList.remove("show"); if (active) editor.focus(); }
+    async function doCommit() {
+      if ($("#cm-go").disabled) return;
+      committing = true; renderCommit();
+      try {
+        const amend = $("#cm-amend").checked;
+        const r = await api("/files/commit", { method: "POST", body: { message: $("#cm-msg").value, amend } });
+        $("#cm-msg").value = amendFilled = ""; $("#cm-amend").checked = false;
+        if (!git.remote) closeCommit(); // otherwise stay: Push is the likely next step
+        flash(`${amend ? "Amended" : "Committed"} ${r.sha} — ${r.subject}`, "ok");
+      } catch (e) { flash(`Commit failed: ${e.message}`, "bad"); }
+      committing = false;
+      if (await loadGit()) renderTree();
+      if ($("#commit").classList.contains("show")) renderCommit();
+    }
+    $("#btn-commit").addEventListener("click", openCommit);
+    $("#cm-cancel").addEventListener("click", closeCommit);
+    $("#cm-go").addEventListener("click", doCommit);
+    $("#cm-all").addEventListener("click", () => setStaged("all", true).then(renderCommit));
+    $("#cm-none").addEventListener("click", () => setStaged("all", false).then(renderCommit));
+    $("#cm-msg").addEventListener("input", renderCommit);
+    $("#cm-list").addEventListener("change", (e) => {
+      const c = e.target.closest("input[data-path]");
+      if (c) setStaged([c.dataset.path], c.checked).then(renderCommit);
+    });
+    $("#commit").addEventListener("mousedown", (e) => { if (e.target === $("#commit")) closeCommit(); });
+    $("#commit").addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); closeCommit(); }
+      else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); doCommit(); }
+    });
+
+    // ---- switching branch ----
+    let brAll = null, brItems = [], brSel = 0, brBusy = false;
+    function renderBranches() {
+      const query = $("#br-input").value.trim();
+      if (!brAll) { $("#br-list").innerHTML = `<div class="pal-empty">reading the branches…</div>`; return; }
+      const ql = query.toLowerCase();
+      brItems = brAll.branches.filter((b) => b.name.toLowerCase().includes(ql)).slice(0, 200);
+      if (query && !brAll.branches.some((b) => b.name === query)) brItems.push({ name: query, create: true });
+      brSel = Math.min(brSel, Math.max(0, brItems.length - 1));
+      $("#br-list").innerHTML = brItems.length
+        ? brItems.map((b, i) => `<div class="pal-item${i === brSel ? " sel" : ""}" data-i="${i}">
+            <span${b.name === brAll.current ? ` class="cur"` : ""}>${b.create ? "Create branch " : ""}${esc(b.name)}</span><span class="dir">${
+              b.create ? `from ${esc(brAll.current || "here")}` : b.name === brAll.current ? "current" : b.remote ? "on the remote" : ""}</span></div>`).join("")
+        : `<div class="pal-empty">no branches</div>`;
+      $("#br-list .sel")?.scrollIntoView({ block: "nearest" });
+    }
+    async function openBranches() {
+      $("#branches").classList.add("show");
+      $("#br-input").value = ""; brSel = 0; brAll = null;
+      $("#br-input").focus();
+      renderBranches();
+      try { brAll = await api("/files/branch"); } catch (e) { closeBranches(); return flash(e.message, "bad"); }
+      renderBranches();
+    }
+    function closeBranches() { $("#branches").classList.remove("show"); if (active) editor.focus(); }
+    async function pickBranch(i) {
+      const b = brItems[i];
+      if (!b || brBusy) return;
+      if (b.name === brAll.current) return closeBranches();
+      // the files on disk are about to change under the open tabs
+      const unsaved = tabs.filter((t) => t.dirty);
+      if (unsaved.length) return flash(`Save or close ${unsaved.length === 1 ? base(unsaved[0].path) : `the ${unsaved.length} files with unsaved edits`} before switching branch`, "bad");
+      brBusy = true;
+      let done;
+      try {
+        const r = await api("/files/branch", { method: "POST", body: { name: b.name, create: !!b.create } });
+        closeBranches();
+        done = [`${r.created ? "Created and switched to" : "Switched to"} ${r.branch}`, "ok"];
+      } catch (e) { done = [`Not switched: ${e.message}`, "bad"]; }
+      brBusy = false;
+      await loadGit();
+      await refreshTree().catch(() => {});
+      await Promise.all([...tabs].map((t) => checkDisk(t))); // open files take the branch's content
+      flash(...done);
+    }
+    $("#st-branch").addEventListener("click", openBranches);
+    $("#br-input").addEventListener("input", () => { brSel = 0; renderBranches(); });
+    $("#br-input").addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); closeBranches(); }
+      else if (e.key === "ArrowDown") { e.preventDefault(); brSel = Math.min(brSel + 1, brItems.length - 1); renderBranches(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); brSel = Math.max(brSel - 1, 0); renderBranches(); }
+      else if (e.key === "Enter") { e.preventDefault(); pickBranch(brSel); }
+    });
+    $("#br-list").addEventListener("click", (e) => { const it = e.target.closest(".pal-item"); if (it) pickBranch(+it.dataset.i); });
+    $("#branches").addEventListener("mousedown", (e) => { if (e.target === $("#branches")) closeBranches(); });
 
     function activate(tab) {
       active = tab;
@@ -238,6 +594,7 @@
         $("#st-path").textContent = tab.path;
         $("#st-lang").textContent = tab.lang;
         checkDisk(tab);
+        if (tab.base !== undefined) loadBase(tab); // a commit or checkout may have moved it
       } else {
         $("#st-path").textContent = ""; $("#st-lang").textContent = "";
       }
@@ -255,6 +612,7 @@
           tab = { path, hash: f.hash, dirty: false, stale: false };
           makeSession(tab, f.content);
           tabs.push(tab);
+          loadBase(tab);
         }
       }
       activate(tab);
@@ -291,6 +649,7 @@
         if (tab.session.getValue() === content) { tab.session.getUndoManager().markClean(); tab.dirty = false; }
         flash(`Saved ${base(tab.path)}`, "ok");
         renderTabs(); showBanner();
+        loadGit().then((changed) => { if (changed) renderTree(); });
       } catch (e) {
         if (e.status === 409 && e.data?.conflict) { tab.stale = true; renderTabs(); showBanner(); flash("Not saved — the file changed in the VM", "bad"); }
         else flash(`Save failed: ${e.message}`, "bad");
@@ -342,6 +701,204 @@
     $("#banner-keep").onclick = () => save(active, true);
     addEventListener("focus", () => checkDisk(active));
 
+    // ---- changed lines (the git gutter) ----
+    // Each buffer is compared, as you type, with the file's last committed
+    // version. tab.base: undefined = not known yet · null = nothing to compare
+    // with · { lines } = the committed lines (an empty file's, if it is all new).
+    async function loadBase(tab) {
+      let r;
+      try { r = await api("/file/head" + qs(tab.path)); } catch { return; }
+      if (!tabs.includes(tab)) return;
+      setBase(tab, r);
+    }
+    const split = (text) => text.split(/\r?\n/);
+    function setBase(tab, r) {
+      const lines = !r.repo ? null : !r.inHead ? [""] : r.content == null ? null : split(r.content);
+      // what is staged, as lines — null when it cannot be worked with (a
+      // conflict, or not text), which leaves the marks but turns staging off
+      const index = !lines ? null : !r.inIndex ? (r.inHead ? null : [""]) : r.index == null ? null : split(r.index);
+      const key = JSON.stringify([r.repo, r.inHead, r.content, r.indexOid, index == null]);
+      if (tab.baseKey === key) return;
+      tab.baseKey = key;
+      tab.base = lines ? { lines, fresh: !r.inHead, index, indexOid: r.indexOid, staged: index ? withLines(diffLines(lines, index), index) : [] } : null;
+      markChanges(tab);
+    }
+    const withLines = (hunks, lines) => hunks.map((h) => ({ ...h, lines: lines.slice(h.row, h.row + h.count) }));
+    // two changes to the same stretch of the committed file (touching counts)
+    const touches = (a, b) => a.oldRow <= b.oldRow + b.oldCount && b.oldRow <= a.oldRow + a.oldCount;
+    const sameHunk = (a, b) => a.oldRow === b.oldRow && a.oldCount === b.oldCount &&
+      a.lines.length === b.lines.length && a.lines.every((l, i) => l === b.lines[i]);
+    /** The committed lines with these changes made to them. */
+    function applyHunks(lines, hunks) {
+      const out = [];
+      let at = 0;
+      for (const h of [...hunks].sort((a, b) => a.oldRow - b.oldRow)) {
+        for (; at < h.oldRow; at++) out.push(lines[at]);
+        for (const l of h.lines) out.push(l);
+        at = h.oldRow + h.oldCount;
+      }
+      for (; at < lines.length; at++) out.push(lines[at]);
+      return out;
+    }
+
+    // Stage or unstage one hunk: the index gets the committed file with every
+    // change already staged, plus (or minus) this one. What is staged comes from
+    // the saved file, so unsaved edits are saved first.
+    async function stageHunk(tab, hunk, on) {
+      if (tab.dirty) { await save(tab); if (tab.dirty) return; }
+      try {
+        setBase(tab, await api("/file/head" + qs(tab.path))); // the agent may have staged things meanwhile
+        const b = tab.base;
+        if (!b?.index) return flash("Cannot stage this file here", "bad");
+        const h = tab.hunks.find((x) => x.oldRow === hunk.oldRow && x.oldCount === hunk.oldCount && x.row === hunk.row && x.count === hunk.count);
+        if (!h) return flash("The file changed — try again", "bad");
+        const kept = b.staged.filter((x) => !touches(x, h));
+        const lines = applyHunks(b.lines, on ? [...kept, h] : kept);
+        const asCommitted = lines.length === b.lines.length && lines.every((l, i) => l === b.lines[i]);
+        const content = asCommitted ? null : lines.join(tab.session.doc.getNewLineCharacter());
+        await api("/file/index", { method: "PUT", body: { path: tab.path, content, expect: b.indexOid } });
+        flash(on ? "Staged" : "Unstaged", "ok");
+      } catch (e) { flash(`${on ? "Stage" : "Unstage"} failed: ${e.message}`, "bad"); }
+      await loadBase(tab);
+      loadGit().then((changed) => { if (changed) renderTree(); });
+    }
+
+    /** Line diff (Myers), as hunks: `count` lines at `row` of `b` replace
+     *  `oldCount` lines at `oldRow` of `a`. */
+    function diffLines(a, b) {
+      let s = 0, n = a.length, m = b.length;
+      while (s < n && s < m && a[s] === b[s]) s++;
+      let e = 0;
+      while (e < n - s && e < m - s && a[n - 1 - e] === b[m - 1 - e]) e++;
+      const N = n - s - e, M = m - s - e;
+      if (!N && !M) return [];
+      const whole = [{ row: s, count: M, oldRow: s, oldCount: N }];
+      if (!N || !M) return whole;
+      const max = Math.min(N + M, 1500), off = max + 1; // past that many edits, call it one change
+      let v = new Int32Array(2 * max + 3), found = -1;
+      const trace = [];
+      search: for (let d = 0; d <= max; d++) {
+        trace.push(v.slice());
+        for (let k = -d; k <= d; k += 2) {
+          let x = k === -d || (k !== d && v[k - 1 + off] < v[k + 1 + off]) ? v[k + 1 + off] : v[k - 1 + off] + 1;
+          let y = x - k;
+          while (x < N && y < M && a[s + x] === b[s + y]) { x++; y++; }
+          v[k + off] = x;
+          if (x >= N && y >= M) { found = d; break search; }
+        }
+      }
+      if (found < 0) return whole;
+      const gone = new Uint8Array(N), came = new Uint8Array(M);
+      for (let d = found, x = N, y = M; d > 0; d--) {
+        const pv = trace[d], k = x - y;
+        const pk = k === -d || (k !== d && pv[k - 1 + off] < pv[k + 1 + off]) ? k + 1 : k - 1;
+        const px = pv[pk + off], py = px - pk;
+        if (pk === k + 1) came[py] = 1; else gone[px] = 1;
+        x = px; y = py;
+      }
+      const hunks = [];
+      for (let i = 0, j = 0; i < N || j < M;) {
+        if (!(gone[i] || came[j])) { i++; j++; continue; }
+        const h = { row: s + j, oldRow: s + i, count: 0, oldCount: 0 };
+        while (gone[i] || came[j]) {
+          while (gone[i]) { i++; h.oldCount++; }
+          while (came[j]) { j++; h.count++; }
+        }
+        hunks.push(h);
+      }
+      return hunks;
+    }
+
+    const GD = /\s*\bgd-[a-z-]+/g;
+    function markChanges(tab) {
+      const sess = tab.session;
+      // clear our marks wherever edits have carried them
+      const decos = sess.$decorations;
+      for (let i = 0; i < decos.length; i++) if (decos[i]) decos[i] = decos[i].replace(GD, "");
+      tab.hunks = [];
+      if (tab.base && gitState(tab.path, false) !== "ignored") {
+        const lines = sess.doc.getAllLines();
+        tab.hunks = withLines(diffLines(tab.base.lines, lines), lines);
+        for (const h of tab.hunks) {
+          h.staged = tab.base.staged.some((x) => sameHunk(x, h));
+          const st = h.staged ? " gd-staged" : "";
+          if (!h.count) {
+            // lines removed: a wedge on the boundary they were taken from
+            if (h.row < lines.length) sess.addGutterDecoration(h.row, "gd-del" + st);
+            else sess.addGutterDecoration(lines.length - 1, "gd-del-below" + st);
+          } else {
+            const cls = (h.oldCount && !tab.base.fresh ? "gd-mod" : "gd-add") + st;
+            for (let r = h.row; r < h.row + h.count; r++) sess.addGutterDecoration(r, cls);
+          }
+        }
+      }
+      sess._signal("changeBreakpoint", {}); // repaint the gutter
+    }
+
+    // Click a mark to see what the lines were, and put them back.
+    const { LineWidgets } = ace.require("ace/line_widgets");
+    function closePeek(tab) {
+      if (!tab?.peek) return;
+      tab.session.widgetManager?.removeLineWidget(tab.peek);
+      tab.peek = null;
+    }
+    function hunkAt(tab, row) {
+      const last = tab.session.getLength() - 1;
+      return (tab.hunks || []).find((h) => h.count
+        ? row >= h.row && row < h.row + h.count
+        : row === Math.min(h.row, last));
+    }
+    function openPeek(tab, h) {
+      const sess = tab.session;
+      if (!sess.widgetManager) { sess.widgetManager = new LineWidgets(sess); sess.widgetManager.attach(editor); }
+      const old = tab.base.lines.slice(h.oldRow, h.oldRow + h.oldCount);
+      const el = document.createElement("div");
+      el.className = "gd-peek";
+      const what = !h.count ? `${h.oldCount} line${h.oldCount === 1 ? "" : "s"} removed`
+        : !h.oldCount ? `${h.count} line${h.count === 1 ? "" : "s"} added`
+        : `${h.count} line${h.count === 1 ? "" : "s"} changed — was:`;
+      const canStage = !!tab.base.index;
+      el.innerHTML = `<div class="hd"><span>${what}</span>${h.staged ? `<span class="tag">staged</span>` : ""}<span class="grow"></span>` +
+        (h.staged
+          ? (canStage ? `<button data-gd="unstage" title="Take this change out of the next commit; the file is not touched">Unstage</button>` : "")
+          : (canStage ? `<button data-gd="stage" title="Put this change in the next commit (saves the file first)">Stage</button>` : "") +
+            `<button data-gd="restore" title="Put this part of the file back as last committed">Restore</button>`) +
+        `<button data-gd="close">Close</button></div>` +
+        (old.length ? `<pre>${old.map((l) => `<div>${esc(l)}</div>`).join("")}</pre>` : "");
+      el.addEventListener("mousedown", (e) => e.stopPropagation());
+      el.addEventListener("click", (e) => {
+        const act = e.target.dataset?.gd;
+        if (act === "close") closePeek(tab);
+        if (act === "stage" || act === "unstage") {
+          for (const b of el.querySelectorAll("button")) b.disabled = true;
+          stageHunk(tab, h, act === "stage").then(() => closePeek(tab));
+        }
+        if (act === "restore") {
+          closePeek(tab);
+          const doc = sess.doc, len = doc.getLength();
+          if (h.count === len && !old.length) doc.setValue("");   // every line was new
+          else {
+            if (h.count) doc.removeFullLines(h.row, h.row + h.count - 1);
+            if (old.length) doc.insertFullLines(Math.min(h.row, doc.getLength()), old);
+          }
+          editor.focus();
+        }
+      });
+      const below = h.count ? h.row + h.count - 1 : Math.max(0, Math.min(h.row, sess.getLength()) - 1);
+      tab.peek = { row: below, el, fixedWidth: true, coverGutter: false };
+      sess.widgetManager.addLineWidget(tab.peek);
+    }
+    editor.on("guttermousedown", (e) => {
+      const tab = active;
+      if (!tab || !/\bgd-/.test(e.domEvent.target.closest?.(".ace_gutter-cell")?.className || "")) return;
+      const h = hunkAt(tab, e.getDocumentPosition().row);
+      if (!h) return;
+      e.stop();
+      const again = tab.peek && tab.peekHunk === h;
+      closePeek(tab);
+      if (!again) { openPeek(tab, h); tab.peekHunk = h; }
+    });
+
     // ---- file tree ----
     // node: { path, name, type, open, kids (null until loaded) }
     const root = { path: "", name: "", type: "dir", open: true, kids: null };
@@ -356,11 +913,51 @@
       });
     }
 
+    // ---- git colours ----
+    // files: path → state; dirs: folders git reports as a whole (untracked or
+    // ignored); inside: folder → the weightiest state of anything changed in it
+    let git = { repo: false, files: {}, dirs: {}, staged: {}, inside: new Map() }, gitSeen = "";
+    const WEIGHT = { new: 1, renamed: 2, deleted: 2, modified: 2, conflict: 3 };
+    const GIT_LABEL = { new: "new", modified: "modified", renamed: "renamed", conflict: "conflict", ignored: "ignored" };
+
+    /** Fetch the workdir's git status; true if it differs from the last one. */
+    async function loadGit() {
+      let r;
+      try { r = await api("/files/status"); } catch { return false; }
+      const seen = JSON.stringify(r);
+      if (seen === gitSeen) return false;
+      gitSeen = seen;
+      const inside = new Map();
+      const mark = (path, state) => {
+        const w = WEIGHT[state];
+        if (!w) return; // ignored files say nothing about their folder
+        for (let d = parent(path); d; d = parent(d)) if ((inside.get(d) || 0) < w) inside.set(d, w); else break;
+      };
+      for (const [path, state] of Object.entries(r.files)) mark(path, state);
+      for (const [path, state] of Object.entries(r.dirs)) mark(path, state);
+      git = { repo: r.repo, branch: r.branch, upstream: r.upstream, ahead: r.ahead || 0, behind: r.behind || 0, remote: !!r.remote,
+              files: r.files, dirs: r.dirs, staged: r.staged || {}, inside };
+      renderTabs(); // tab labels carry the same colours
+      if ($("#commit").classList.contains("show")) renderCommit();
+      for (const t of tabs) loadBase(t); // a commit changes what the buffers are measured against
+      return true;
+    }
+
+    /** The git state a tree row is drawn in ("" = unchanged). */
+    function gitState(path, isDir) {
+      for (let d = path; d; d = parent(d)) if (git.dirs[d]) return git.dirs[d]; // in (or is) a wholly new/ignored folder
+      if (!isDir) return git.files[path] === "deleted" ? "" : git.files[path] || "";
+      // a folder: green while everything changed in it is new, amber otherwise
+      const w = git.inside.get(path);
+      return w === 3 ? "conflict" : w === 2 ? "modified" : w === 1 ? "new" : "";
+    }
+
     function rowsFor(node, depth, out) {
       for (const k of node.kids || []) {
         const pad = 8 + depth * 12;
         const isDir = k.type === "dir";
-        out.push(`<div class="row ${isDir ? "dir" : "file"}" data-path="${esc(k.path)}" data-type="${k.type}" style="padding-left:${pad}px" title="${esc(k.path)}">
+        const g = gitState(k.path, isDir);
+        out.push(`<div class="row ${isDir ? "dir" : "file"}${g ? ` g-${g}` : ""}" data-path="${esc(k.path)}" data-type="${k.type}" style="padding-left:${pad}px" title="${esc(k.path)}${g ? ` — ${isDir && git.inside.has(k.path) && g !== "ignored" ? "contains changes" : GIT_LABEL[g]}` : ""}">
           <span class="tw">${isDir ? (k.open ? "▾" : "▸") : ""}</span><span class="nm">${esc(k.name)}</span>
           <span class="acts"><button data-act="rename" title="Rename / move">✎</button><button data-act="delete" title="Delete">✕</button></span></div>`);
         if (isDir && k.open) {
@@ -392,6 +989,7 @@
 
     /** Re-read every folder that is currently open, keeping the expansion state. */
     async function refreshTree(node = root) {
+      if (node === root) loadGit().then((changed) => { if (changed) renderTree(); });
       try { await loadKids(node); } catch (e) { if (node === root) { $("#tree").innerHTML = `<div class="tree-msg">${esc(e.message)}</div>`; throw e; } node.open = false; return; }
       await Promise.all(node.kids.filter((k) => k.type === "dir" && k.open).map((k) => refreshTree(k)));
       if (node === root) renderTree();
@@ -466,6 +1064,13 @@
         await refreshTree();
       } catch (e) { flash(e.message, "bad"); }
     }
+
+    // The agent changes files while this is open: keep the colours current, and
+    // re-read the open folders when the status moves (files came or went).
+    setInterval(async () => {
+      if (document.visibilityState !== "visible") return;
+      if (await loadGit()) refreshTree().catch(() => {});
+    }, 5000);
 
     $("#btn-newfile").onclick = () => newEntry("file");
     $("#btn-newdir").onclick = () => newEntry("folder");

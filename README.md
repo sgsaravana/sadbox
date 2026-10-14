@@ -15,7 +15,8 @@ not shared-kernel containers.
 ## Status
 
 v0 scaffold — the full vertical slice works: create → browser tmux terminal →
-secrets → git sync-back → destroy. The web UI opens on a **Home** overview
+secrets → git sync-back → destroy, with a browser editor that can stage,
+commit, push, switch branches, stash and discard inside the VM. The web UI opens on a **Home** overview
 (intro, feature tour, and quick-start) and has a side nav with a nested
 project list, Secrets, and Settings (default VM CPU/memory/disk for new projects),
 plus a per-project detail view with live CPU/memory/disk/network usage and
@@ -253,6 +254,54 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   the agent's changes when you return to it. It is an editor, not an IDE — no
   language server, debugger or project-wide search — and it handles UTF-8 text
   files up to 2 MB.
+- **Git in the editor**: everything below runs `git` inside the VM, on the
+  VM's repository, as the VM's git identity (`sadbox project <name>`). Nothing
+  here touches your local folder — that is still **Sync back**.
+  - **Colours**: the tree is coloured by git state as in Zed — green for new
+    files, amber for changed ones, blue for renamed, red for conflicts, grey
+    for ignored, with folders taking the colour of what changed inside them —
+    and follows the agent's work as it happens (checked every 5 s). Tab labels
+    carry the same colours; a tab whose file changed in the VM under your
+    unsaved edits is amber and italic.
+  - **Changed lines**: the gutter marks every line that differs from the last
+    commit, as you type — green bar = added, amber bar = modified, red wedge =
+    lines removed there. Click a mark to see what the lines were, and
+    **Restore** them.
+  - **Staging**: the same panel has **Stage**, which puts just that change in
+    the next commit; a staged change's mark is hollow, and clicking it offers
+    **Unstage**. **Stage file** / **Unstage file** in the status bar does the
+    whole open file. Staging saves the file first, so what is staged is what is
+    on disk.
+  - **Commit**: ✓ above the tree opens the commit box — every changed file
+    with a checkbox (ticked = staged, a dash = partly staged), **Stage all** /
+    **Unstage all**, a message, and **Commit** (⌘↵). Only what is staged is
+    committed. **Amend last commit** rewrites the previous commit instead:
+    what is staged joins it and its message is replaced (with nothing staged
+    it only rewords).
+  - **Push**: for a project with a git remote, **Push** in the commit box
+    sends the VM's branch to `origin` from inside the VM — with the VM's
+    credentials and through the proxy, so your network rules and approval
+    popups apply. A push the remote rejects (it has moved on, or you amended a
+    pushed commit) can be repeated with `--force-with-lease` after a
+    confirmation.
+  - **Branches**: the branch name at the left of the status bar opens a
+    picker — the VM's branches, the ones only on the remote (picking one
+    creates a local branch tracking it), or type a new name to create a branch
+    from where the VM is. Uncommitted changes come along as with `git switch`;
+    if they would be overwritten git refuses and nothing is lost. Tabs with
+    unsaved edits must be saved or closed first.
+  - **Stash**: **Stash** in the commit box puts every uncommitted change away
+    (new files too, unsaved tabs are saved into it) and leaves the workdir at
+    the last commit. Stashes — including ones made in the terminal — are
+    listed there with **Pop** (bring back and remove; kept if it does not
+    apply cleanly) and **Drop**.
+  - **Discard**: ↶ on a file's row in the commit box puts that file back as
+    last committed (a new file is deleted); **Discard all** does it for the
+    whole workdir. Both ask first and cannot be undone; ignored files are
+    never touched.
+
+  Not there: stashing or pushing a selection, "apply" without removing a
+  stash, merge/rebase, history, word-level diff. Use the terminal for those.
 - **Approve where you are working**: when something in the VM asks for a host
   no rule covers, the proxy holds the request and a popup appears on the
   terminal and editor tabs with the method, URL and a countdown. **Allow** it
@@ -284,9 +333,16 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   the UI.
 - **Detail view**: per project, live CPU %/memory/disk/network/process usage
   (via `container stats` + in-guest probes), workdir size, tmux session/window
-  counts and attached-terminal count, git branch/dirty state, folder/remote
+  counts and attached-terminal count, the branch the VM has checked out now
+  and its dirty state (the projects list shows the live branch too; for a
+  stopped VM it is the last one seen, kept in the database), folder/remote
   info, and the installed-toolchain probe — plus the live **Network** panel
-  (below). **Change…** next to Memory gives that one VM more (or less) memory:
+  (below). The buttons along the top are **Terminal**, **Editor**, **Sync
+  back** (once a folder is connected), **Secrets**, **Stop** / **Start**,
+  **Rebuild** and **Destroy**; the project cards on the list carry the same
+  ones. **Stop** (solid red) shuts the VM down and keeps its disk — files,
+  installed packages and logins — while agents and terminals in it end;
+  **Start** (blue) boots it again. **Change…** next to Memory gives that one VM more (or less) memory:
   a running VM is shut down and booted again with the new size, so agents and
   terminals in it end, while its files, installed packages and logins stay.
   A **Rebuild** action destroys the VM and recreates it from the
@@ -365,9 +421,10 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 
 | Method | Path | |
 |---|---|---|
-| GET/POST | `/api/projects` | list (with live VM state) / create (`{name, sourcePath?, apps?, secretIds?, git?: {remote, token?}}` — omit `sourcePath` to clone `git.remote` in the VM) |
+| GET/POST | `/api/projects` | list (with live VM state and each VM's current `branch`) / create (`{name, sourcePath?, apps?, secretIds?, git?: {remote, token?}}` — omit `sourcePath` to clone `git.remote` in the VM) |
 | GET | `/api/projects/:id/details` | full detail: resources, tmux, git, folder |
 | DELETE | `/api/projects/:id` | destroy VM |
+| POST | `/api/projects/:id/start`, `…/stop` | boot a stopped VM / shut a running one down (its disk is kept) |
 | POST | `/api/projects/:id/sync` | sync-back (`{force?: bool}` overwrites files changed in the folder) |
 | GET | `/api/projects/:id/term/links` | links currently on the project's terminal (wrapped URLs re-joined) |
 | POST | `/api/projects/:id/rebuild` | destroy + recreate the VM from the project's original source (keeps secrets + net rules) |
@@ -386,6 +443,18 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 | GET/POST | `/api/projects/:id/net/rules`, DELETE `…/:rid` | per-project allow/block rules |
 | GET/POST | `/api/projects/:id/net/headers`, DELETE `…/:hid` | per-project header rewrites |
 | GET/POST | `/api/projects/:id/files?path=` | list a workdir folder / create a folder (`{path}`) |
+| GET | `/api/projects/:id/files/status` | git state per path (`new`/`modified`/`deleted`/`renamed`/`conflict`/`ignored`) behind the editor tree's colours, which files are staged (`all`/`some`), and the branch, its upstream and ahead/behind counts |
+| GET | `/api/projects/:id/file/head?path=` | the file as last committed (what the editor's changed-line marks are measured against) and as staged |
+| POST | `/api/projects/:id/files/stage` | `{paths: [...] \| "all", on}` — stage or unstage whole files/folders |
+| POST | `/api/projects/:id/files/commit` | `{message, amend?}` — commit what is staged, in the VM (`amend`: rewrite the last commit) |
+| GET | `/api/projects/:id/files/commit` | the last commit's short sha and message |
+| GET | `/api/projects/:id/files/branch` | the VM's current branch and the ones it could switch to |
+| POST | `/api/projects/:id/files/branch` | `{name, create?}` — switch the VM to a branch, or create one |
+| POST | `/api/projects/:id/files/discard` | `{paths: [...] \| "all"}` — throw away uncommitted changes (new files are deleted) |
+| GET | `/api/projects/:id/files/stash` | the VM's stashes |
+| POST | `/api/projects/:id/files/stash` | `{action: "push" \| "pop" \| "drop", index?, message?}` |
+| POST | `/api/projects/:id/files/push` | `{force?}` — push the VM's branch to its `origin` (`force`: `--force-with-lease`) |
+| PUT | `/api/projects/:id/file/index` | `{path, content, expect?}` — set what is staged for the file (`content: null` = nothing staged); the workdir file is untouched |
 | GET | `/api/projects/:id/files/index` | every non-ignored file (editor quick-open) |
 | POST | `/api/projects/:id/files/rename` | rename or move (`{from, to}`) |
 | GET/PUT/DELETE | `/api/projects/:id/file?path=` | read / save (`{path, content, baseHash, force?}` — 409 if it changed in the VM) / delete |

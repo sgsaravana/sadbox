@@ -3,8 +3,9 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, st
 import { join } from "path";
 import { makeProject } from "../../test/helpers";
 import {
-  FileError, MAX_FILE_BYTES, cleanPath, deletePath, fileIndex, listDir, makeDir, readFile, renamePath, sha256, writeFile,
+  FileError, MAX_FILE_BYTES, cleanPath, commitStaged, discardPaths, listStashes, stash, deletePath, fileIndex, gitStatus, headFile, lastCommit, listBranches, listDir, makeDir, pushBranch, readFile, renamePath, sha256, stageFile, stagePaths, switchBranch, writeFile,
 } from "./files";
+import { getProject } from "./projects";
 
 // The preload's stub `container exec` runs the guest snippets on this machine,
 // with the guest workdir mapped to this scratch dir.
@@ -251,5 +252,288 @@ describe("fileIndex", () => {
     const r = await fileIndex(P);
     expect(r.files.sort()).toEqual([".gitignore", "README.md", "src/a.ts"]);
     expect(r.truncated).toBe(false);
+  });
+});
+
+describe("gitStatus", () => {
+  const git = (...args: string[]) => {
+    const r = Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", WD, ...args]);
+    if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+  };
+
+  test("a workdir that is not a repository has no states", async () => {
+    put("a.txt", "x");
+    expect(await gitStatus(P)).toMatchObject({ repo: false, files: {}, dirs: {}, staged: {}, branch: null, remote: false });
+  });
+
+  test("reports each path against the last commit, staged or not", async () => {
+    git("init", "-q");
+    put(".gitignore", "node_modules/\n*.log\n");
+    put("kept.ts", "1"); put("edited.ts", "1"); put("staged-edit.ts", "1"); put("gone.ts", "1"); put("old name.ts", "same content\n");
+    git("add", "-A"); git("commit", "-qm", "base");
+
+    put("edited.ts", "2");                              // changed, not staged
+    put("staged-edit.ts", "2"); git("add", "staged-edit.ts"); // changed, staged
+    put("added.ts", "new"); git("add", "added.ts");     // new, staged
+    put("loose.ts", "new");                             // new, untracked
+    put("fresh/deep/x.ts", "new");                      // a whole new folder
+    rmSync(join(WD, "gone.ts"));
+    git("mv", "old name.ts", "new name.ts");
+    put("node_modules/x/index.js", ""); put("debug.log", "");
+
+    const r = await gitStatus(P);
+    expect(r.repo).toBe(true);
+    expect(r.files).toEqual({
+      "edited.ts": "modified", "staged-edit.ts": "modified",
+      "added.ts": "new", "loose.ts": "new",
+      "gone.ts": "deleted", "new name.ts": "renamed",
+      "debug.log": "ignored",
+    });
+    expect(r.dirs).toEqual({ fresh: "new", node_modules: "ignored" });
+  });
+
+  test("a merge conflict is reported as one", async () => {
+    git("init", "-q", "-b", "main");
+    put("f.txt", "base\n"); git("add", "-A"); git("commit", "-qm", "base");
+    git("checkout", "-q", "-b", "other"); put("f.txt", "theirs\n"); git("commit", "-qam", "theirs");
+    git("checkout", "-q", "main"); put("f.txt", "ours\n"); git("commit", "-qam", "ours");
+    Bun.spawnSync(["git", "-C", WD, "merge", "-q", "other"]); // stops on the conflict
+    expect((await gitStatus(P)).files).toEqual({ "f.txt": "conflict" });
+  });
+});
+
+describe("headFile", () => {
+  const git = (...args: string[]) => {
+    const r = Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", WD, ...args]);
+    if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+  };
+
+  test("returns the committed version, whatever the file holds now", async () => {
+    git("init", "-q");
+    put("src/it's a.ts", "one\ntwo\n"); put("bin.dat", new Uint8Array([1, 0, 2]));
+    git("add", "-A"); git("commit", "-qm", "base");
+    put("src/it's a.ts", "one\nTWO\nthree\n"); git("add", "-A"); // staged or not, HEAD is the measure
+    put("fresh.ts", "new\n");
+
+    expect(await headFile(P, "src/it's a.ts")).toMatchObject({
+      path: "src/it's a.ts", repo: true, inHead: true, content: "one\ntwo\n", inIndex: true, index: "one\nTWO\nthree\n",
+    });
+    expect(await headFile(P, "fresh.ts")).toEqual({
+      path: "fresh.ts", repo: true, inHead: false, content: null, inIndex: false, indexOid: null, index: null,
+    });
+    expect(await headFile(P, "bin.dat")).toMatchObject({ repo: true, inHead: true, content: null, inIndex: true, index: null });
+    rmSync(join(WD, "src/it's a.ts")); // deleted in the workdir, still committed
+    expect((await headFile(P, "src/it's a.ts")).content).toBe("one\ntwo\n");
+  });
+
+  test("a workdir without a repository, or without a commit, has nothing to compare with", async () => {
+    put("a.txt", "x");
+    expect(await headFile(P, "a.txt")).toMatchObject({ repo: false, content: null });
+    git("init", "-q");
+    expect(await headFile(P, "a.txt")).toMatchObject({ repo: true, inHead: false, content: null });
+  });
+
+  test("the path cannot leave the workdir", async () => {
+    await failure(headFile(P, ""));
+    expect((await headFile(P, "../../etc/passwd")).path).toBe("etc/passwd");
+  });
+
+  test("staging sets the index for one file and leaves the workdir alone", async () => {
+    const out = (...args: string[]) => Bun.spawnSync(["git", "-C", WD, ...args]).stdout.toString();
+    git("init", "-q");
+    put("sub/a b.txt", "one\ntwo\nthree\n"); put("run.sh", "#!/bin/sh\n");
+    git("add", "-A"); git("update-index", "--chmod=+x", "run.sh"); git("commit", "-qm", "base");
+    put("sub/a b.txt", "ONE\ntwo\nTHREE\n");
+
+    const before = await headFile(P, "sub/a b.txt");
+    expect(before.index).toBe("one\ntwo\nthree\n");
+    // stage only the first line's change
+    const r = await stageFile(P, "sub/a b.txt", "ONE\ntwo\nthree\n", before.indexOid);
+    expect(out("diff", "--cached")).toContain("+ONE");
+    expect(out("diff", "--cached")).not.toContain("THREE");
+    expect(out("diff")).toContain("+THREE");
+    expect(get("sub/a b.txt")).toBe("ONE\ntwo\nTHREE\n");
+    const after = await headFile(P, "sub/a b.txt");
+    expect(after).toMatchObject({ content: "one\ntwo\nthree\n", index: "ONE\ntwo\nthree\n", indexOid: r.indexOid });
+
+    // the index moved since `before` was read
+    expect((await failure(stageFile(P, "sub/a b.txt", "x\n", before.indexOid))).status).toBe(409);
+
+    // unstage: back to the last commit
+    expect((await stageFile(P, "sub/a b.txt", null, after.indexOid)).indexOid).toBe(before.indexOid);
+    expect(out("diff", "--cached")).toBe("");
+
+    // a new file enters the index, and leaves it again; the mode is kept
+    put("new.txt", "hi\n");
+    await stageFile(P, "new.txt", "hi\n", null);
+    expect(out("status", "--porcelain")).toContain("A  new.txt");
+    await stageFile(P, "new.txt", null);
+    expect(out("status", "--porcelain")).toContain("?? new.txt");
+    await stageFile(P, "run.sh", "#!/bin/sh\necho\n");
+    expect(out("ls-files", "-s", "run.sh")).toStartWith("100755 ");
+  });
+
+  test("staging needs a repository and a file path", async () => {
+    put("a.txt", "x");
+    expect((await failure(stageFile(P, "a.txt", "y"))).status).toBe(409);
+    await failure(stageFile(P, "", "y"));
+    await failure(stageFile(P, "a.txt", 5));
+    await failure(stageFile(P, "a.txt", "y", "nope"));
+  });
+
+  test("whole files are staged, unstaged and committed", async () => {
+    const out = (...args: string[]) => Bun.spawnSync(["git", "-C", WD, ...args]).stdout.toString();
+    git("init", "-q"); git("config", "user.name", "t"); git("config", "user.email", "t@t");
+    put("a.txt", "1\n"); put("b [1].txt", "1\n"); put("gone.txt", "1\n");
+    git("add", "-A"); git("commit", "-qm", "base");
+    put("a.txt", "2\n"); put("b [1].txt", "2\n"); put("dir/new.txt", "n\n"); rmSync(join(WD, "gone.txt"));
+
+    expect((await failure(commitStaged(P, "nothing yet"))).status).toBe(409);
+    await stagePaths(P, ["a.txt", "dir", "gone.txt"], true);
+    expect((await gitStatus(P)).staged).toEqual({ "a.txt": "all", "dir/new.txt": "all", "gone.txt": "all" });
+    put("a.txt", "3\n"); // more, after staging
+    expect((await gitStatus(P)).staged["a.txt"]).toBe("some");
+    await stagePaths(P, ["gone.txt"], false);
+    expect((await gitStatus(P)).staged["gone.txt"]).toBeUndefined();
+
+    const c = await commitStaged(P, "  second commit\n\nbody\n");
+    expect(c.subject).toBe("second commit");
+    expect(out("log", "-1", "--format=%h")).toBe(c.sha + "\n");
+    expect(out("show", "--stat", "--format=", "HEAD")).toContain("dir/new.txt");
+    expect(out("status", "--porcelain")).toBe(' M a.txt\n M "b [1].txt"\n D gone.txt\n');
+
+    await stagePaths(P, "all", true);
+    expect(Object.keys((await gitStatus(P)).staged).sort()).toEqual(["a.txt", "b [1].txt", "gone.txt"]);
+    await stagePaths(P, "all", false);
+    expect((await gitStatus(P)).staged).toEqual({});
+    await stagePaths(P, ["b [1].txt"], true); // brackets are not a pattern
+    expect((await gitStatus(P)).staged).toEqual({ "b [1].txt": "all" });
+
+    await failure(commitStaged(P, "  "));
+    await failure(stagePaths(P, [], true));
+    await failure(stagePaths(P, [""], true));
+  });
+
+  test("amend rewrites the last commit; push sends the branch to origin", async () => {
+    const out = (...args: string[]) => Bun.spawnSync(["git", "-C", WD, ...args]).stdout.toString();
+    const origin = join(WD, "..", `origin-${Date.now()}.git`);
+    Bun.spawnSync(["git", "init", "-q", "--bare", origin]);
+    git("init", "-q", "-b", "work"); git("config", "user.name", "t"); git("config", "user.email", "t@t");
+    expect(await lastCommit(P)).toEqual({ sha: null, message: "" });
+    expect((await failure(commitStaged(P, "x", { amend: true }))).status).toBe(409);
+    put("a.txt", "1\n"); git("add", "-A"); git("commit", "-qm", "first\n\nbody");
+    expect(await gitStatus(P)).toMatchObject({ branch: "work", upstream: null, remote: false });
+    expect((await failure(pushBranch(P))).status).toBe(409); // no origin
+
+    git("remote", "add", "origin", origin);
+    expect((await pushBranch(P)).branch).toBe("work");
+    expect(await gitStatus(P)).toMatchObject({ branch: "work", upstream: "origin/work", ahead: 0, behind: 0, remote: true });
+    expect(Bun.spawnSync(["git", "-C", origin, "log", "-1", "--format=%s", "work"]).stdout.toString()).toBe("first\n");
+
+    // amend: staged change joins the commit, message replaced, still one commit
+    expect((await lastCommit(P)).message).toBe("first\n\nbody");
+    put("a.txt", "2\n"); git("add", "-A");
+    const c = await commitStaged(P, "first, reworded", { amend: true });
+    expect(c).toMatchObject({ subject: "first, reworded", amended: true });
+    expect(out("rev-list", "--count", "HEAD")).toBe("1\n");
+    expect(out("show", "HEAD:a.txt")).toBe("2\n");
+    expect((await commitStaged(P, "reworded again", { amend: true })).subject).toBe("reworded again"); // nothing staged: reword only
+    expect(await gitStatus(P)).toMatchObject({ ahead: 1, behind: 1 });
+
+    // the pushed commit was amended: refused, unless forced
+    const e = await failure(pushBranch(P));
+    expect(e.status).toBe(409);
+    expect(e.extra.rejected).toBe(true);
+    expect((await pushBranch(P, { force: true })).forced).toBe(true);
+    expect(Bun.spawnSync(["git", "-C", origin, "log", "-1", "--format=%s", "work"]).stdout.toString()).toBe("reworded again\n");
+    expect(await gitStatus(P)).toMatchObject({ ahead: 0, behind: 0 });
+    rmSync(origin, { recursive: true, force: true });
+  });
+
+  test("branches are listed, switched to and created", async () => {
+    const origin = join(WD, "..", `origin-b-${Date.now()}.git`);
+    Bun.spawnSync(["git", "init", "-q", "--bare", origin]);
+    git("init", "-q", "-b", "main"); git("config", "user.name", "t"); git("config", "user.email", "t@t");
+    put("a.txt", "main\n"); git("add", "-A"); git("commit", "-qm", "base");
+    git("checkout", "-q", "-b", "theirs"); put("a.txt", "theirs\n"); git("commit", "-qam", "theirs");
+    git("remote", "add", "origin", origin); git("push", "-q", "origin", "theirs");
+    git("checkout", "-q", "main"); git("branch", "-q", "-D", "theirs");
+
+    expect(await listBranches(P)).toEqual({ current: "main", branches: [{ name: "main", remote: false }, { name: "theirs", remote: true }] });
+    expect(await switchBranch(P, "theirs")).toEqual({ branch: "theirs", created: false }); // from origin, tracking it
+    expect(get("a.txt")).toBe("theirs\n");
+    expect(await gitStatus(P)).toMatchObject({ branch: "theirs", upstream: "origin/theirs" });
+
+    // an uncommitted change that the switch would overwrite: refused, nothing lost
+    put("a.txt", "mine\n");
+    const e = await failure(switchBranch(P, "main"));
+    expect(e.status).toBe(409);
+    expect(e.message).toMatch(/overwritten|a\.txt/);
+    expect(get("a.txt")).toBe("mine\n");
+    // a new branch keeps it
+    expect(await switchBranch(P, "feature/x", { create: true })).toEqual({ branch: "feature/x", created: true });
+    expect(get("a.txt")).toBe("mine\n");
+    expect((await listBranches(P)).current).toBe("feature/x");
+    expect(getProject(P)?.branch).toBe("feature/x"); // remembered for the projects list
+
+    expect((await failure(switchBranch(P, "feature/x", { create: true }))).status).toBe(409); // exists
+    expect((await failure(switchBranch(P, "nope"))).status).toBe(409);
+    await failure(switchBranch(P, "-f"));
+    await failure(switchBranch(P, "bad..name", { create: true }));
+    await failure(switchBranch(P, 7));
+    rmSync(origin, { recursive: true, force: true });
+  });
+
+  test("discard puts files back as committed and removes new ones", async () => {
+    const out = (...args: string[]) => Bun.spawnSync(["git", "-C", WD, ...args]).stdout.toString();
+    git("init", "-q"); git("config", "user.name", "t"); git("config", "user.email", "t@t");
+    put(".gitignore", "*.log\n"); put("a.txt", "1\n"); put("b [1].txt", "1\n"); put("gone.txt", "1\n"); put("keep.txt", "1\n");
+    git("add", "-A"); git("commit", "-qm", "base");
+    put("a.txt", "2\n"); git("add", "a.txt"); put("a.txt", "3\n");   // staged and more
+    put("b [1].txt", "2\n"); rmSync(join(WD, "gone.txt")); put("keep.txt", "2\n");
+    put("new.txt", "n\n"); git("add", "new.txt"); put("dir/x.txt", "x\n"); put("debug.log", "l\n");
+
+    await discardPaths(P, ["a.txt", "b [1].txt", "gone.txt", "new.txt", "dir"]);
+    expect(get("a.txt")).toBe("1\n"); expect(get("b [1].txt")).toBe("1\n"); expect(get("gone.txt")).toBe("1\n");
+    expect(existsSync(join(WD, "new.txt"))).toBe(false); expect(existsSync(join(WD, "dir"))).toBe(false);
+    expect(out("status", "--porcelain")).toBe(" M keep.txt\n"); // the one not named
+    expect(get("debug.log")).toBe("l\n");
+
+    put("other.txt", "o\n");
+    await discardPaths(P, "all");
+    expect(out("status", "--porcelain")).toBe("");
+    expect(get("keep.txt")).toBe("1\n"); expect(get("debug.log")).toBe("l\n"); // ignored files survive
+    await failure(discardPaths(P, []));
+    await failure(discardPaths(P, [""]));
+  });
+
+  test("stash puts changes away and brings them back", async () => {
+    const out = (...args: string[]) => Bun.spawnSync(["git", "-C", WD, ...args]).stdout.toString();
+    git("init", "-q"); git("config", "user.name", "t"); git("config", "user.email", "t@t");
+    put("a.txt", "1\n"); git("add", "-A"); git("commit", "-qm", "base");
+    expect((await failure(stash(P, "push"))).status).toBe(409); // nothing to stash
+    expect(await listStashes(P)).toEqual({ stashes: [] });
+
+    put("a.txt", "2\n"); put("new.txt", "n\n");
+    await stash(P, "push", { message: "half done" });
+    expect(out("status", "--porcelain")).toBe("");
+    expect(existsSync(join(WD, "new.txt"))).toBe(false);
+    expect((await listStashes(P)).stashes).toEqual([{ index: 0, message: expect.stringContaining("half done") }]);
+
+    // a change in the way: the stash stays
+    put("a.txt", "3\n");
+    expect((await failure(stash(P, "pop", { index: 0 }))).status).toBe(409);
+    expect((await listStashes(P)).stashes.length).toBe(1);
+    await discardPaths(P, "all");
+    await stash(P, "pop", { index: 0 });
+    expect(get("a.txt")).toBe("2\n"); expect(get("new.txt")).toBe("n\n");
+    expect(await listStashes(P)).toEqual({ stashes: [] });
+
+    await stash(P, "push");
+    await stash(P, "drop", { index: 0 });
+    expect(await listStashes(P)).toEqual({ stashes: [] });
+    expect((await failure(stash(P, "pop", { index: 0 }))).status).toBe(409);
+    await failure(stash(P, "pop"));
+    await failure(stash(P, "explode"));
   });
 });

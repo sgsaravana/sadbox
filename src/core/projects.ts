@@ -33,6 +33,7 @@ export interface ProjectRow {
   git_remote: string | null;
   git_token_enc: string | null;
   sync_path: string | null;   // local folder connected to a cloned project (sync target only)
+  branch: string | null;      // checked out in the VM when last seen (null: never asked)
   memory_mb: number | null;   // the VM's memory (null: created before this was recorded)
   error: string | null;
   created_at: string;
@@ -203,6 +204,7 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   forgetGuestTools(ref); // a new VM under this name has a fresh filesystem
   const memoryMB = p.memory_mb ?? s.defaultMemoryMB; // the project's own, once it has one
   db.query("UPDATE projects SET memory_mb = ? WHERE id = ?").run(memoryMB, p.id);
+  noteBranch(p.id, branchFor(p.name)); // a new VM starts on its own branch
   await driver.create(ref, p.image, {
     cpus: s.defaultCpus, memoryMB, diskGB: s.defaultDiskGB, network: config.network,
     socket: isolated ? { host: openProjectSocket(p.id), guest: config.guestCarrierSocket } : undefined,
@@ -415,7 +417,7 @@ async function loadDetails(id: string) {
     sync_folder: syncFolderOf(p),     // where Sync back delivers ('' = nowhere yet)
     source_branch: p.source_branch,
     workdir: config.guestWorkdir,
-    branch: branchFor(p.name),
+    branch: (guest.git_branch && noteBranch(p.id, guest.git_branch)) || getProject(p.id)?.branch || branchFor(p.name), // what is checked out now
     base_sha: p.base_sha,
     last_synced_sha: p.last_synced_sha,
     apps: JSON.parse(p.apps),
@@ -679,12 +681,44 @@ export async function setProjectMemory(id: string, memory: unknown) {
   return { id, state: getProject(id)!.state, memoryMB, restarted: wasRunning, applied };
 }
 
+// The branch each VM has checked out, for the projects list. Asking a VM costs
+// an exec, so it is asked at most every few seconds; the answer is kept in the
+// database, so a stopped VM — or a restarted supervisor — still shows the last one.
+const BRANCH_TTL_MS = 5000;
+const branchAsked = new Map<string, { at: number; asking?: Promise<void> }>();
+/** Record the branch a VM has checked out, whoever found out. Returns it. */
+export function noteBranch(id: string, branch: string): string {
+  db.query("UPDATE projects SET branch = ? WHERE id = ? AND branch IS NOT ?").run(branch, id, branch);
+  const e = branchAsked.get(id);
+  if (e) e.at = Date.now(); else branchAsked.set(id, { at: Date.now() });
+  return branch;
+}
+async function liveBranch(p: ProjectRow, running: boolean): Promise<string> {
+  let e = branchAsked.get(p.id);
+  if (running && (!e || Date.now() - e.at > BRANCH_TTL_MS)) {
+    const first = !e;
+    if (!e) branchAsked.set(p.id, (e = { at: 0 }));
+    const entry = e;
+    entry.asking ??= driver.exec(refFor(p.name), ["sh", "-c",
+      `cd ${config.guestWorkdir} && git rev-parse --is-inside-work-tree >/dev/null 2>&1 && ` +
+      `{ git symbolic-ref -q --short HEAD || echo "detached at $(git rev-parse --short HEAD)"; }`], { timeoutMs: 4000 })
+      .then((r) => { if (r.exitCode === 0 && r.stdout.trim()) noteBranch(p.id, r.stdout.trim()); else entry.at = Date.now(); })
+      .catch(() => {})
+      .finally(() => { entry.asking = undefined; });
+    // with nothing recorded yet the answer is worth a short wait; otherwise the last one serves while it refreshes
+    if (first && !p.branch) await Promise.race([entry.asking, new Promise((r) => setTimeout(r, 1500))]);
+  }
+  return getProject(p.id)?.branch ?? branchFor(p.name);
+}
+
 export async function projectsWithLiveState() {
   const rows = listProjects();
   const live = new Map(
     (await driver.list().catch(() => [])).map((w) => [w.ref, w]),
   );
-  return rows.map((r) => ({
+  const current = await Promise.all(rows.map((r) => liveBranch(r, settle(r, live.get(refFor(r.name))) === "running")));
+  return rows.map((r, i) => ({
+    branch: current[i],
     id: r.id,
     name: r.name,
     image: r.image,

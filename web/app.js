@@ -125,16 +125,16 @@ async function refreshProjects() {
       <h3><a href="#project/${p.id}"><span class="dot ${state}"></span>${p.name}</a></h3>
       <div class="meta">
         ${state} · ${p.image}${p.live?.address ? ` · ${p.live.address}` : ""}<br>
-        ${p.source_path ? escapeHtml(p.source_path) + "<br>" : ""}branch sadbox/${p.name}${gitLine}${p.error ? `<br><span style="color:var(--bad)">${escapeHtml(p.error)}</span>` : ""}
+        ${p.source_path ? escapeHtml(p.source_path) + "<br>" : ""}branch ${escapeHtml(p.branch || `sadbox/${p.name}`)}${gitLine}${p.error ? `<br><span style="color:var(--bad)">${escapeHtml(p.error)}</span>` : ""}
       </div>
       <div class="row">
         <button data-details="${p.id}">Details</button>
         ${powerButton(p)}
-        <button data-term="${p.id}" data-name="${p.name}">Terminal ↗</button>
-        <button data-edit="${p.id}" data-name="${p.name}">Editor ↗</button>
-        ${p.sync_folder ? `<button data-sync="${p.id}">Sync back</button>` : ""}
-        <button data-secrets="${p.id}" data-name="${p.name}">Secrets…</button>
-        <button class="danger" data-destroy="${p.id}" data-name="${p.name}">Destroy</button>
+        <button data-term="${p.id}" data-name="${p.name}">${ICON.terminal}Terminal ↗</button>
+        <button data-edit="${p.id}" data-name="${p.name}">${ICON.editor}Editor ↗</button>
+        ${p.sync_folder ? `<button data-sync="${p.id}">${ICON.sync}Sync back</button>` : ""}
+        <button data-secrets="${p.id}" data-name="${p.name}">${ICON.secrets}Secrets…</button>
+        <button class="danger" data-destroy="${p.id}" data-name="${p.name}">${ICON.destroy}Destroy</button>
       </div>
       <div class="sync-result"></div>
     </div>`;
@@ -167,13 +167,26 @@ async function runSync(id, container, force) {
     `<pre class="result">${escapeHtml(syncSummary(r))}</pre>${again}`;
 }
 
+// Icons for the action buttons — drawn in the button's own colour
+const svg = (body) => `<svg class="ico" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+const ICON = {
+  terminal: svg(`<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>`),
+  editor: svg(`<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>`),
+  sync: svg(`<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>`),
+  secrets: svg(`<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/>`),
+  rebuild: svg(`<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>`),
+  stop: svg(`<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/>`),
+  start: svg(`<polygon points="7 5 19 12 7 19" fill="currentColor"/>`),
+  destroy: svg(`<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>`),
+};
+
 // Stop / Start for a project's VM, by its state
 const powerBusy = new Map(); // project id -> label, while a request is out
 function powerButton(p) {
   const busy = powerBusy.get(p.id) || (p.state === "starting" ? "Starting…" : p.state === "stopping" ? "Stopping…" : null);
   if (busy) return `<button disabled><span class="spinner"></span> ${busy}</button>`;
-  if (p.state === "running") return `<button data-stop="${p.id}" data-name="${p.name}" title="Shut the VM down; its files are kept">Stop</button>`;
-  if (p.state === "stopped") return `<button class="primary" data-start="${p.id}" title="Boot the VM again; its files are as you left them">Start</button>`;
+  if (p.state === "running") return `<button class="stop" data-stop="${p.id}" data-name="${p.name}" title="Shut the VM down; its files are kept">${ICON.stop}Stop</button>`;
+  if (p.state === "stopped") return `<button class="primary" data-start="${p.id}" title="Boot the VM again; its files are as you left them">${ICON.start}Start</button>`;
   return "";
 }
 async function power(id, action) {
@@ -238,11 +251,11 @@ document.addEventListener("click", async (e) => {
     } else if (b.dataset.sync) {
       const force = b.dataset.force === "1";
       if (force && !confirm("Overwrite the folder's versions of these files with the VM's? Your changes to them in the folder are lost.")) return;
-      const label = b.textContent;
+      const label = b.innerHTML;
       const container = b.closest(".card") || $("#view-detail");
-      b.disabled = true; b.textContent = "Syncing…";
+      b.disabled = true; b.innerHTML = `<span class="spinner"></span> Syncing…`;
       try { await runSync(b.dataset.sync, container, force); }
-      finally { b.disabled = false; b.textContent = label; }
+      finally { b.disabled = false; b.innerHTML = label; }
     } else if (b.dataset.linkFolder) {
       // connect a local folder to a project cloned from a git URL (reuses the folder picker)
       const id = b.dataset.linkFolder;
@@ -706,13 +719,13 @@ function paintDetail(d) {
     : `<span class="dim">none attached</span>`;
 
   $("#detail-actions").innerHTML = `
-    <button data-term="${d.id}" data-name="${d.name}">Terminal ↗</button>
-    <button data-edit="${d.id}" data-name="${d.name}" title="Browse and edit the workdir">Editor ↗</button>
-    ${d.sync_folder ? `<button data-sync="${d.id}">Sync back</button>` : ""}
-    <button data-secrets="${d.id}">Secrets…</button>
+    <button data-term="${d.id}" data-name="${d.name}">${ICON.terminal}Terminal ↗</button>
+    <button data-edit="${d.id}" data-name="${d.name}" title="Browse and edit the workdir">${ICON.editor}Editor ↗</button>
+    ${d.sync_folder ? `<button data-sync="${d.id}">${ICON.sync}Sync back</button>` : ""}
+    <button data-secrets="${d.id}">${ICON.secrets}Secrets…</button>
     ${powerButton(d)}
-    <button data-rebuild="${d.id}" data-name="${d.name}" title="Destroy the VM and recreate it from the original source">Rebuild</button>
-    <button class="danger" data-destroy="${d.id}" data-name="${d.name}">Destroy</button>`;
+    <button data-rebuild="${d.id}" data-name="${d.name}" title="Destroy the VM and recreate it from the original source">${ICON.rebuild}Rebuild</button>
+    <button class="danger" data-destroy="${d.id}" data-name="${d.name}">${ICON.destroy}Destroy</button>`;
 
   stats.innerHTML = `
     <div class="detail-grid">
