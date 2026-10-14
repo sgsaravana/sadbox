@@ -24,7 +24,8 @@ tmux state. Every VM's egress is routed through the supervisor as a **filtering
 MITM proxy** — block-by-default with interactive, time-boxed approvals, allow/
 block + header-rewrite rules (global or per-project), and a live request log on
 the detail view. See `docs/research/` for the design research and `spikes/` for
-the de-risk experiments behind each piece.
+the de-risk experiments behind each piece, and [`docs/ROADMAP.md`](docs/ROADMAP.md)
+for what's next (Linux support first).
 
 ## Releases
 
@@ -132,8 +133,9 @@ sadbox serve     # http://localhost:7070
 ```
 
 The first `sadbox serve` generates a sign-in password, prints it once, and
-saves it in `~/.sadbox/initial-password`. Use it to sign in, or set your own
-with `sadbox passwd`. Then, in the browser:
+saves it in `~/.sadbox/initial-password` (see [Sign-in password](#sign-in-password)
+below). Use it to sign in, or set your own with `sadbox passwd`. Then, in the
+browser:
 
 1. **Add a Claude credential** under **Secrets**: run `claude setup-token` on
    your Mac and save the result as `CLAUDE_CODE_OAUTH_TOKEN` (or save an
@@ -160,6 +162,31 @@ exposing it to other machines.
 To update, re-run the install script (or `git pull && bun install` from
 source), then `sadbox setup` again if the release notes mention a new base
 image. To uninstall, remove the binary and `~/.sadbox`.
+
+### Sign-in password
+
+The web UI and API need a password (one user). How it is set up:
+
+- **First start**: when no password exists yet, `sadbox serve` generates a
+  random one, prints it once in the terminal, and writes it to
+  `~/.sadbox/initial-password` (mode `0600`, readable only by you — reading it
+  is the proof that you own this machine). Read it with
+  `cat ~/.sadbox/initial-password` and sign in. With `SADBOX_DATA` set, the
+  file is in that directory instead.
+- **That file is only a copy for you to read.** sadbox checks a hash stored in
+  `~/.sadbox/auth.json`, never the file, so editing `initial-password` does not
+  change the password.
+- **Set your own**: run `sadbox passwd` (at least 8 characters; asks twice on
+  a terminal). It replaces the password, deletes `initial-password`, and signs
+  every browser out. A running supervisor does not need a restart.
+- **From the environment**: `SADBOX_PASSWORD=…` makes that the password for as
+  long as it is set (for launchd or containers), overriding the stored one —
+  `sadbox passwd` warns when it is set. No file is generated then.
+- **Forgot it**: run `sadbox passwd` on the machine to set a new one. Or
+  delete `~/.sadbox/auth.json` and restart `sadbox serve`: a new password is
+  generated and written to `initial-password` again.
+- **Off**: `SADBOX_AUTH=off` disables sign-in entirely — only sensible when
+  something in front of sadbox authenticates every request.
 
 ### CLI
 
@@ -407,6 +434,34 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   not behind that proxy's TLS or sadbox's sign-in — so anyone who can reach the
   host can reach a forwarded port; set `SADBOX_FORWARD_HOST=localhost` to keep
   forwards on this machine only.
+- **Project links** (VM to VM): VMs cannot reach each other or the host, so
+  one project calling another — a UI's server-side code calling an API in
+  another VM — needs a link. On the calling project's detail view, under
+  **Links to other projects**, pick the target project and **one port**. From
+  inside the calling VM the target is then
+  `http://<target-name>.sadbox.internal:<port>/…`; for example, a UI project
+  linked to `api` on 3000 uses `API_URL=http://api.sadbox.internal:3000`.
+  - The request goes through the calling VM's proxy, which checks for a link
+    naming exactly that project and port, then carries the connection over
+    `container exec` onto the target VM's own loopback (as a port forward
+    does). The host's network and the host's own ports are never involved, and
+    the target needs no port forward.
+  - The target app sees an ordinary local caller (`Host: localhost:<port>`,
+    with the name used in `X-Forwarded-Host`), so it can listen on
+    `127.0.0.1`.
+  - Anything else is refused with 403: another port, another project, the
+    reverse direction (a link is one-way), or a caller with no link. Every
+    attempt, allowed or refused, appears in the caller's live network log.
+  - Links are listed on both projects (**Can be reached from** on the target),
+    can be removed from either end, and are deleted with either project.
+  - It works for clients that use the proxy (`HTTP_PROXY`): curl, Bun and
+    Node `fetch`, axios, Vite's dev-server proxy, Next.js server code.
+    `https://` and other `CONNECT` clients get a raw tunnel to that one port.
+    Clients that ignore the proxy — database drivers, raw TCP — cannot use a
+    link.
+  - If the UI's **browser** code calls the API, the request comes from your
+    browser on the host, not from the VM: give the API a port forward and
+    point the UI at that (e.g. `http://localhost:3000`). No link needed.
 - **Sign-in**: the UI and API require a password (one user). A session is an
   HttpOnly, `SameSite=Strict` cookie, valid 30 days; only the login page and
   static scripts are served without one, and that includes the terminal
@@ -458,6 +513,7 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 | GET | `/api/projects/:id/files/index` | every non-ignored file (editor quick-open) |
 | POST | `/api/projects/:id/files/rename` | rename or move (`{from, to}`) |
 | GET/PUT/DELETE | `/api/projects/:id/file?path=` | read / save (`{path, content, baseHash, force?}` — 409 if it changed in the VM) / delete |
+| GET/POST | `/api/projects/:id/links`, DELETE `…/:lid` | project links: `{outgoing, incoming}` / allow this VM to reach another project's port (`{to, port}`, `to` = id or name) / remove (from either end) |
 | GET/POST | `/api/projects/:id/forwards`, DELETE `…/:fid` | port forwards (`{hostPort, guestPort}`) — host port → VM port |
 | GET/POST | `/api/net/rules`, DELETE `/api/net/rules/:id` | global allow/block rules |
 | GET/POST | `/api/net/headers`, DELETE `/api/net/headers/:id` | global header rewrites |

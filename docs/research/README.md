@@ -97,12 +97,15 @@ swappable per-platform backends.
 2. Containerization's Linux port maturity — could it become the Linux driver
    too, unifying everything? (01, 03)
 3. `container` CLI JSON output stability across majors — pin versions, wrap in
-   one module (01, 07).
+   one module (01, 07). *Wrapped: all CLI use lives in
+   `src/driver/container.ts`; version pinning still open.*
 4. Balloon/RAM behavior with 10+ idle workers on a 32 GB host (01).
 5. Workdir ext4 build throughput for 1–2 GB repos — measure `mkfs.ext4 -d` and
    ContainerizationEXT4 (03, 06).
-6. Whether `container` on macOS 26 exposes enough network info for the
-   supervisor to reach guest ports without exec-based proxying (03).
+6. ~~Whether `container` on macOS 26 exposes enough network info for the
+   supervisor to reach guest ports without exec-based proxying (03).~~ —
+   **moot**: VMs now boot with no network interface; egress rides a published
+   unix socket to the proxy and port forwards ride `exec` (`src/net/guest.ts`).
 
 ## Suggested next steps
 
@@ -118,9 +121,10 @@ swappable per-platform backends.
    incremental bundles of a few hundred bytes over exec stdout, sub-second
    fetch + preview, host worktree untouched; exclusion-vs-committed-paths
    edge case documented.
-4. Then scaffold the supervisor: WorkerDriver interface, SQLite schema
-   (workers, secrets, worker_secrets, events), REST + WS API, dashboard.
-   **← current step.** All three de-risk spikes passed on the first day.
+4. ~~Scaffold the supervisor~~ — **done**: v0 ships on macOS (terminal,
+   secrets, sync-back, editor, MITM proxy, port forwards, auth).
+5. **Linux support (Cloud Hypervisor driver)** — **← current step.** Phased
+   plan, starting with Spike D, in [`../ROADMAP.md`](../ROADMAP.md).
 
 ## Doc index
 

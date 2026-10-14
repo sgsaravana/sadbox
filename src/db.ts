@@ -191,6 +191,18 @@ db.run(`
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
 
+// Project links (see net/links.ts): from_project may reach `port` inside
+// to_project's VM, as <to-name>.sadbox.internal:<port> — one way, one port.
+db.run(`
+  CREATE TABLE IF NOT EXISTS project_links (
+    id TEXT PRIMARY KEY,
+    from_project TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    to_project TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    port INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (from_project, to_project, port)
+  )`);
+
 // Browser sessions (see core/auth.ts). Only a hash of each token is stored.
 db.run(`
   CREATE TABLE IF NOT EXISTS sessions (

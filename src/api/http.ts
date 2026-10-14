@@ -16,6 +16,7 @@ import { resolveApproval, listPending, pendingCounts } from "../net/approvals";
 import { recentRequests, subscribe } from "../net/events";
 import { caCertPem } from "../net/ca";
 import { createForward, deleteForward, listForwards } from "../net/forwards";
+import { createLink, deleteLink, listLinks } from "../net/links";
 import { AuthError, authEnabled, clearCookie, crossOrigin, login, logout, safeNext, sessionCookie, signedIn, tokenFrom } from "../core/auth";
 import { FileError, commitStaged, deletePath, discardPaths, listStashes, stash, fileIndex, gitStatus, headFile, lastCommit, listBranches, listDir, makeDir, pushBranch, readFile, renamePath, stageFile, stagePaths, switchBranch, writeFile } from "../core/files";
 
@@ -272,6 +273,17 @@ export function startServer() {
           return json(await writeFile(m[1], b.path, b.content, { baseHash: b.baseHash, force: b.force === true }));
         }
         if (m && req.method === "DELETE") return json(await deletePath(m[1], url.searchParams.get("path")));
+
+        // --- project links (this VM may reach one port of another) ---
+        m = p.match(/^\/api\/projects\/([\w-]+)\/links$/);
+        if (m && req.method === "GET") return json(listLinks(m[1]));
+        if (m && req.method === "POST") {
+          const b = await req.json();
+          try { return json(createLink(m[1], { to: b.to, port: b.port }), 201); }
+          catch (e) { return json({ error: (e as Error).message }, 400); }
+        }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/links\/([\w-]+)$/);
+        if (m && req.method === "DELETE") { deleteLink(m[1], m[2]); return json({ ok: true }); }
 
         // --- per-project port forwards (host port → VM port) ---
         m = p.match(/^\/api\/projects\/([\w-]+)\/forwards$/);

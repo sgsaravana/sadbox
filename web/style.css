@@ -313,6 +313,10 @@ details.net-section > summary { cursor: pointer; list-style: revert; }
 }
 .net-form input[name="host"], .net-form input[name="header"] { flex: 1 1 160px; }
 .net-form button { padding: 6px 12px; }
+#detail-links .rspec a { color: var(--accent); text-decoration: none; }
+#detail-links .rspec a:hover { text-decoration: underline; }
+#link-add input[name="port"] { width: 150px; }
+code.link-addr { font-family: ui-monospace, monospace; font-size: 12px; color: var(--accent); user-select: all; }
 
 button.mini { padding: 2px 8px; font-size: 12px; margin-left: 6px; }
 dd .spinner { display: inline-block; vertical-align: -3px; margin-right: 4px; }

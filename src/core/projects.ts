@@ -14,6 +14,7 @@ import { purgeProjectNet } from "../net/rules";
 import { clearProjectApprovals } from "../net/approvals";
 import { clearProjectFeed } from "../net/events";
 import { purgeProjectForwards } from "../net/forwards";
+import { purgeProjectLinks } from "../net/links";
 import { duringSetup } from "../net/setup";
 import { type ToolInfo } from "./toolchain";
 import { forgetVitals, liveStats, liveToolchain, QUERY_TIMEOUT_MS } from "./vitals";
@@ -499,6 +500,7 @@ export async function destroyProject(id: string): Promise<void> {
   purgeProjectSecrets(id); // project-specific secrets die with the VM
   purgeProjectNet(id);     // per-project net rules die with the VM too
   purgeProjectForwards(id); // …and so do its port forwards (frees the host ports)
+  purgeProjectLinks(id);    // …and its links, both ways
   await rm(join(config.dataDir, "sync", `${id}.git`), { recursive: true, force: true });
   closeProjectSocket(id);
   clearProjectApprovals(id);

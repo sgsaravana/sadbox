@@ -638,6 +638,7 @@ function showDetailSkeleton() {
        <div class="detail-grid">${skeletonPanel(6) + skeletonPanel(6) + skeletonPanel(5) + skeletonPanel(4)}</div>
      </div>
      <div id="detail-ports"></div>
+     <div id="detail-links"></div>
      <div id="detail-net">${skeletonNet()}</div>
      <div class="sync-result"></div>`;
 }
@@ -645,6 +646,7 @@ function showDetailSkeleton() {
 async function openDetail(id) {
   showDetailSkeleton();
   openPorts(id);
+  openLinks(id);
   openNet(id);
   await renderDetail(id);
   clearInterval(detailTimer);
@@ -846,6 +848,68 @@ async function renderPorts(id) {
       <button class="link-del" data-del-port="${f.id}" title="remove">✕</button>
     </div>`;
   }).join("");
+}
+
+// ---- links panel (this VM may reach one port of another project's VM) ----
+async function openLinks(id) {
+  const el = $("#detail-links");
+  if (!el) return;
+  el.innerHTML = `
+  <div class="panel net-panel">
+    <div class="net-head"><h3>Links to other projects</h3></div>
+    <div class="net-section">
+      <div class="net-subhead">This project can reach <span class="hint">from inside this VM, at the address shown — over HTTP(S), one port each; every other port and project stays closed</span></div>
+      <div id="link-out"></div>
+      <form id="link-add" class="net-form">
+        <select name="to" required><option value="">project…</option></select>
+        <input name="port" type="number" min="1" max="65535" placeholder="its port (e.g. 3000)" required>
+        <button type="submit">Allow</button>
+      </form>
+    </div>
+    <div class="net-section">
+      <div class="net-subhead">Can be reached from <span class="hint">links other projects have to this one; this VM gets no access back</span></div>
+      <div id="link-in"></div>
+    </div>
+  </div>`;
+  el.addEventListener("click", async (e) => {
+    const del = e.target.closest("[data-del-link]");
+    if (!del) return;
+    try { await api(`/api/projects/${id}/links/${del.dataset.delLink}`, { method: "DELETE" }); } catch {}
+    renderLinks(id);
+  });
+  el.querySelector("#link-add").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try {
+      await api(`/api/projects/${id}/links`, { method: "POST", body: { to: f.get("to"), port: Number(f.get("port")) } });
+      e.target.reset(); renderLinks(id);
+    } catch (err) { alert(err.message); }
+  });
+  try {
+    const others = (await api("/api/projects")).filter((p) => p.id !== id);
+    el.querySelector("select[name=to]").innerHTML = others.length
+      ? `<option value="">project…</option>` + others.map((p) => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("")
+      : `<option value="">no other projects</option>`;
+  } catch {}
+  renderLinks(id);
+}
+
+async function renderLinks(id) {
+  const out = $("#link-out"), inc = $("#link-in");
+  if (!out || !inc) return;
+  let data;
+  try { data = await api(`/api/projects/${id}/links`); }
+  catch (e) { out.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  out.innerHTML = data.outgoing.length ? data.outgoing.map((l) => `<div class="rule">
+      <span class="ract allow">reach</span>
+      <span class="rspec"><code class="link-addr">http://${escapeHtml(l.host)}</code> → <a href="#project/${l.project}">${escapeHtml(l.name)}</a> port ${l.port}</span>
+      <button class="link-del" data-del-link="${l.id}" title="remove">✕</button>
+    </div>`).join("") : `<div class="empty">no links — this VM cannot reach any other project</div>`;
+  inc.innerHTML = data.incoming.length ? data.incoming.map((l) => `<div class="rule">
+      <span class="ract allow">from</span>
+      <span class="rspec"><a href="#project/${l.project}">${escapeHtml(l.name)}</a> → this VM's port ${l.port}</span>
+      <button class="link-del" data-del-link="${l.id}" title="remove">✕</button>
+    </div>`).join("") : `<div class="empty">no project can reach this one</div>`;
 }
 
 // ---- network activity panel (per-project egress proxy) ----
