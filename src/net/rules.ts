@@ -76,6 +76,29 @@ export function deleteRule(id: string): void {
   db.query("DELETE FROM net_rules WHERE id=?").run(id);
 }
 
+/** Move a rule between this project and all projects (global), keeping its
+ *  action, host, path, method and expiry. If the target scope already has the
+ *  same rule, the moved one is dropped instead of duplicated. Returns the rule
+ *  that now stands in the target scope. */
+export function moveRule(id: string, scope: "global" | "project", projectId?: string | null): NetRule {
+  const r = db.query<NetRule, [string]>("SELECT * FROM net_rules WHERE id=?").get(id);
+  if (!r) throw new Error("rule not found");
+  if (scope !== "global" && scope !== "project") throw new Error("scope must be global or project");
+  if (scope === "project" && !projectId) throw new Error("moving a rule to a project needs the project");
+  const target = scope === "global" ? null : projectId!;
+  if (r.scope === scope && r.project_id === target) return r;
+  const twin = db.query<NetRule, [string, string, string | null, string, string | null, string | null]>(
+    `SELECT * FROM net_rules WHERE scope=? AND action=? AND project_id IS ? AND host=?
+       AND path IS ? AND method IS ? AND expires_at IS NULL`,
+  ).get(scope, r.action, target, r.host, r.path, r.method);
+  if (twin && !r.expires_at) {
+    deleteRule(id); // the target already has it, permanently
+    return twin;
+  }
+  db.query("UPDATE net_rules SET scope=?, project_id=? WHERE id=?").run(scope, target, id);
+  return db.query<NetRule, [string]>("SELECT * FROM net_rules WHERE id=?").get(id)!;
+}
+
 // ---- header rule CRUD ----
 
 const HEADER_SELECT =

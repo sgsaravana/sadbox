@@ -5,7 +5,8 @@
 export type NetEvent =
   | { type: "request"; entry: RequestEntry }
   | { type: "pending"; pending: PendingView }
-  | { type: "pending-resolved"; id: string; action: string; reason?: string };
+  | { type: "pending-resolved"; id: string; action: string; reason?: string }
+  | { type: "cutoff"; on: boolean };
 
 export interface RequestEntry {
   id: string;

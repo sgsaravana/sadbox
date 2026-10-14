@@ -384,8 +384,14 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   or **per-project**. A `set` value can be a literal or drawn from a **secret**
   (global or the project's own) — so a real token can be injected per-host (e.g.
   `Authorization` for `api.anthropic.com`) while never living inside the VM. The
-  detail view streams a **live request log** (method,
-  host, path, status, decision, size) over SSE. Wiring: guest tools honor
+  detail view's **Network** panel streams activity live over SSE, in tabs:
+  **Activity** (grouped by host — requests, results, which rule lets it through,
+  secrets used, one-click allow/block; or every request, filterable),
+  **Rules** (this project's and all projects', each movable to the other side
+  in one click; expired timed rules folded away) and **Header rules**. An
+  **Internet on/off** switch in the panel's header cuts the VM off completely:
+  every request and CONNECT is refused before rules, approvals or secrets are
+  looked at, held approvals are denied, and it stays off across restarts. Wiring: guest tools honor
   `HTTP(S)_PROXY` → `net` proxy on the host catches `CONNECT`, MITMs via a
   per-host `https` server, filters/rewrites, forwards upstream, logs.
   **Isolated, not advisory:** a VM has **no network interface at all** — only
@@ -455,6 +461,8 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 | GET/PUT/POST | `/api/projects/:id/secrets` | view / assign globals / add project-specific |
 | GET/POST | `/api/secrets`, DELETE `/api/secrets/:id` | global secret store; POST (here and on a project) takes `{name, value, delivery?: "env"\|"proxy", bindings?: [{host, path?, method?, header?, expiresAt?}]}` |
 | POST/DELETE | `/api/secrets/:id/bindings`, `/api/secrets/:id/bindings/:bid` | add / remove a host a proxy secret may be sent to |
+| PUT | `/api/projects/:id/network` | `{cutoff: true\|false}` — cut the VM off from every network, or let it out again |
+| PATCH | `/api/projects/:id/net/rules/:rid` | `{scope: "global"\|"project"}` — move a rule between this project and all projects |
 | GET/PUT | `/api/settings` | default VM resources (CPUs, memory, disk) for new projects |
 | GET | `/api/toolchain` | agents/tools + versions baked into the base image (`?refresh=1` to re-probe) |
 | GET | `/api/fs/dirs?path=` | folder picker (lists subdirs, flags git repos) |

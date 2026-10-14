@@ -3,7 +3,7 @@ import { db } from "../db";
 import { encrypt } from "../crypto";
 import { makeProject } from "../../test/helpers";
 import {
-  applyHeaders, createHeaderRule, createRule, deleteRule, evaluate, listHeaderRules, listRules, purgeProjectNet,
+  applyHeaders, createHeaderRule, createRule, deleteRule, evaluate, listHeaderRules, listRules, moveRule, purgeProjectNet,
 } from "./rules";
 
 const A = makeProject("rules-a");
@@ -277,5 +277,37 @@ describe("applyHeaders", () => {
     applyHeaders(B, "x.com", "request", b);
     expect(a).toEqual({});
     expect(b).toEqual({ authorization: "b-token" });
+  });
+});
+
+describe("moveRule", () => {
+  test("project → global: same action/host/path/expiry, now applies to every project", () => {
+    const exp = new Date(Date.now() + 60_000).toISOString();
+    const r = createRule({ scope: "project", projectId: A, action: "allow", host: "pypi.org", path: "/simple/*", expiresAt: exp });
+    const m = moveRule(r.id, "global");
+    expect(m).toMatchObject({ id: r.id, scope: "global", project_id: null, host: "pypi.org", path: "/simple/*", expires_at: exp });
+    expect(evaluate(B, req("pypi.org", "/simple/x")).decision).toBe("allow");
+  });
+
+  test("global → project: only that project keeps it", () => {
+    const r = createRule({ scope: "global", action: "block", host: "ads.example" });
+    moveRule(r.id, "project", A);
+    expect(evaluate(A, req("ads.example")).decision).toBe("block");
+    expect(evaluate(B, req("ads.example")).decision).toBe("ask");
+  });
+
+  test("a permanent twin in the target scope absorbs the move instead of duplicating", () => {
+    const g = createRule({ scope: "global", action: "allow", host: "github.com" });
+    const p = createRule({ scope: "project", projectId: A, action: "allow", host: "github.com" });
+    expect(moveRule(p.id, "global").id).toBe(g.id);
+    expect(listRules().filter((r) => r.host === "github.com").length).toBe(1);
+  });
+
+  test("moving to where it already is changes nothing; bad input is refused", () => {
+    const r = createRule({ scope: "project", projectId: A, action: "allow", host: "x.org" });
+    expect(moveRule(r.id, "project", A)).toEqual(r);
+    expect(() => moveRule(r.id, "project")).toThrow(/needs the project/);
+    expect(() => moveRule(r.id, "nowhere" as any)).toThrow(/scope/);
+    expect(() => moveRule("missing", "global")).toThrow(/not found/);
   });
 });

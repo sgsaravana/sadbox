@@ -55,7 +55,9 @@ for (const [col, ddl] of [["git_remote", "git_remote TEXT"], ["git_token_enc", "
   // recorded — those VMs were created with whatever the default was then)
   ["memory_mb", "memory_mb INTEGER"],
   // branch: the branch the VM had checked out when last seen (NULL: never asked)
-  ["branch", "branch TEXT"]]) {
+  ["branch", "branch TEXT"],
+  // net_cutoff: 1 = the proxy refuses every request from this VM (one-click "internet off")
+  ["net_cutoff", "net_cutoff INTEGER NOT NULL DEFAULT 0"]]) {
   const has = db.query<{ name: string }, []>("PRAGMA table_info(projects)").all().some((c) => c.name === col);
   if (!has) db.run(`ALTER TABLE projects ADD COLUMN ${ddl}`);
 }

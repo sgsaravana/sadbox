@@ -11,7 +11,8 @@ import { syncStatus, syncProject } from "../core/sync";
 import { terminalLinks } from "../core/links";
 import { getSettings, updateSettings } from "../core/settings";
 import { baseImageToolchain } from "../core/toolchain";
-import { createRule, deleteRule, listRules, createHeaderRule, deleteHeaderRule, listHeaderRules } from "../net/rules";
+import { createRule, deleteRule, listRules, moveRule, createHeaderRule, deleteHeaderRule, listHeaderRules } from "../net/rules";
+import { isCutOff, setCutoff } from "../net/cutoff";
 import { resolveApproval, listPending, pendingCounts } from "../net/approvals";
 import { recentRequests, subscribe } from "../net/events";
 import { caCertPem } from "../net/ca";
@@ -41,6 +42,7 @@ function netStream(projectId: string): Response {
         pending: listPending(projectId),
         rules: listRules(projectId),
         headerRules: listHeaderRules(projectId),
+        cutoff: isCutOff(projectId),
       });
       unsub = subscribe(projectId, send);
       hb = setInterval(() => { try { controller.enqueue(enc.encode(": ping\n\n")); } catch {} }, 25_000);
@@ -200,6 +202,19 @@ export function startServer() {
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/net\/rules\/([\w-]+)$/);
         if (m && req.method === "DELETE") { deleteRule(m[2]); return json({ ok: true }); }
+        // move a rule between this project and all projects: {scope: "global" | "project"}
+        if (m && req.method === "PATCH") {
+          const b = await req.json();
+          // only this project's own rules or global ones can be moved from here
+          if (!listRules(m[1]).some((r) => r.id === m![2])) return err("rule not found", 404);
+          return json(moveRule(m[2], b.scope, m[1]));
+        }
+        // one-click internet cutoff: {cutoff: true | false}
+        m = p.match(/^\/api\/projects\/([\w-]+)\/network$/);
+        if (m && req.method === "PUT") {
+          const b = await req.json();
+          return json({ cutoff: setCutoff(m[1], b.cutoff === true) });
+        }
         m = p.match(/^\/api\/projects\/([\w-]+)\/net\/headers$/);
         if (m && req.method === "GET") return json(listHeaderRules(m[1]));
         if (m && req.method === "POST") {

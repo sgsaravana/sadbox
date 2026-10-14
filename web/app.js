@@ -801,6 +801,7 @@ async function renderDetail(id) {
   }
   lastDetail = d;
   paintDetail(d);
+  if (netId === id) setNetIsolation(d.live ? !!d.live.isolated : null);
   // usage and tool versions were still being read — fetch again shortly rather
   // than leaving the gaps until the regular refresh
   if (d.partial) {
@@ -861,7 +862,9 @@ function paintDetail(d) {
         <dl>
           <dt>State</dt><dd><span class="dot ${d.unresponsive ? "error" : state}"></span>${state}${d.unresponsive
             ? ` <span style="color:var(--bad)">· not responding</span> <span class="hint">Stop it, then Start — files are kept</span>` : ""}</dd>
-          <dt>Network</dt><dd>${d.live?.isolated
+          <dt>Network</dt><dd>${d.net_cutoff
+            ? `<span style="color:var(--bad)">internet off</span> <span class="hint">every request refused</span>`
+            : d.live?.isolated
             ? `<span class="ok">isolated</span> <span class="hint">no network — proxy only</span>`
             : d.live?.network
               ? `<span style="color:var(--warn)">not isolated</span> <span class="hint">${escapeHtml(d.live.address || d.live.network)} · direct internet — Rebuild to isolate</span>`
@@ -978,20 +981,20 @@ async function renderPorts(id) {
 // ---- network activity panel (per-project egress proxy) ----
 let netES = null;
 let netId = null;
-let netModel = { requests: [], pending: [], rules: [], headerRules: [] };
+let netModel = { requests: [], pending: [], rules: [], headerRules: [], cutoff: false, isolated: null };
 let netOwnSecrets = []; // this project's own secrets (for header-value picker)
 const DUR_OPTS = [["once", "once"], ["1m", "1 min"], ["5m", "5 min"], ["30m", "30 min"], ["60m", "60 min"], ["forever", "forever"]];
 
 function openNet(id) {
   closeNet();
   netId = id;
-  netModel = { requests: [], pending: [], rules: [], headerRules: [] };
+  netModel = { requests: [], pending: [], rules: [], headerRules: [], cutoff: false, isolated: null };
   netOwnSecrets = [];
   const el = $("#detail-net");
   if (!el) return;
   el.innerHTML = netShellHtml();
   bindNetHandlers(el);
-  renderPending(); renderLog(); renderRules(); renderHeaders();
+  renderPending(); renderLog(); renderRules(); renderHeaders(); renderCutoff();
   connectNetStream(id);
   // secrets available as header values: globals (secretsCache) + this project's own
   Promise.all([
@@ -1039,7 +1042,8 @@ function connectNetStream(id) {
       netModel.pending = ev.pending || [];
       netModel.rules = ev.rules || [];
       netModel.headerRules = ev.headerRules || [];
-      renderPending(); renderLog(); renderRules(); renderHeaders();
+      netModel.cutoff = !!ev.cutoff;
+      renderPending(); renderLog(); renderRules(); renderHeaders(); renderCutoff();
     } else if (ev.type === "request") {
       netModel.requests.push(ev.entry);
       if (netModel.requests.length > 500) netModel.requests.shift();
@@ -1051,6 +1055,8 @@ function connectNetStream(id) {
       netModel.pending = netModel.pending.filter((p) => p.id !== ev.id);
       renderPending(); refreshNavTree();
       reloadNetRules(); // a timed/forever answer may have created a rule
+    } else if (ev.type === "cutoff") {
+      netModel.cutoff = ev.on; renderCutoff(); // switched here, in another tab, or over the API
     }
   };
 }
@@ -1072,30 +1078,66 @@ async function reloadNetRules() {
   } catch {}
 }
 
+// UI state for the Network panel, remembered per browser (a convenience only)
+const NET_UI_KEY = "sadbox.net.ui";
+let netUi = { tab: "activity", mode: "hosts", filter: "", blockedOnly: false, showExpired: false };
+try { Object.assign(netUi, JSON.parse(localStorage.getItem(NET_UI_KEY) || "{}"), { filter: "" }); } catch {}
+const saveNetUi = () => { try { localStorage.setItem(NET_UI_KEY, JSON.stringify({ ...netUi, filter: undefined })); } catch {} };
+
 function netShellHtml() {
+  const tab = (id, label) => `<button type="button" class="net-tab${netUi.tab === id ? " on" : ""}" data-net-tab="${id}">${label} <span class="net-count" id="net-count-${id}"></span></button>`;
   return `
-  <div class="panel net-panel">
+  <div class="panel net-panel net-main">
     <div class="net-head">
       <h3>Network</h3>
       <span id="net-status" class="net-live">connecting…</span>
       <span class="grow"></span>
+      <label class="net-switch" id="net-switch" title="Cut this VM off from every network, or let it out again (rules apply)">
+        <input type="checkbox" id="net-online" checked>
+        <span class="track"><span class="knob"></span></span>
+        <span id="net-online-label">Internet on</span>
+      </label>
       <a class="net-ca" href="/api/net/ca" download title="Trust this CA to inspect traffic outside a VM">Download CA</a>
     </div>
+    <div id="net-cutoff-banner" class="net-banner" hidden>
+      <b>Internet is off.</b> Every request from this VM is refused — rules, approvals and secrets are not consulted.
+    </div>
+    <div id="net-isolation-note" class="net-banner warn" hidden>
+      This VM still has a direct network route (created before isolation), so the switch can't stop all of its
+      traffic. <b>Rebuild</b> it to put it behind the proxy.
+    </div>
     <div id="net-pending"></div>
-    <div class="net-section">
-      <div class="net-subhead">Rules <span class="hint">block wins · no match ⇒ ask for approval</span></div>
-      <div id="net-rules"></div>
+    <div class="net-tabs" role="tablist">
+      ${tab("activity", "Activity")}${tab("rules", "Rules")}${tab("headers", "Header rules")}
+    </div>
+
+    <div class="net-pane" data-pane="activity"${netUi.tab === "activity" ? "" : " hidden"}>
+      <div class="net-tools">
+        <div class="seg" role="group">
+          <button type="button" data-net-mode="hosts" class="${netUi.mode === "hosts" ? "on" : ""}">By host</button>
+          <button type="button" data-net-mode="requests" class="${netUi.mode === "requests" ? "on" : ""}">All requests</button>
+        </div>
+        <input id="net-filter" type="search" placeholder="filter host or path">
+        <label class="net-chk"><input type="checkbox" id="net-blocked-only"${netUi.blockedOnly ? " checked" : ""}> blocked only</label>
+        <span class="grow"></span>
+        <span id="net-activity-note" class="hint"></span>
+      </div>
+      <div class="net-log-wrap"><table class="net-log" id="net-activity"></table></div>
+    </div>
+
+    <div class="net-pane" data-pane="rules"${netUi.tab === "rules" ? "" : " hidden"}>
       <form id="net-rule-add" class="net-form">
         <select name="action"><option value="allow">allow</option><option value="block">block</option></select>
         <input name="host" placeholder="host — api.github.com, *.github.com, *" required>
         <input name="path" placeholder="path glob (optional)">
         <select name="scope"><option value="project">this project</option><option value="global">all projects</option></select>
-        <button class="primary" type="submit">Add</button>
+        <button class="primary" type="submit">Add rule</button>
       </form>
+      <p class="hint net-howto">Block wins over allow. A host no rule covers waits for your approval.</p>
+      <div id="net-rules"></div>
     </div>
-    <details class="net-section">
-      <summary class="net-subhead">Header rules</summary>
-      <div id="net-headers"></div>
+
+    <div class="net-pane" data-pane="headers"${netUi.tab === "headers" ? "" : " hidden"}>
       <form id="net-header-add" class="net-form">
         <select name="direction"><option value="request">request</option><option value="response">response</option></select>
         <select name="op"><option value="set">set</option><option value="remove">remove</option></select>
@@ -1107,17 +1149,59 @@ function netShellHtml() {
         <select name="scope"><option value="project">this project</option><option value="global">all projects</option></select>
         <button class="primary" type="submit">Add</button>
       </form>
-    </details>
-    <div class="net-section">
-      <div class="net-subhead">Live requests</div>
-      <div class="net-log-wrap">
-        <table class="net-log">
-          <thead><tr><th>time</th><th>method</th><th>host / path</th><th>status</th><th>decision</th><th>size</th><th>allow host</th></tr></thead>
-          <tbody id="net-log"></tbody>
-        </table>
-      </div>
+      <p class="hint net-howto">Set or remove a header on requests to (or responses from) a host. To give a VM a token
+        without it ever seeing the value, prefer a <a href="#secrets">secret delivered via the proxy</a>.</p>
+      <div id="net-headers"></div>
     </div>
   </div>`;
+}
+
+// ---- cutoff switch ----
+function renderCutoff() {
+  const on = !netModel.cutoff;
+  const cb = $("#net-online");
+  if (!cb) return;
+  cb.checked = on;
+  cb.disabled = netModel.isolated === false; // a direct-route VM can't be cut off at the proxy
+  $("#net-online-label").textContent = on ? "Internet on" : "Internet off";
+  $("#net-switch").classList.toggle("off", !on);
+  $("#net-cutoff-banner").hidden = on;
+  $("#net-isolation-note").hidden = netModel.isolated !== false;
+}
+
+/** Told by the detail view whether the VM is behind the proxy only (null: unknown). */
+function setNetIsolation(isolated) {
+  netModel.isolated = isolated;
+  renderCutoff();
+}
+
+async function toggleCutoff(cb) {
+  const cutoff = !cb.checked;
+  cb.disabled = true;
+  try {
+    const r = await api(`/api/projects/${netId}/network`, { method: "PUT", body: { cutoff } });
+    netModel.cutoff = r.cutoff;
+  } catch (err) { alert(err.message); }
+  cb.disabled = false;
+  renderCutoff();
+}
+
+// ---- tabs ----
+function setNetTab(tab) {
+  netUi.tab = tab; saveNetUi();
+  for (const b of document.querySelectorAll("[data-net-tab]")) b.classList.toggle("on", b.dataset.netTab === tab);
+  for (const p of document.querySelectorAll(".net-pane")) p.hidden = p.dataset.pane !== tab;
+}
+
+function renderNetCounts() {
+  const set = (id, n, alert) => { const el = $(`#net-count-${id}`); if (el) { el.textContent = n || ""; el.classList.toggle("alert", !!alert); } };
+  const hosts = new Set(netModel.requests.map((r) => r.host));
+  const blocked = new Set(netModel.requests.filter((r) => r.decision === "blocked").map((r) => r.host));
+  set("activity", hosts.size, false);
+  set("rules", activeRules().length);
+  set("headers", netModel.headerRules.length);
+  const note = $("#net-count-activity");
+  if (note) note.title = `${hosts.size} hosts · ${blocked.size} with blocked requests`;
 }
 
 function renderPending() {
@@ -1147,35 +1231,125 @@ function renderPending() {
   }).join("");
 }
 
-function renderLog() {
-  const el = $("#net-log");
+// ---- rule coverage, client side (same matching as the proxy: exact, *.suffix, *) ----
+const ruleLive = (r, now = Date.now()) => !r.expires_at || Date.parse(r.expires_at) > now;
+const activeRules = () => netModel.rules.filter((r) => ruleLive(r));
+function hostCovers(pattern, host) {
+  if (pattern === "*") return true;
+  if (pattern.startsWith("*.")) { const bare = pattern.slice(2); return host === bare || host.endsWith("." + bare); }
+  return pattern === host;
+}
+/** How a host is treated by rules alone (host-wide rules; path/method rules don't count). */
+function hostAccess(host) {
+  const m = activeRules().filter((r) => !r.path && !r.method && hostCovers(r.host, host));
+  const block = m.find((r) => r.action === "block");
+  if (block) return { kind: "blocked", rule: block };
+  const own = m.find((r) => r.action === "allow" && r.scope === "project");
+  const glob = m.find((r) => r.action === "allow" && r.scope === "global");
+  if (own || glob) return { kind: "allowed", rule: own || glob };
+  return { kind: "ask" };
+}
+
+// ---- activity: by host (default) or every request ----
+let activityQueued = false;
+function renderLog() { // (kept name: called whenever requests or rules change)
+  if (activityQueued) return;
+  activityQueued = true;
+  requestAnimationFrame(() => { activityQueued = false; renderActivity(); renderNetCounts(); });
+}
+
+function activityRows() {
+  const q = netUi.filter.trim().toLowerCase();
+  return netModel.requests.filter((r) =>
+    (!netUi.blockedOnly || r.decision === "blocked") &&
+    (!q || (r.host + r.path).toLowerCase().includes(q)));
+}
+
+function renderActivity() {
+  const el = $("#net-activity");
   if (!el) return;
-  const rows = netModel.requests.slice(-200).reverse();
-  if (!rows.length) { el.innerHTML = `<tr><td colspan="7" class="empty">no requests yet</td></tr>`; return; }
-  // hosts already covered by a plain (host-only) allow rule, per scope — so we
-  // can show "✓ allowed" instead of offering to add a duplicate rule
-  const allowedProject = new Set(netModel.rules.filter((r) => r.action === "allow" && !r.path && !r.method && r.scope !== "global").map((r) => r.host));
-  const allowedGlobal = new Set(netModel.rules.filter((r) => r.action === "allow" && !r.path && !r.method && r.scope === "global").map((r) => r.host));
-  el.innerHTML = rows.map((r) => {
-    const s = r.status;
-    const sc = s == null ? "" : s >= 500 ? "s5xx" : s >= 400 ? "s4xx" : s >= 300 ? "s3xx" : "s2xx";
-    const h = escapeHtml(r.host);
-    const vmBtn = allowedProject.has(r.host)
-      ? `<span class="rowallowed" title="already allowed for this VM">✓ VM</span>`
-      : `<button class="rowallow" data-allow-host="${h}" data-scope="project" title="Allow ${h} for this VM">＋ VM</button>`;
-    const glBtn = allowedGlobal.has(r.host)
-      ? `<span class="rowallowed" title="already allowed for all VMs">✓ all</span>`
-      : `<button class="rowallow" data-allow-host="${h}" data-scope="global" title="Allow ${h} for all VMs">＋ all</button>`;
-    return `<tr class="dec-${r.decision}">
-      <td class="mono">${fmtClock(r.ts)}</td>
-      <td>${escapeHtml(r.method)}</td>
-      <td class="np"><span class="host">${h}</span><span class="path">${escapeHtml(r.path)}</span>${credChips(r)}</td>
-      <td class="mono ${sc}">${s ?? "—"}</td>
-      <td><span class="decb ${r.decision}"${r.error ? ` title="${escapeHtml(r.error)}"` : ""}>${r.decision}</span></td>
-      <td class="mono">${fmtBytes(r.respBytes)}</td>
-      <td class="rowact">${vmBtn}${glBtn}</td>
-    </tr>`;
-  }).join("");
+  const rows = activityRows();
+  const total = netModel.requests.length;
+  $("#net-activity-note").textContent = total
+    ? `${rows.length === total ? total : `${rows.length} of ${total}`} recent request${total === 1 ? "" : "s"}` : "";
+  if (!rows.length) {
+    el.innerHTML = `<tbody><tr><td class="empty">${total ? "nothing matches" : "no requests yet — traffic from the VM shows up here live"}</td></tr></tbody>`;
+    return;
+  }
+  el.innerHTML = netUi.mode === "requests" ? requestsTable(rows) : hostsTable(rows);
+}
+
+function accessCell(host) {
+  const a = hostAccess(host);
+  if (a.kind === "blocked") return `<span class="acc blocked" title="block rule ${escapeHtml(a.rule.host)}">blocked · ${a.rule.scope === "global" ? "all projects" : "this project"}</span>`;
+  if (a.kind === "allowed") {
+    const exp = a.rule.expires_at ? ` until ${fmtClock(Date.parse(a.rule.expires_at))}` : "";
+    const via = a.rule.host !== host ? ` via ${escapeHtml(a.rule.host)}` : "";
+    return `<span class="acc allowed" title="allow rule ${escapeHtml(a.rule.host)}${exp}">allowed · ${a.rule.scope === "global" ? "all projects" : "this project"}</span><span class="hint">${via}${exp}</span>`;
+  }
+  return `<span class="acc ask" title="no rule — each new request waits for approval">asks</span>`;
+}
+
+function hostActions(host) {
+  const a = hostAccess(host);
+  const h = escapeHtml(host);
+  const btn = (attrs, label, title) => `<button type="button" class="mini" ${attrs} title="${title}">${label}</button>`;
+  if (a.kind === "allowed") {
+    // this project's allow rule can be widened to every project, and a global one narrowed to this project
+    return a.rule.host === host
+      ? btn(`data-move-rule="${a.rule.id}" data-to="${a.rule.scope === "global" ? "project" : "global"}"`,
+          a.rule.scope === "global" ? "→ this project" : "→ all projects",
+          a.rule.scope === "global" ? `Allow ${h} for this project only` : `Allow ${h} for every project`)
+        + btn(`data-host-rule="block" data-host="${h}" data-scope="project"`, "Block", `Block ${h} for this project`)
+      : btn(`data-host-rule="block" data-host="${h}" data-scope="project"`, "Block", `Block ${h} for this project`);
+  }
+  if (a.kind === "blocked") return a.rule.host === host ? btn(`data-del-rule="${a.rule.id}"`, "Unblock", `Remove the block rule for ${h}`) : "";
+  return btn(`data-host-rule="allow" data-host="${h}" data-scope="project"`, "Allow", `Allow ${h} for this project`)
+    + btn(`data-host-rule="allow" data-host="${h}" data-scope="global"`, "Allow for all", `Allow ${h} for every project`);
+}
+
+function hostsTable(rows) {
+  const by = new Map();
+  for (const r of rows) {
+    let g = by.get(r.host);
+    if (!g) by.set(r.host, g = { host: r.host, n: 0, ok: 0, err: 0, blocked: 0, last: 0, bytes: 0, creds: new Set(), lastErr: "" });
+    g.n++; g.last = Math.max(g.last, r.ts); g.bytes += r.respBytes || 0;
+    if (r.decision === "blocked") { g.blocked++; if (r.error) g.lastErr = r.error; }
+    else if (r.status != null && r.status < 400) g.ok++; else g.err++;
+    for (const c of r.credentials || []) g.creds.add(c);
+  }
+  const groups = [...by.values()].sort((a, b) => b.last - a.last);
+  return `<thead><tr><th>host</th><th class="num">requests</th><th>results</th><th>access</th><th>last</th><th></th></tr></thead>
+    <tbody>${groups.map((g) => {
+      const res = [g.ok && `<span class="s2xx">${g.ok} ok</span>`, g.err && `<span class="s4xx">${g.err} error</span>`,
+        g.blocked && `<span class="sblk" title="${escapeHtml(g.lastErr)}">${g.blocked} blocked</span>`].filter(Boolean).join(" · ");
+      const creds = [...g.creds].map((n) => `<span class="cchip in" title="real value swapped in by the proxy">🔑 ${escapeHtml(n)}</span>`).join("");
+      return `<tr class="${g.blocked && !g.ok ? "dec-blocked" : ""}">
+        <td class="np"><span class="host">${escapeHtml(g.host)}</span>${creds}</td>
+        <td class="mono num">${g.n}</td>
+        <td class="res">${res}</td>
+        <td class="acc-cell">${accessCell(g.host)}</td>
+        <td class="mono">${fmtClock(g.last)}</td>
+        <td class="rowact">${hostActions(g.host)}</td>
+      </tr>`;
+    }).join("")}</tbody>`;
+}
+
+function requestsTable(rows) {
+  const shown = rows.slice(-150).reverse();
+  return `<thead><tr><th>time</th><th>method</th><th>host / path</th><th>status</th><th>decision</th><th class="num">size</th></tr></thead>
+    <tbody>${shown.map((r) => {
+      const s = r.status;
+      const sc = s == null ? "" : s >= 500 ? "s5xx" : s >= 400 ? "s4xx" : s >= 300 ? "s3xx" : "s2xx";
+      return `<tr class="dec-${r.decision}">
+        <td class="mono">${fmtClock(r.ts)}</td>
+        <td>${escapeHtml(r.method)}</td>
+        <td class="np"><span class="host">${escapeHtml(r.host)}</span><span class="path">${escapeHtml(r.path)}</span>${credChips(r)}</td>
+        <td class="mono ${sc}">${s ?? "—"}</td>
+        <td><span class="decb ${r.decision}"${r.error ? ` title="${escapeHtml(r.error)}"` : ""}>${r.decision}</span></td>
+        <td class="mono num">${fmtBytes(r.respBytes)}</td>
+      </tr>`;
+    }).join("")}</tbody>`;
 }
 
 // proxy secrets on a log row: swapped in, scrubbed from the response, or seen in the URL
@@ -1187,28 +1361,47 @@ function credChips(r) {
     + chip("url", "⚠", r.credentialInUrl, "placeholder in the URL — never swapped");
 }
 
+// ---- rules: this project's and every project's, each movable to the other side ----
+function ruleRow(r) {
+  const live = ruleLive(r);
+  const exp = r.expires_at ? ` <span class="hint">${live ? "until" : "expired"} ${fmtClock(Date.parse(r.expires_at))}</span>` : "";
+  const parts = [r.host];
+  if (r.path) parts.push("path:" + r.path);
+  if (r.method) parts.push(r.method);
+  const move = r.scope === "global"
+    ? `<button type="button" class="mini" data-move-rule="${r.id}" data-to="project" title="Make this rule apply to this project only">→ this project</button>`
+    : `<button type="button" class="mini" data-move-rule="${r.id}" data-to="global" title="Make this rule apply to every project">→ all projects</button>`;
+  return `<div class="rule${live ? "" : " expired"}">
+    <span class="ract ${r.action}">${r.action}</span>
+    <span class="rspec">${escapeHtml(parts.join(" · "))}${exp}</span>
+    ${live ? move : ""}
+    <button class="link-del" data-del-rule="${r.id}" title="delete">✕</button>
+  </div>`;
+}
+
 function renderRules() {
   const el = $("#net-rules");
   if (!el) return;
-  if (!netModel.rules.length) { el.innerHTML = `<div class="empty">no rules — every new host prompts for approval</div>`; return; }
-  el.innerHTML = netModel.rules.map((r) => {
-    const exp = r.expires_at ? ` <span class="hint">until ${fmtClock(Date.parse(r.expires_at))}</span>` : "";
-    const parts = [r.host];
-    if (r.path) parts.push("path:" + r.path);
-    if (r.method) parts.push(r.method);
-    return `<div class="rule">
-      <span class="ract ${r.action}">${r.action}</span>
-      <span class="rscope">${r.scope === "global" ? "global" : "project"}</span>
-      <span class="rspec">${escapeHtml(parts.join(" · "))}${exp}</span>
-      <button class="link-del" data-del-rule="${r.id}" title="delete">✕</button>
-    </div>`;
-  }).join("");
+  const now = Date.now();
+  const expired = netModel.rules.filter((r) => !ruleLive(r, now));
+  const shown = netUi.showExpired ? netModel.rules : netModel.rules.filter((r) => ruleLive(r, now));
+  // allow before block, then by host, so a long list reads like a list
+  const order = (a, b) => a.action.localeCompare(b.action) || a.host.localeCompare(b.host);
+  const group = (title, hint, rules) => `<div class="rule-group">
+    <div class="net-subhead">${title} <span class="hint">${hint}</span></div>
+    ${rules.length ? rules.sort(order).map(ruleRow).join("") : `<div class="empty">none</div>`}
+  </div>`;
+  el.innerHTML =
+    group("This project", "only this VM", shown.filter((r) => r.scope !== "global"))
+    + group("All projects", "global — every VM", shown.filter((r) => r.scope === "global"))
+    + (expired.length ? `<button type="button" class="link-add" data-toggle-expired>${netUi.showExpired ? "hide" : "show"} ${expired.length} expired</button>` : "");
+  renderNetCounts();
 }
 
 function renderHeaders() {
   const el = $("#net-headers");
   if (!el) return;
-  if (!netModel.headerRules.length) { el.innerHTML = `<div class="empty">no header rules</div>`; return; }
+  if (!netModel.headerRules.length) { el.innerHTML = `<div class="empty">no header rules</div>`; renderNetCounts(); return; }
   el.innerHTML = netModel.headerRules.map((r) => {
     let spec;
     if (r.op !== "set") spec = `remove ${escapeHtml(r.header)}`;
@@ -1216,11 +1409,12 @@ function renderHeaders() {
     else spec = `${escapeHtml(r.header)}: ${escapeHtml(r.value || "")}`;
     return `<div class="rule">
       <span class="ract ${r.direction === "request" ? "allow" : "block"}">${r.direction}</span>
-      <span class="rscope">${r.scope === "global" ? "global" : "project"}</span>
+      <span class="rscope">${r.scope === "global" ? "all projects" : "this project"}</span>
       <span class="rspec">${escapeHtml(r.host)} · ${spec}</span>
       <button class="link-del" data-del-header="${r.id}" title="delete">✕</button>
     </div>`;
   }).join("");
+  renderNetCounts();
 }
 
 function bindNetHandlers(el) {
@@ -1235,17 +1429,28 @@ function bindNetHandlers(el) {
       const cred = appr.classList.contains("cred");
       return sendApproval(appr.dataset.aid, "block", d === "once" || cred ? "once" : "forever");
     }
-    const al = e.target.closest("[data-allow-host]");
-    if (al) {
-      const host = al.dataset.allowHost;
-      const scope = al.dataset.scope; // "project" | "global"
-      const base = scope === "global" ? "/api/net/rules" : `/api/projects/${netId}/net/rules`;
-      al.disabled = true;
-      try {
-        await api(base, { method: "POST", body: { action: "allow", host } });
-        al.textContent = "✓ done";
-        await reloadNetRules(); // updates the Rules list and flips these buttons to "✓"
-      } catch (err) { al.disabled = false; alert(err.message); }
+    const tab = e.target.closest("[data-net-tab]");
+    if (tab) return setNetTab(tab.dataset.netTab);
+    const mode = e.target.closest("[data-net-mode]");
+    if (mode) {
+      netUi.mode = mode.dataset.netMode; saveNetUi();
+      for (const b of el.querySelectorAll("[data-net-mode]")) b.classList.toggle("on", b === mode);
+      return renderActivity();
+    }
+    if (e.target.closest("[data-toggle-expired]")) { netUi.showExpired = !netUi.showExpired; saveNetUi(); return renderRules(); }
+    const hr = e.target.closest("[data-host-rule]");
+    if (hr) {
+      const base = hr.dataset.scope === "global" ? "/api/net/rules" : `/api/projects/${netId}/net/rules`;
+      hr.disabled = true;
+      try { await api(base, { method: "POST", body: { action: hr.dataset.hostRule, host: hr.dataset.host } }); await reloadNetRules(); }
+      catch (err) { hr.disabled = false; alert(err.message); }
+      return;
+    }
+    const mv = e.target.closest("[data-move-rule]");
+    if (mv) {
+      mv.disabled = true;
+      try { await api(`/api/projects/${netId}/net/rules/${mv.dataset.moveRule}`, { method: "PATCH", body: { scope: mv.dataset.to } }); await reloadNetRules(); }
+      catch (err) { mv.disabled = false; alert(err.message); }
       return;
     }
     const dr = e.target.closest("[data-del-rule]");
@@ -1253,6 +1458,9 @@ function bindNetHandlers(el) {
     const dh = e.target.closest("[data-del-header]");
     if (dh) { try { await api(`/api/net/headers/${dh.dataset.delHeader}`, { method: "DELETE" }); } catch {} return reloadNetRules(); }
   });
+  el.querySelector("#net-online").addEventListener("change", (e) => toggleCutoff(e.target));
+  el.querySelector("#net-filter").addEventListener("input", (e) => { netUi.filter = e.target.value; renderActivity(); });
+  el.querySelector("#net-blocked-only").addEventListener("change", (e) => { netUi.blockedOnly = e.target.checked; saveNetUi(); renderActivity(); });
   el.querySelector("#net-rule-add").addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);

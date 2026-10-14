@@ -118,9 +118,10 @@ function finish(id: string, action: Decision, duration?: string, reason?: string
   return true;
 }
 
-/** Deny + clear a project's pending prompts (destroy-time cleanup). */
-export function clearProjectApprovals(projectId: string): void {
+/** Deny + clear a project's pending prompts (destroy-time cleanup, or the
+ *  project's network being cut off). */
+export function clearProjectApprovals(projectId: string, reason = "project destroyed"): void {
   for (const p of [...byId.values()]) {
-    if (p.projectId === projectId) finish(p.id, "block", undefined, "project destroyed");
+    if (p.projectId === projectId) finish(p.id, "block", undefined, reason);
   }
 }

@@ -29,6 +29,7 @@ import { requestApproval } from "./approvals";
 import { inSetup } from "./setup";
 import { recordRequest, type RequestEntry } from "./events";
 import { redactResponse, substituteRequest, type SwapResult } from "./credentials";
+import { CUTOFF_MESSAGE, isCutOff } from "./cutoff";
 
 const driver = getDriver();
 // local copy of core/projects' refFor to avoid a proxy<->projects import cycle
@@ -157,6 +158,15 @@ function makeHandler(scheme: "http" | "https") {
 
     const projectId = ctx.projectId ?? (await projectForIp(ctx.clientIp))?.id ?? null;
 
+    // network cut off: nothing leaves, whatever the rules say — checked per request,
+    // so a tunnel opened before the switch was flipped stops carrying anything too
+    if (isCutOff(projectId)) {
+      req.resume();
+      try { res.writeHead(403, { "content-type": "text/plain" }); res.end(`sadbox: ${CUTOFF_MESSAGE}\n`); } catch {}
+      log(projectId, { id: rid(), ts: started, method, scheme, host, path, status: 403, decision: "blocked", reqBytes: 0, respBytes: 0, durationMs: Date.now() - started, error: CUTOFF_MESSAGE });
+      return;
+    }
+
     const target = await resolveTarget(host);
     let verdict = evaluate(projectId, { host, path, method });
     if (target?.reach === "self") verdict = { decision: "block" };
@@ -257,6 +267,9 @@ function makeHandler(scheme: "http" | "https") {
     req.pipe(up);
   };
 }
+
+const hostOfUrl = (u?: string) => { try { return new URL(u || "").hostname; } catch { return ""; } };
+const pathOfUrl = (u?: string) => { try { const x = new URL(u || ""); return x.pathname + x.search; } catch { return ""; } };
 
 function log(projectId: string | null, entry: RequestEntry): void {
   if (projectId) recordRequest(projectId, entry);
@@ -458,7 +471,18 @@ function acceptClient(socket: net.Socket, knownProject?: string, onActive?: () =
     const ip = (socket.remoteAddress || "").replace(/^::ffff:/, "");
     // Over TCP only project VMs may use the proxy. It listens on every
     // interface, so this is what keeps the rest of the network from borrowing it.
-    if (!knownProject && !(await projectForIp(ip))) { socket.destroy(); return; }
+    const owner = knownProject ?? (await projectForIp(ip))?.id;
+    if (!owner) { socket.destroy(); return; }
+    // network cut off: refuse the tunnel itself, before any TLS (the request is logged)
+    if (isCutOff(owner)) {
+      recordRequest(owner, {
+        id: rid(), ts: Date.now(), method: method || "?", scheme: method === "CONNECT" ? "https" : "http",
+        host: method === "CONNECT" ? splitHostPort(target || "", 443).host : hostOfUrl(target), path: method === "CONNECT" ? "" : pathOfUrl(target),
+        status: 403, decision: "blocked", reqBytes: 0, respBytes: 0, durationMs: 0, error: CUTOFF_MESSAGE,
+      });
+      try { socket.write(`HTTP/1.1 403 Forbidden\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\nsadbox: ${CUTOFF_MESSAGE}\n`); socket.end(); } catch {}
+      return;
+    }
     const who = { clientIp: ip, projectId: knownProject };
     if (method === "CONNECT") {
       const { host, port: connectPort } = splitHostPort(target || "", 443);

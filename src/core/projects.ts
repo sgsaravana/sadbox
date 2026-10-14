@@ -35,6 +35,7 @@ export interface ProjectRow {
   sync_path: string | null;   // local folder connected to a cloned project (sync target only)
   branch: string | null;      // checked out in the VM when last seen (null: never asked)
   memory_mb: number | null;   // the VM's memory (null: created before this was recorded)
+  net_cutoff: number;         // 1 = all egress refused by the proxy (see net/cutoff.ts)
   error: string | null;
   created_at: string;
 }
@@ -423,6 +424,7 @@ async function loadDetails(id: string) {
     apps: JSON.parse(p.apps),
     git_remote: p.git_remote,
     has_git_token: p.git_token_enc != null,
+    net_cutoff: p.net_cutoff === 1,
     error: p.error,
     created_at: p.created_at,
     partial,
