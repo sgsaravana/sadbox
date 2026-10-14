@@ -3,9 +3,15 @@
 // timed window / forever) or Block; timed/forever answers persist as a rule so
 // later requests to the same host skip the prompt. Concurrent requests to the
 // same host coalesce into one prompt and resolve together.
+//
+// The same machinery asks about credentials (docs/research/11): a request
+// carrying a proxy secret's placeholder to a host none of its bindings name is
+// held as a `credential` approval. Allowing it for a window or always binds the
+// secret to that host; blocking only refuses this request.
 import { config } from "../config";
 import { publish, type PendingView } from "./events";
 import { createRule } from "./rules";
+import { bindFromApproval } from "./credentials";
 
 export type Decision = "allow" | "block";
 
@@ -16,13 +22,17 @@ interface Pending {
   method: string;
   scheme: string;
   path: string;
+  credential?: { secretId: string; name: string };
   ts: number;
   waiters: ((d: Decision) => void)[];
   timer: ReturnType<typeof setTimeout>;
 }
 
 const byId = new Map<string, Pending>();
-const byKey = new Map<string, Pending>(); // `${projectId}|${host}`
+const byKey = new Map<string, Pending>(); // `${projectId}|${host}`, + `|cred:${secretId}` for credentials
+
+const keyOf = (p: { projectId: string; host: string; credential?: { secretId: string } }) =>
+  `${p.projectId}|${p.host}${p.credential ? `|cred:${p.credential.secretId}` : ""}`;
 
 // duration token -> lifetime in ms (null = permanent rule; "once" makes no rule)
 const DURATIONS: Record<string, number | null> = {
@@ -38,14 +48,16 @@ function view(p: Pending): PendingView {
   return {
     id: p.id, projectId: p.projectId, host: p.host, method: p.method, scheme: p.scheme, path: p.path, ts: p.ts,
     expiresAt: p.ts + config.approvalTimeoutMs,
+    ...(p.credential ? { credential: { name: p.credential.name } } : {}),
   };
 }
 
 /** Hold a request until it is approved or denied. Resolves with the decision. */
 export function requestApproval(desc: {
   projectId: string; host: string; method: string; scheme: string; path: string;
+  credential?: { secretId: string; name: string };
 }): Promise<Decision> {
-  const key = `${desc.projectId}|${desc.host}`;
+  const key = keyOf(desc);
   let p = byKey.get(key);
   if (!p) {
     const id = crypto.randomUUID().slice(0, 8);
@@ -85,12 +97,15 @@ function finish(id: string, action: Decision, duration?: string, reason?: string
   if (!p) return false;
   clearTimeout(p.timer);
   byId.delete(id);
-  byKey.delete(`${p.projectId}|${p.host}`);
+  byKey.delete(keyOf(p));
 
   if (duration && duration !== "once" && duration in DURATIONS) {
     const ms = DURATIONS[duration];
     const expiresAt = ms == null ? null : new Date(Date.now() + ms).toISOString();
-    try {
+    if (p.credential) {
+      // a credential answer persists only as a binding; a block refuses this request alone
+      if (action === "allow") try { bindFromApproval(p.credential.secretId, p.host, expiresAt); } catch {}
+    } else try {
       createRule({
         scope: "project", projectId: p.projectId, action, host: p.host,
         expiresAt, note: `via approval (${duration})`,

@@ -73,17 +73,125 @@ async function refreshNavTree() {
   }).join("");
 }
 
+// ---- secret delivery: in the VM (env) or via the proxy (placeholder) ----
+// A proxy secret carries bindings: the hosts (optionally path/method) its real
+// value may be sent to. Shown as chips; ✕ removes one, "+ host" adds one.
+const SECRET_PRESETS = {
+  github: { name: "GITHUB_TOKEN", hosts: ["api.github.com", "github.com", "uploads.github.com"] },
+  anthropic: { name: "ANTHROPIC_API_KEY", hosts: ["api.anthropic.com"] },
+  openai: { name: "OPENAI_API_KEY", hosts: ["api.openai.com"] },
+};
+
+function deliveryBadge(s) {
+  return s.delivery === "proxy"
+    ? `<span class="dbadge proxy" title="The VM holds a placeholder; the proxy swaps in the real value">via proxy</span>`
+    : `<span class="dbadge env" title="The real value is in the VM's env">in VM</span>`;
+}
+
+function bindingChips(s) {
+  if (s.delivery !== "proxy") return "";
+  const now = Date.now();
+  const chips = (s.bindings || []).map((b) => {
+    const expired = b.expires_at && Date.parse(b.expires_at) <= now;
+    const spec = `${b.method ? `${escapeHtml(b.method)} ` : ""}${escapeHtml(b.host)}${b.path ? escapeHtml(b.path) : ""}`
+      + (b.header ? ` <span class="bnote">${escapeHtml(b.header)}</span>` : "")
+      + (b.expires_at ? ` <span class="bnote">${expired ? "expired" : `until ${fmtClock(Date.parse(b.expires_at))}`}</span>` : "");
+    return `<span class="bchip${expired ? " expired" : ""}">${spec}<button type="button" class="link-del"
+      data-unbind="${s.id}" data-bid="${b.id}" title="Stop sending ${escapeHtml(s.name)} to ${escapeHtml(b.host)}">✕</button></span>`;
+  }).join("");
+  const none = (s.bindings || []).length ? "" : `<span class="bnote">no hosts — every use asks first</span>`;
+  return `<div class="bindings">${chips}${none}
+    <button type="button" class="link-add" data-bind-open="${s.id}">+ host</button>
+    <form class="bind-add" data-bind="${s.id}" hidden>
+      <select name="method"><option value="">any</option><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option></select>
+      <input name="host" required placeholder="api.example.com or *.example.com/v1/*">
+      <button type="submit">add</button>
+    </form>
+  </div>`;
+}
+
+/** "api.github.com/repos/*" → { host: "api.github.com", path: "/repos/*" } */
+function parseBinding(spec) {
+  const t = spec.trim().replace(/^https?:\/\//, "");
+  const i = t.indexOf("/");
+  return i < 0 ? { host: t } : { host: t.slice(0, i), path: t.slice(i) };
+}
+
+/** The create body for a secret form: name, value, delivery and (proxy) bindings. */
+function secretFormBody(form) {
+  const f = new FormData(form);
+  const delivery = f.get("delivery") || "env";
+  const body = { name: f.get("name"), value: f.get("value"), delivery };
+  if (delivery === "proxy") {
+    body.bindings = String(f.get("hosts") || "").split(/[\s,]+/).filter(Boolean).map(parseBinding);
+  }
+  return body;
+}
+
+/** Show the hosts row only for proxy delivery; presets fill hosts (and a name, if empty). */
+function wireSecretForm(form) {
+  const sync = () => {
+    const proxy = form.delivery.value === "proxy";
+    for (const el of form.querySelectorAll(".proxy-only")) el.hidden = !proxy;
+    form.hosts.required = proxy;
+  };
+  form.delivery.addEventListener("change", sync);
+  form.addEventListener("reset", () => setTimeout(sync));
+  form.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-preset]");
+    if (!b) return;
+    const p = SECRET_PRESETS[b.dataset.preset];
+    form.hosts.value = p.hosts.join(", ");
+    const name = form.elements["name"]; // (form.name is the form's own attribute)
+    if (!name.value) name.value = p.name;
+  });
+  sync();
+}
+
+/** Clicks on binding chips / "+ host" forms inside `root`; `after` re-renders. */
+function wireBindings(root, after) {
+  root.addEventListener("click", async (e) => {
+    const open = e.target.closest("[data-bind-open]");
+    if (open) {
+      const f = open.parentElement.querySelector("form.bind-add");
+      f.hidden = !f.hidden;
+      if (!f.hidden) f.elements["host"].focus();
+      return;
+    }
+    const del = e.target.closest("[data-unbind]");
+    if (!del) return;
+    e.stopPropagation();
+    try {
+      await api(`/api/secrets/${del.dataset.unbind}/bindings/${del.dataset.bid}`, { method: "DELETE" });
+      await after();
+    } catch (err) { alert(err.message); }
+  });
+  root.addEventListener("submit", async (e) => {
+    const f = e.target.closest("form.bind-add");
+    if (!f) return;
+    e.preventDefault();
+    try {
+      await api(`/api/secrets/${f.dataset.bind}/bindings`, {
+        // (f.method is the form's own method; the select is f.elements)
+        method: "POST", body: { ...parseBinding(f.elements["host"].value), method: f.elements["method"].value || undefined },
+      });
+      await after();
+    } catch (err) { alert(err.message); }
+  });
+}
+
 // ---- secrets (global) ----
 async function refreshSecrets() {
   secretsCache = await api("/api/secrets");
   $("#secrets").innerHTML = secretsCache.length
     ? secretsCache.map((s) =>
-        `<li><span>${s.name}</span>
-         <button class="danger" data-del-secret="${s.id}">delete</button></li>`).join("")
+        `<li><div class="sec-main"><span class="sec-name">${s.name}</span>${deliveryBadge(s)}
+           <button class="danger" data-del-secret="${s.id}">delete</button></div>
+         ${bindingChips(s)}</li>`).join("")
     : `<li class="empty">No secrets yet.</li>`;
   $("#create-secrets").innerHTML = secretsCache.length
     ? secretsCache.map((s) =>
-        `<label><input type="checkbox" name="secret" value="${s.id}">${s.name}</label>`).join("")
+        `<label><input type="checkbox" name="secret" value="${s.id}">${s.name}${s.delivery === "proxy" ? ` <span class="hint">· via proxy</span>` : ""}</label>`).join("")
     : `<span class="empty">none defined</span>`;
 }
 
@@ -301,18 +409,29 @@ document.addEventListener("click", async (e) => {
 const psec = $("#psec");
 let psecProjectId = null;
 
+// what this VM holds for a proxy secret — safe to show and copy (it's not the value)
+function placeholderLine(s) {
+  if (s.delivery !== "proxy") return "";
+  if (!s.placeholder) return `<div class="phline hint">placeholder made when the secret is next injected</div>`;
+  return `<div class="phline"><span class="hint">in this VM:</span> <code>${escapeHtml(s.placeholder)}</code>
+    <button type="button" class="link-add" data-copy="${escapeHtml(s.placeholder)}">copy</button></div>`;
+}
+
 async function renderProjectSecrets() {
   const view = await api(`/api/projects/${psecProjectId}/secrets`);
   $("#psec-own").innerHTML = view.own.length
     ? view.own.map((s) =>
-        `<li><span>${s.name}</span>
-         <button class="danger" data-del-secret="${s.id}">delete</button></li>`).join("")
+        `<li><div class="sec-main"><span class="sec-name">${s.name}</span>${deliveryBadge(s)}
+           <button class="danger" data-del-own="${s.id}">delete</button></div>
+         ${placeholderLine(s)}${bindingChips(s)}</li>`).join("")
     : `<li class="empty">none — add one below</li>`;
-  const assigned = new Set(view.assigned.map((s) => s.id));
+  const assigned = new Map(view.assigned.map((s) => [s.id, s]));
   $("#psec-globals").innerHTML = secretsCache.length
-    ? secretsCache.map((s) =>
-        `<label><input type="checkbox" name="psec-g" value="${s.id}"
-          ${assigned.has(s.id) ? "checked" : ""}>${s.name}</label>`).join("")
+    ? secretsCache.map((s) => {
+        const a = assigned.get(s.id);
+        return `<div class="psec-g"><label><input type="checkbox" name="psec-g" value="${s.id}"
+          ${a ? "checked" : ""}>${s.name}</label> ${deliveryBadge(s)}${a ? placeholderLine(a) : ""}</div>`;
+      }).join("")
     : `<span class="empty">no global secrets defined</span>`;
   $("#psec-status").textContent = "";
 }
@@ -328,30 +447,38 @@ async function openProjectSecrets(id, name) {
 $("#psec-close").onclick = () => psec.close();
 $("#psec-add").onsubmit = async (e) => {
   e.preventDefault();
-  const f = new FormData(e.target);
   try {
-    await api(`/api/projects/${psecProjectId}/secrets`, {
-      method: "POST",
-      body: { name: f.get("name"), value: f.get("value") },
-    });
+    await api(`/api/projects/${psecProjectId}/secrets`, { method: "POST", body: secretFormBody(e.target) });
     e.target.reset();
     await renderProjectSecrets();
     $("#psec-status").textContent = "project secret added & injected";
   } catch (err) { $("#psec-status").textContent = err.message; }
 };
+// (data-del-own, not data-del-secret: the page-wide handler owns that one)
 $("#psec-own").onclick = async (e) => {
-  const b = e.target.closest("button[data-del-secret]");
+  const b = e.target.closest("button[data-del-own]");
   if (!b) return;
   if (!confirm("Delete this project-specific secret?")) return;
   try {
-    await api(`/api/secrets/${b.dataset.delSecret}`, { method: "DELETE" });
+    await api(`/api/secrets/${b.dataset.delOwn}`, { method: "DELETE" });
     await renderProjectSecrets();
   } catch (err) { $("#psec-status").textContent = err.message; }
 };
+wireSecretForm($("#psec-add"));
+wireBindings($("#psec-own"), renderProjectSecrets);
+wireBindings($("#secrets"), refreshSecrets);
+psec.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-copy]");
+  if (!b) return;
+  try { await navigator.clipboard.writeText(b.dataset.copy); b.textContent = "copied"; }
+  catch { b.textContent = "copy failed"; }
+  setTimeout(() => { b.textContent = "copy"; }, 1500);
+});
 $("#psec-apply").onclick = async () => {
   const ids = [...psec.querySelectorAll("input[name=psec-g]:checked")].map((c) => c.value);
   try {
     await api(`/api/projects/${psecProjectId}/secrets`, { method: "PUT", body: { secretIds: ids } });
+    await renderProjectSecrets(); // newly assigned proxy secrets now have their placeholders
     $("#psec-status").textContent = "globals updated & injected";
   } catch (err) { $("#psec-status").textContent = err.message; }
 };
@@ -567,11 +694,11 @@ $("#create-form").onsubmit = async (e) => {
   }
 };
 
+wireSecretForm($("#secret-form"));
 $("#secret-form").onsubmit = async (e) => {
   e.preventDefault();
-  const f = new FormData(e.target);
   try {
-    await api("/api/secrets", { method: "POST", body: { name: f.get("name"), value: f.get("value") } });
+    await api("/api/secrets", { method: "POST", body: secretFormBody(e.target) });
     e.target.reset();
     refreshSecrets();
   } catch (err) {
@@ -722,7 +849,7 @@ function paintDetail(d) {
     <button data-term="${d.id}" data-name="${d.name}">${ICON.terminal}Terminal ↗</button>
     <button data-edit="${d.id}" data-name="${d.name}" title="Browse and edit the workdir">${ICON.editor}Editor ↗</button>
     ${d.sync_folder ? `<button data-sync="${d.id}">${ICON.sync}Sync back</button>` : ""}
-    <button data-secrets="${d.id}">${ICON.secrets}Secrets…</button>
+    <button data-secrets="${d.id}" data-name="${escapeHtml(d.name)}">${ICON.secrets}Secrets…</button>
     ${powerButton(d)}
     <button data-rebuild="${d.id}" data-name="${d.name}" title="Destroy the VM and recreate it from the original source">${ICON.rebuild}Rebuild</button>
     <button class="danger" data-destroy="${d.id}" data-name="${d.name}">${ICON.destroy}Destroy</button>`;
@@ -998,8 +1125,14 @@ function renderPending() {
   if (!el) return;
   if (!netModel.pending.length) { el.innerHTML = ""; return; }
   el.innerHTML = netModel.pending.map((p) => {
-    const opts = DUR_OPTS.map(([v, l]) => `<option value="${v}"${v === "forever" ? " selected" : ""}>${l}</option>`).join("");
-    return `<div class="approval" data-aid="${p.id}">
+    // a credential defaults to a short window: "forever" would bind the secret to this host for good
+    const dflt = p.credential ? "5m" : "forever";
+    const opts = DUR_OPTS.map(([v, l]) => `<option value="${v}"${v === dflt ? " selected" : ""}>${l}</option>`).join("");
+    // a credential ask: send this proxy secret to a host none of its bindings name?
+    const cred = p.credential
+      ? `<div class="approval-cred">🔑 sends <b>${escapeHtml(p.credential.name)}</b> to this host — allowing binds the secret to it</div>`
+      : "";
+    return `<div class="approval${p.credential ? " cred" : ""}" data-aid="${p.id}">${cred}
       <div class="approval-req">
         <span class="badge">${p.scheme}</span>
         <b>${escapeHtml(p.method)}</b>
@@ -1036,13 +1169,22 @@ function renderLog() {
     return `<tr class="dec-${r.decision}">
       <td class="mono">${fmtClock(r.ts)}</td>
       <td>${escapeHtml(r.method)}</td>
-      <td class="np"><span class="host">${h}</span><span class="path">${escapeHtml(r.path)}</span></td>
+      <td class="np"><span class="host">${h}</span><span class="path">${escapeHtml(r.path)}</span>${credChips(r)}</td>
       <td class="mono ${sc}">${s ?? "—"}</td>
-      <td><span class="decb ${r.decision}">${r.decision}</span></td>
+      <td><span class="decb ${r.decision}"${r.error ? ` title="${escapeHtml(r.error)}"` : ""}>${r.decision}</span></td>
       <td class="mono">${fmtBytes(r.respBytes)}</td>
       <td class="rowact">${vmBtn}${glBtn}</td>
     </tr>`;
   }).join("");
+}
+
+// proxy secrets on a log row: swapped in, scrubbed from the response, or seen in the URL
+function credChips(r) {
+  const chip = (cls, icon, names, title) => (names || []).map((n) =>
+    `<span class="cchip ${cls}" title="${title}">${icon} ${escapeHtml(n)}</span>`).join("");
+  return chip("in", "🔑", r.credentials, "real value swapped in by the proxy")
+    + chip("red", "⇄", r.redacted, "real value scrubbed from the response headers")
+    + chip("url", "⚠", r.credentialInUrl, "placeholder in the URL — never swapped");
 }
 
 function renderRules() {
@@ -1089,7 +1231,9 @@ function bindNetHandlers(el) {
     }
     if (appr && e.target.closest("[data-block]")) {
       const d = appr.querySelector(".dur").value; // once ⇒ deny this only; else a permanent block rule
-      return sendApproval(appr.dataset.aid, "block", d === "once" ? "once" : "forever");
+      // a credential block refuses this request only (no rule) — the host itself stays reachable
+      const cred = appr.classList.contains("cred");
+      return sendApproval(appr.dataset.aid, "block", d === "once" || cred ? "once" : "forever");
     }
     const al = e.target.closest("[data-allow-host]");
     if (al) {

@@ -21,11 +21,15 @@ export interface RequestEntry {
   respBytes: number;
   durationMs: number;
   error?: string;
+  credentials?: string[];     // proxy secrets swapped into this request (names, never values)
+  redacted?: string[];        // proxy secrets whose real value was scrubbed from the response headers
+  credentialInUrl?: string[]; // placeholders seen in the URL (never swapped)
 }
 
 export interface PendingView {
   id: string; projectId: string; host: string; method: string; scheme: string; path: string; ts: number;
   expiresAt: number; // when the held request is denied if nobody answers
+  credential?: { name: string }; // set when the question is "send this secret to this host?"
 }
 
 type Listener = (ev: NetEvent) => void;

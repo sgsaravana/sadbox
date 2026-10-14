@@ -5,48 +5,31 @@ can a VM hold only placeholder tokens while real clients (git, gh, Claude Code,
 SDKs) keep working, because the supervisor's proxy swaps placeholder → real on
 the way out and real → placeholder in response headers?
 
-**Status:** harness built and smoke-tested on the host (2026-10-14). The
-experiments with real VMs and real clients haven't been run yet.
+**Status:** host smoke test and VM round 1 (all major clients, dummy real
+values) **passed 2026-10-14**, and the feature was then built (C1–C5,
+`docs/research/11`). Round 2 (real tokens, upstream 200s) not run yet: it now
+runs against the built feature, no patch. Findings below.
 
 ## Files
 
 | File | What |
 |---|---|
-| `subst.ts` | The swap: placeholder → real in request headers (literal and inside `Basic`), https + bound hosts only; real → placeholder in all response headers. Logs `[spike-d] …` lines with secret and header names, never values |
-| `proxy.patch` | Two hook lines + an import in `src/net/proxy.ts`, enabled only when `SADBOX_SPIKE_SUBST` is set. **Never merged.** |
-| `placeholder.ts` | Prints placeholder variants (a)/(b)/(c) for a real token |
-| `subst.test.ts` | Unit tests for the swap and the placeholder generator (`bun test spikes/d-credential-proxy`) |
-| `smoke.ts` | Host-only end-to-end run of the patched proxy against httpbin.org, with dummy tokens |
+| `e2e.ts` | Host-only end-to-end run of the **built** credential proxy against httpbin.org with dummy tokens: bound / Basic / plain-http / approval deny + allow / redaction / in-URL. `bun spikes/d-credential-proxy/e2e.ts` |
 
-```sh
-git apply spikes/d-credential-proxy/proxy.patch      # hook in
-bun spikes/d-credential-proxy/smoke.ts                # host smoke test
-git apply -R spikes/d-credential-proxy/proxy.patch   # hook out before committing anything
-```
+The spike-only harness (a `proxy.patch` hook, the standalone swap `subst.ts`
+and its tests, `smoke.ts`, the placeholder printer and map-file helper) was
+retired once the feature was built. It lives in git history (`15f3c09`) and
+its results are recorded below. Its swap logic became `src/net/credentials.ts`
+and its placeholder generator became `src/core/placeholders.ts`.
 
-## Setup for the VM experiments
+## Setup (round 1, as run)
 
-1. Real, **least-privilege, short-lived** test credentials, revoked after the spike:
-   - GitHub fine-grained PAT (one private test repo, contents read/write) + a classic `ghp_` PAT
-   - `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) and/or an `ANTHROPIC_API_KEY`
-   - optionally an OpenAI key
-2. Make placeholders: `pbpaste | bun spikes/d-credential-proxy/placeholder.ts`.
-3. Write the map file outside the repo, `chmod 600`, delete it afterwards:
-   ```json
-   { "secrets": [
-     { "name": "GITHUB_TOKEN", "placeholder": "ghp_sbx…", "value": "ghp_…",
-       "hosts": ["github.com", "api.github.com", "*.githubusercontent.com"] },
-     { "name": "CLAUDE_CODE_OAUTH_TOKEN", "placeholder": "sk-ant-oat01-sbx…", "value": "sk-ant-oat01-…",
-       "hosts": ["api.anthropic.com"] } ] }
-   ```
-4. Apply the patch and run the supervisor with `SADBOX_SPIKE_SUBST=~/spike-d-map.json bun run dev`.
-5. In the UI, create the secrets with the **placeholder** as their value and
-   assign them to a throwaway project. The normal env-file delivery then puts
-   only placeholders in the VM, with no other change needed.
-6. Allow the target hosts for the project. Watch the supervisor's stdout for
-   `[spike-d]` lines: `injected=` / `UNBOUND=` / `REFUSED-plain-http=` / `IN-URL=` / `redacted=`.
-   An `UNBOUND=` line for a host you expected shows a missing binding (e.g. a
-   host Claude Code talks to that isn't `api.anthropic.com`).
+Round 1 used a throwaway supervisor with the patch applied
+(`SADBOX_SPIKE_SUBST=<map.json>`), secrets created with their **placeholder**
+as the value so the normal env file carried only placeholders, and `[spike-d]`
+lines on stdout reporting `injected=` / `UNBOUND=` / `REFUSED-plain-http=` /
+`IN-URL=` / `redacted=`. Use a short `SADBOX_DATA` (e.g. `/tmp/sbxd`): a long
+path overflows the unix-socket path limit.
 
 ## Experiments
 
@@ -130,6 +113,71 @@ The hook sits after the allow/block verdict and before the existing header
 rules, so blocked requests never reach the swap, and `set` header rules still
 override it.
 
-### VM experiments
+### VM experiments, round 1: placeholders + dummy "real" values (2026-10-14)
 
-_To be filled in when experiments 1–5 run._
+A throwaway supervisor (`SADBOX_DATA=/tmp/sbxd`, ports 17070/17071, patch
+applied) with one network-less project VM. Four project secrets created
+through the normal API **with their placeholder as the value**, so the VM's
+`~/.sadbox/env` held only placeholders. The map's "real" values were dummies,
+so upstreams answer 401. What's measured is whether each client sends the
+placeholder, where, how it is encoded, and whether the proxy swapped it. Exact
+bytes on the wire after the swap were verified by the host smoke test
+(httpbin echo).
+
+Note: `SADBOX_DATA` under the session scratchpad is too long for a unix socket
+path. Use a short path.
+
+| # | Client | Env var | Header / encoding seen | Swapped? |
+|---|---|---|---|---|
+| 1 | curl | `GITHUB_TOKEN` | `authorization` Bearer | ✓ |
+| 4 | curl, 3 requests on one connection | `GITHUB_TOKEN` | `authorization` `token` | ✓ each request |
+| 5 | git ls-remote via credential helper | `GITHUB_TOKEN` | `authorization` **Basic** (after 401 challenge) | ✓ (decoded, swapped, re-encoded) |
+| 6 | Bun `fetch` | `GITHUB_TOKEN` | `authorization` Bearer | ✓ |
+| 7 | curl, fine-grained `github_pat_` | `GH_TOKEN` | `authorization` Bearer | ✓ |
+| 8 | Claude Code 2.1.272, OAuth | `CLAUDE_CODE_OAUTH_TOKEN` | `authorization` Bearer, on `/v1/messages`, `/api/claude_cli/bootstrap`, `/api/claude_code/{settings,policy_limits}`, `/api/eval/…` | ✓ |
+| 9 | Claude Code, API key | `ANTHROPIC_API_KEY` | `x-api-key` raw, same endpoints + `/api/event_logging/v2/batch`, `/api/claude_code_penguin_mode`, `…/metrics_enabled` | ✓ |
+| 10 | gh 2.46 | `GH_TOKEN` | `authorization` `token`, REST + `/graphql` | ✓ |
+| 12 | gh | `GITHUB_TOKEN` (no `GH_TOKEN`) | `authorization` `token` | ✓ |
+| 13 | Python `requests` 2.32 | `GITHUB_TOKEN` | `authorization` Bearer | ✓ |
+
+| Edge case | Result |
+|---|---|
+| 2. Placeholder sent to an unbound host (httpbin) | arrived as the placeholder, logged `UNBOUND` ✓ |
+| 3. Plain `http://api.github.com` | not swapped, logged `REFUSED-plain-http` ✓ |
+| 14. Token in the query string (`?access_token=`) | detected (`IN-URL`), not swapped. No tested client does this |
+| 15. Streaming response (httpbin `/drip`) | unaffected ✓ |
+| Placeholder format: generic `sadbox-ph-…` and a `ghp_` with a bad CRC32 tail, in Claude Code (both modes) and gh | all sent to the server; **no client validates token format locally** |
+| 16. Token persisted in the VM by clients | none: no `~/.config/gh`, nothing matching in `~/.claude*` |
+| Hosts Claude Code reaches with a credential | only `api.anthropic.com` (Datadog intake gets none) |
+| Swap cost | 50–480 µs per request (one sample 788 µs) |
+
+**Conclusions**
+
+- **Literal match + `Basic` decoding covers every client tested.**
+  Bearer, `token` and `x-api-key` are all literal substrings. Query-string
+  substitution is **not needed in v1**: detect and log it only.
+- **Placeholder format: variant (a)**, prefix + `sbx` + random to the same
+  length and alphabet. Nothing checks format, so (a) is chosen for being
+  greppable and keeping prefix-based token-type detection working.
+- **Bindings are host-level in practice.** Claude Code spreads one credential
+  over 8+ `api.anthropic.com` paths, and gh over REST + GraphQL. Path/method
+  narrowing stays optional.
+- **Unbound placeholders are rare in normal use** (none from Claude Code, gh or
+  git against their own hosts), so prompting on them won't be noisy.
+
+### VM experiments, round 2: real tokens
+
+_Not run yet._ Confirms upstream success (200s) with real tokens against the
+built feature, and checks real API responses for any echoed credential.
+
+1. Make **least-privilege, short-lived** tokens, revoked afterwards: a GitHub
+   fine-grained PAT (one private test repo, contents read/write) and
+   `claude setup-token` (and/or an `ANTHROPIC_API_KEY`).
+2. In the UI, add them under **Secrets** as **via the proxy** with the GitHub /
+   Anthropic presets, and assign them to a throwaway project. The real value
+   goes from the password field straight to the supervisor; the VM gets only
+   placeholders.
+3. In the VM: `git push` to the test repo, `gh api user` (install `gh` with apt),
+   `claude -p hi` with each credential. Expect 200s and 🔑 chips in the request
+   log, with no ⚠ rows and no 🔑 approval prompts for these hosts.
+4. Revoke the tokens and destroy the project.

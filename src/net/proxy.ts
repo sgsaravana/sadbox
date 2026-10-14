@@ -28,6 +28,7 @@ import { evaluate, applyHeaders } from "./rules";
 import { requestApproval } from "./approvals";
 import { inSetup } from "./setup";
 import { recordRequest, type RequestEntry } from "./events";
+import { redactResponse, substituteRequest, type SwapResult } from "./credentials";
 
 const driver = getDriver();
 // local copy of core/projects' refFor to avoid a proxy<->projects import cycle
@@ -187,7 +188,41 @@ function makeHandler(scheme: "http" | "https") {
     // allowed -> forward upstream
     const headers: Record<string, unknown> = { ...req.headers };
     delete headers["proxy-connection"];
-    if (projectId) applyHeaders(projectId, host, "request", headers);
+
+    // proxy-delivered secrets: placeholder -> real value, before the header rules
+    // run (so an explicit `set` rule still has the last word)
+    let creds: SwapResult | null = null;
+    if (projectId) {
+      const swapReq = { scheme, host, path, method };
+      creds = substituteRequest(projectId, swapReq, headers);
+      // a real value never travels unencrypted; fail loudly rather than send a placeholder that 401s
+      let why = creds.plainHttp.length ? `${creds.plainHttp.join(", ")} is only sent over https` : null;
+      const approved = new Set<string>();
+      for (const u of why ? [] : creds.unbound) {
+        // the provisioning window has nobody to ask, so an unbound secret is simply refused
+        const d = inSetup(projectId) ? "block"
+          : await requestApproval({ projectId, host, method, scheme, path, credential: u });
+        if (d === "block") { why = `${u.name} is not allowed to ${host}`; break; }
+        approved.add(u.secretId);
+      }
+      if (why) {
+        req.resume();
+        try { res.writeHead(403, { "content-type": "text/plain" }); res.end(`sadbox: ${why}\n`); } catch {}
+        log(projectId, {
+          id: rid(), ts: started, method, scheme, host, path, status: 403, decision: "blocked",
+          reqBytes: 0, respBytes: 0, durationMs: Date.now() - started, error: why,
+          ...(creds.inUrl.length ? { credentialInUrl: creds.inUrl } : {}),
+        });
+        return;
+      }
+      if (approved.size) creds.injected.push(...substituteRequest(projectId, swapReq, headers, approved).injected);
+      applyHeaders(projectId, host, "request", headers);
+    }
+    const credLog = (redacted: string[] = []) => ({
+      ...(creds?.injected.length ? { credentials: creds.injected } : {}),
+      ...(redacted.length ? { redacted } : {}),
+      ...(creds?.inUrl.length ? { credentialInUrl: creds.inUrl } : {}),
+    });
 
     let reqBytes = 0, respBytes = 0;
     req.on("data", (c: Buffer) => { reqBytes += c.length; });
@@ -198,6 +233,8 @@ function makeHandler(scheme: "http" | "https") {
       { host: target!.address, port, method, path, headers: headers as any, ...(net.isIP(host) ? {} : { servername: host }) },
       (upRes) => {
         const out: Record<string, unknown> = { ...upRes.headers };
+        // a real secret value never reaches the VM, even echoed back in a header
+        const redacted = projectId ? redactResponse(projectId, out) : [];
         if (projectId) applyHeaders(projectId, host, "response", out);
         try { res.writeHead(upRes.statusCode || 502, out as any); } catch {}
         upRes.on("data", (c: Buffer) => { respBytes += c.length; });
@@ -205,6 +242,7 @@ function makeHandler(scheme: "http" | "https") {
         upRes.on("end", () => log(projectId, {
           id: rid(), ts: started, method, scheme, host, path, status: upRes.statusCode ?? null,
           decision: "allowed", ruleId: verdict.rule?.id ?? null, reqBytes, respBytes, durationMs: Date.now() - started,
+          ...credLog(redacted),
         }));
       },
     );
@@ -213,6 +251,7 @@ function makeHandler(scheme: "http" | "https") {
       log(projectId, {
         id: rid(), ts: started, method, scheme, host, path, status: 502, decision: "allowed",
         ruleId: verdict.rule?.id ?? null, reqBytes, respBytes, durationMs: Date.now() - started, error: e.message,
+        ...credLog(),
       });
     });
     req.pipe(up);

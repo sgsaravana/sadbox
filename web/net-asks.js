@@ -21,6 +21,7 @@
              display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
   .ask-req b { color: #cbd5e1; font-weight: 600; }
   .ask-note { margin-top: 6px; color: #8a8aa0; font-size: 12px; }
+  .ask-note b { color: #f5b544; }
   .ask-row { display: flex; align-items: center; gap: 6px; margin-top: 11px; flex-wrap: wrap; }
   .ask-row label { color: #8a8aa0; font-size: 12px; }
   .ask select, .ask button { font: inherit; font-size: 12px; border-radius: 7px; padding: 5px 10px; cursor: pointer; }
@@ -46,16 +47,23 @@
       box.innerHTML = [...asks.values()].map((p) => {
         const plain = p.scheme === "https" ? "" : " (not encrypted)";
         const opts = DURATIONS.map(([v, l]) => `<option value="${v}"${v === (chosen[p.id] || "5m") ? " selected" : ""}>${l}</option>`).join("");
+        // a credential ask: the request carries a proxy secret's placeholder to a host it isn't bound to
+        const head = p.credential ? `🔑 Secret requested` : `⚠ Network request blocked`;
+        const note = p.credential
+          ? `A program in the VM wants to send <b>${esc(p.credential.name)}</b> to this host. Allowing binds the secret to it for that long.`
+          : `A program in the VM is waiting. Allowing covers every request from this project to this host.`;
+        const always = p.credential ? ""
+          : `<button class="always" data-act="block" title="Add a permanent block rule for this host">always block</button>`;
         return `<div class="ask" data-id="${p.id}">
-          <div class="ask-head">⚠ Network request blocked <span class="left" data-left></span></div>
+          <div class="ask-head">${head} <span class="left" data-left></span></div>
           <div class="ask-host">${esc(p.host)}</div>
           <div class="ask-req"><b>${esc(p.method)}</b> ${esc(p.scheme)}://${esc(p.host)}${esc(p.path)}${plain}</div>
-          <div class="ask-note">A program in the VM is waiting. Allowing covers every request from this project to this host.</div>
+          <div class="ask-note">${note}</div>
           <div class="ask-row">
             <button class="allow" data-act="allow">Allow</button>
             <label>for</label><select>${opts}</select>
             <button class="deny" data-act="deny">Deny</button>
-            <button class="always" data-act="block" title="Add a permanent block rule for this host">always block</button>
+            ${always}
           </div>
         </div>`;
       }).join("");

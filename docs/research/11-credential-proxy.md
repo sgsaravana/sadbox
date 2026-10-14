@@ -1,5 +1,8 @@
 # Credential proxy — real secrets never enter the VM
 
+> **Status: built 2026-10-14** on `feature/proxy-credentials` (C1–C5); real-token
+> round 2 pending before merge.
+>
 > A secret can be delivered **via the proxy** instead of into the VM. The VM's
 > env file gets a *placeholder*; the supervisor's MITM proxy swaps the
 > placeholder for the real value on the way out, only toward destinations the
@@ -143,22 +146,101 @@ directly.
 | Sending the real value to an unapproved host | APIs that mint new credentials from the bound one (e.g. OAuth refresh, token-creation endpoints). These return real secrets in bodies |
 | Sending a real value over plain HTTP | |
 
-## Open questions → Spike D
+## Spike D results (2026-10-14)
 
-1. Do common clients accept a placeholder token (prefix/length/checksum checks)?
-2. Exactly which headers and encodings carry the token per client (Bearer, `token`, `Basic`, `x-api-key`, query string)?
-3. Does any client cache, transform, or hash the token locally in a way substitution can't follow?
-4. Does Claude Code authenticate with `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` placeholders end to end (including streaming)?
-5. Do any responses from real APIs carry the token back in headers or bodies?
+Host smoke test + VM round 1 passed; details in
+[`spikes/d-credential-proxy/`](../../spikes/d-credential-proxy/README.md).
+Decisions it settles:
 
-See [`spikes/d-credential-proxy/`](../../spikes/d-credential-proxy/README.md).
+| Question | Answer |
+|---|---|
+| Do clients accept placeholders? | Yes. curl, git, gh, Claude Code (OAuth + API key), Bun `fetch` and Python `requests` all send them without any local format check, including a generic `sadbox-ph-…` and a `ghp_` with a bad checksum |
+| Placeholder format | **Variant (a)**: prefix + `sbx` + random, same length and alphabet |
+| Encodings to handle | Literal substring (covers Bearer, `token`, `x-api-key`) + `Basic` decode/re-encode (git). **No query-string substitution in v1**: detect and log only |
+| Where credentials go | Claude Code: only `api.anthropic.com`, but 8+ paths. gh: REST + GraphQL on `api.github.com`. git: `github.com`. Bindings are host-level by default; path/method narrowing is optional |
+| Local persistence | None observed (gh keeps no `hosts.yml` with `GH_TOKEN`; nothing in `~/.claude*`) |
+| Overhead | 50–500 µs per request |
+| Response redaction | Header redaction works; body echo leaks, as designed for v1 |
 
-## Build plan (after the spike)
+Still open: **round 2** with real short-lived tokens, to confirm upstream 200s
+end to end and check real API responses for echoed credentials. It doesn't
+block C1–C3, but should run before C2 merges.
 
-1. **Schema + model**: `delivery`, `secret_placeholders`, `secret_bindings`; placeholder generator.
-2. **Proxy**: substitution (incl. Basic), unbound → approval, response redaction, 🔑 logging.
-3. **Delivery**: env file writes placeholders; optional workdir `.env` writer.
-4. **API + UI**: delivery toggle, bindings editor + presets, placeholder display, log badge, approval card.
-5. **Tests**: unit (matcher, Basic round-trip, redaction, cross-project placeholder refused,
-   plain-HTTP refused); proxy integration in `src/net/proxy.test.ts`.
-6. **Docs**: README (Secrets + Known limitations), `research/05` §(e) marked built.
+## Build plan
+
+Branch `feature/proxy-credentials`. Each phase is a reviewable commit with tests.
+
+### C1 — Schema + secret model (`src/db.ts`, `src/core/secrets.ts`) ✓ done 2026-10-14
+- `secrets.delivery TEXT NOT NULL DEFAULT 'env'` (add-column check like the
+  existing `projects` columns in `db.ts`); `secret_placeholders`,
+  `secret_bindings` tables as above, `ON DELETE CASCADE` from `secrets`.
+- `src/core/placeholders.ts`: generator (variant (a), from the spike's
+  `placeholder.ts`), `placeholderFor(projectId, secretId)` that creates on first
+  use and is stable after, and purge on project destroy (`purgeProjectSecrets`).
+- Secret create/update API accepts `delivery` and `bindings[]`; validation:
+  `proxy` requires ≥ 1 binding; hosts go through the same `normalizeHost`.
+- Secret values stay write-only. A secret's placeholder is readable (it's not sensitive).
+- Tests: placeholder stability/uniqueness, per-project difference, cascade on secret delete, purge on project destroy.
+
+### C2 — Proxy substitution (`src/net/credentials.ts`, `src/net/proxy.ts`) ✓ done 2026-10-14
+Verified three ways: unit tests (`src/net/credentials.test.ts`), the host
+end-to-end script `spikes/d-credential-proxy/e2e.ts` (10 checks against
+httpbin), and a throwaway VM running curl, git, Claude Code and an approval
+answered over the API. Approval cards in `web/` show credential asks (🔑, the
+secret's name; Block refuses that request only, never a host rule). The
+request-log chip is still C4.
+- `credentials.ts` = productionised `subst.ts`: load this project's
+  placeholders → `{placeholder → secretId}` (cache, invalidated on secret/binding change);
+  `substituteRequest(projectId, scheme, host, path, method, headers)` and
+  `redactResponse(projectId, headers)`; decrypt only on a hit.
+- Hook at the two spike points: after the verdict, before `applyHeaders`.
+- **Unbound placeholder → approval**: extend `approvals.ts` with a `kind:
+  "credential"` (secret name + host). Allow once/1m…/forever. Timed/forever
+  answers create a `secret_bindings` row (with `expires_at`, so add that
+  column). Block → 403 `sadbox: GITHUB_TOKEN is not allowed to <host>`.
+- Plain HTTP with a placeholder → 403 with that reason (fail loudly rather than
+  send a placeholder that just 401s).
+- Placeholder in the URL → logged on the row (`credentialInUrl`), not substituted.
+- `RequestEntry` gets `credentials?: string[]` (secret names injected) and
+  `redacted?: string[]`. Never values.
+- Tests: port the 13 spike unit tests; integration tests against a local TLS
+  upstream (the proxy CA, a stub project like `smoke.ts`), covering bound /
+  unbound-ask / plain-http / Basic / response-redaction / cross-project placeholder.
+
+### C3 — Delivery (`src/core/secrets.ts`)
+- ~~`injectSecrets` writes the placeholder for `delivery='proxy'` secrets.~~ Done in C1,
+  so a proxy secret can never put its real value in a VM, even before C2 lands.
+- Switching a secret between `env` ⇄ `proxy` re-injects every dependent project.
+- Updating a proxy secret's value needs **no** re-injection (next request uses it).
+- Optional action: write the project's placeholder lines into `~/workdir/.env`
+  (append/replace only sadbox-managed keys, never clobber the user's file).
+
+### C4 — UI (`web/index.html`, `web/app.js`, `web/net-asks.js`, `web/style.css`) ✓ done 2026-10-14
+Checked in headless Chrome against a throwaway VM (create via form + preset,
+add/remove bindings, bad-binding error, project-dialog placeholder + copy, log
+chips, credential approval card). Bindings are entered as `host[/path*]` with
+an optional method; header narrowing stays API-only. A credential approval
+defaults to a 5-minute window, never "forever".
+- Secret form: **Delivery** toggle (In VM / Via proxy) + bindings editor
+  (host, optional path/method/header) with presets: GitHub
+  (`api.github.com`, `github.com`, `uploads.github.com`), Anthropic
+  (`api.anthropic.com`), OpenAI (`api.openai.com`).
+- Secret lists show a "via proxy" badge and, per project, the copyable placeholder.
+- Request log: 🔑 `NAME` chip on injected rows, ⚠ on redacted or in-URL rows.
+- Approval card for `kind: "credential"`: "*project* wants to send
+  **GITHUB_TOKEN** to `host`".
+
+### C5 — Docs + cleanup ✓ done 2026-10-14
+The spike harness was retired entirely (not only `proxy.patch`); round 2 now
+runs against the built feature. C3's two unbuilt items (switching delivery on
+an existing secret, which needs a secret-update API, and the workdir `.env`
+writer) moved to the ROADMAP backlog (6a, 6b).
+- README: Secrets section (delivery modes, bindings, what's protected and
+  what's not), Known limitations (response bodies, query strings, OAuth refresh flows).
+- `research/05` §(e) → built; ROADMAP: credential proxy → Shipped.
+- Delete `spikes/d-credential-proxy/proxy.patch` (keep the README as the record).
+
+### Deliberately out of v1
+- Response **body** redaction (backlog item; streaming + gzip work).
+- Query-string and request-body substitution.
+- Credential minting/refresh flows (OAuth refresh tokens, token-creation APIs).

@@ -209,7 +209,7 @@ function matchRule(r: NetRule, req: { host: string; path: string; method: string
   return true;
 }
 
-function hostMatch(pattern: string, host: string): boolean {
+export function hostMatch(pattern: string, host: string): boolean {
   if (pattern === "*") return true;
   if (pattern.startsWith("*.")) {
     const bare = pattern.slice(2);
@@ -218,11 +218,11 @@ function hostMatch(pattern: string, host: string): boolean {
   return host === pattern;
 }
 
-function pathMatch(pattern: string, path: string): boolean {
+export function pathMatch(pattern: string, path: string): boolean {
   if (pattern.endsWith("*")) return path.startsWith(pattern.slice(0, -1));
   return path === pattern;
 }
 
-function normalizeHost(h: string): string {
+export function normalizeHost(h: string): string {
   return h.trim().toLowerCase().replace(/^https?:\/\//, "").split("/")[0].split(":")[0];
 }

@@ -24,7 +24,10 @@ All on Apple silicon + macOS 26, through the Apple `container` driver
 | Auth | Password sign-in with session cookie |
 | Distribution | Release workflow (darwin + linux binaries), `install.sh`, Homebrew formula, version workflow, Caddy LAN deployment guide |
 
-## Next major feature: credential proxy
+## Current: credential proxy — built on `feature/proxy-credentials`, not merged
+
+Remaining before merge: Spike D **round 2** with real, short-lived tokens
+(create them as *via the proxy* secrets in the UI; see the spike README).
 
 **Goal:** a secret can be delivered *via the proxy*. The VM only holds a
 placeholder (in its env / `.env`); the supervisor's MITM proxy swaps the
@@ -36,12 +39,12 @@ Design: [`research/11-credential-proxy.md`](research/11-credential-proxy.md).
 
 | Phase | Scope |
 |---|---|
-| Spike D | Placeholder-only env with real clients (git, gh, Claude Code, SDKs) through a hacked proxy: client acceptance, header encodings (incl. git's `Basic`), response redaction, overhead (`spikes/d-credential-proxy/`) |
-| C1 | Schema: `secrets.delivery`, per-project `secret_placeholders`, `secret_bindings` |
-| C2 | Proxy: substitution (incl. Basic), unbound placeholder → approval prompt, response-header redaction, 🔑 in the request log |
-| C3 | Env file writes placeholders; optional workdir `.env` writer |
-| C4 | UI: delivery toggle, bindings editor with presets, placeholder display |
-| C5 | Tests + README / `research/05` updates |
+| Spike D ✓ | **Passed round 1 (2026-10-14)**; real-token round 2 pending. Placeholder-only env with real clients (git, gh, Claude Code, SDKs) through a hacked proxy: client acceptance, header encodings (incl. git's `Basic`), response redaction, overhead (`spikes/d-credential-proxy/`) |
+| C1 ✓ | Schema: `secrets.delivery`, per-project `secret_placeholders`, `secret_bindings` (detailed tasks in `research/11` § Build plan) |
+| C2 ✓ | Proxy: substitution (incl. Basic), unbound placeholder → approval prompt, response-header redaction, 🔑 in the request log |
+| C3 ½ | Env file writes placeholders ✓ (done in C1). Not built, moved to the backlog: switching an existing secret between env ⇄ proxy, and a workdir `.env` writer |
+| C4 ✓ | UI: delivery toggle, bindings editor with presets, placeholder display |
+| C5 ✓ | README (Secrets, API, Known limitations), `research/05` §(e) marked built, spike harness retired |
 
 ## Then: Linux support
 
@@ -128,5 +131,7 @@ Ordered roughly by priority. Each item is independent of Linux unless noted.
 | 4 | **Non-git local folders** | tar-in copy + tar-out sync-back with `git diff --no-index` preview and backed-up apply (`research/06`). |
 | 5 | **Live secret / proxy-env rotation** | Today only new shells pick changes up. |
 | 6 | **Response body redaction** | Follow-up to the credential proxy, for endpoints that echo auth into bodies (scope set by Spike D). |
+| 6a | **Edit a secret** | No update API today (delete + recreate). Needed for: rotating a value in place, switching delivery env ⇄ proxy (re-inject every dependent VM). |
+| 6b | **Workdir `.env` writer** | Write a project's placeholder lines into `~/workdir/.env` for apps that read `.env` directly (sadbox-managed keys only). |
 | 7 | **DB backup** | Litestream (or periodic snapshot) of the SQLite file (`research/07`). |
 | 8 | **Scale measurements** | RAM/balloon behavior with 10+ idle VMs; workdir copy-in throughput for 1–2 GB repos (open questions #4, #5). |

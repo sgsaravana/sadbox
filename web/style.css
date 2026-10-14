@@ -150,7 +150,48 @@ dialog#picker::backdrop, dialog#psec::backdrop { background: rgba(0, 0, 0, 0.6);
   padding: 5px 0; border-bottom: 1px solid var(--border);
   font-family: ui-monospace, monospace; font-size: 13px;
 }
-#psec-globals { margin-bottom: 6px; }
+#psec-globals { margin-bottom: 6px; flex-direction: column; gap: 6px; }
+
+/* secret delivery: badge, bindings (hosts a proxy secret may go to), placeholder */
+ul#secrets li, .psec-list li { flex-direction: column; align-items: stretch; gap: 4px; }
+.sec-main { display: flex; align-items: center; gap: 8px; }
+.sec-main .danger { margin-left: auto; }
+.sec-name { font-family: ui-monospace, monospace; }
+.dbadge { font: 600 10px system-ui, sans-serif; letter-spacing: 0.4px; text-transform: uppercase; border-radius: 5px; padding: 1px 6px; }
+.dbadge.proxy { background: #143326; color: var(--ok); }
+.dbadge.env { background: #1d1d2a; color: var(--dim); }
+.bindings { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; }
+.bchip {
+  display: inline-flex; align-items: center; gap: 4px; padding: 1px 2px 1px 8px;
+  background: #0e0e15; border: 1px solid var(--border); border-radius: 999px;
+  font-family: ui-monospace, monospace; font-size: 12px;
+}
+.bchip.expired { opacity: 0.5; text-decoration: line-through; }
+.bchip .link-del { padding: 0 6px; }
+.bnote { color: var(--dim); font-family: system-ui, sans-serif; font-size: 11px; }
+.link-add { background: none; border: none; color: var(--accent); padding: 2px 4px; font-size: 12px; cursor: pointer; }
+.bind-add { display: flex; gap: 6px; align-items: center; flex-basis: 100%; }
+.bind-add input { flex: 1; width: auto; margin: 0; font-size: 12px; padding: 4px 8px; }
+.bind-add select, .bind-add button { font-size: 12px; padding: 3px 8px; }
+.phline { font-size: 12px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.phline code { font-size: 12px; color: var(--ok); word-break: break-all; }
+.psec-g { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.psec-g .phline { flex-basis: 100%; padding-left: 22px; }
+.secret-form .row:first-child { margin-top: 0; }
+.secret-form .row input { width: auto; flex: 1; margin: 0; }
+.secret-form select, .bind-add select {
+  margin: 0; padding: 6px 8px; background: #0e0e15; color: var(--text);
+  border: 1px solid var(--border); border-radius: 7px; font-size: 12px;
+}
+.secret-form .presets button { font-size: 12px; padding: 3px 9px; }
+.secret-form input[name=hosts] { flex: 1; }
+.secret-form p.hint { margin: 6px 0 0; font-size: 12px; }
+
+/* proxy secrets on a request-log row */
+.cchip { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 5px; font-size: 11px; white-space: nowrap; }
+.cchip.in { background: #143326; color: var(--ok); }
+.cchip.red { background: #1d2f57; color: #b9caf0; }
+.cchip.url { background: #3a2a10; color: var(--warn); }
 .picker-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .picker-head button { padding: 2px 9px; }
 .picker-path {
@@ -327,6 +368,9 @@ dd .spinner { display: inline-block; vertical-align: -3px; margin-right: 4px; }
 .approval-req .host { color: var(--text); font-weight: 600; }
 .approval-req .path { color: var(--dim); font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
 .approval-actions { display: flex; align-items: center; gap: 6px; }
+/* a credential ask: the secret's name heads the card, full width */
+.approval-cred { flex-basis: 100%; color: var(--dim); font-size: 12px; }
+.approval-cred b { color: #f5b544; }
 .approval-actions .dur, .approval-actions button { padding: 5px 10px; font-size: 12px; }
 .approval-actions .dur { background: #0e0e15; color: var(--text); border: 1px solid var(--border); border-radius: 7px; }
 .badge {

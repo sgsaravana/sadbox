@@ -5,7 +5,7 @@ import { config } from "../config";
 import { staticRoutes, aceFiles } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
-import { assignSecrets, createGlobalSecret, createProjectSecret, deleteSecret, injectSecrets, listGlobalSecrets, projectSecretView } from "../core/secrets";
+import { addBinding, assignSecrets, createGlobalSecret, createProjectSecret, deleteBinding, deleteSecret, injectSecrets, listGlobalSecrets, projectSecretView } from "../core/secrets";
 import { connectSyncFolder, createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject, setProjectMemory, startProject, stopProject } from "../core/projects";
 import { syncStatus, syncProject } from "../core/sync";
 import { terminalLinks } from "../core/links";
@@ -148,7 +148,7 @@ export function startServer() {
         }
         if (m && req.method === "POST") {         // create project-specific secret
           const b = await req.json();
-          const s = createProjectSecret(m[1], b.name, b.value);
+          const s = createProjectSecret(m[1], b.name, b.value, { delivery: b.delivery, bindings: b.bindings });
           try {
             await injectSecrets(m[1]);
           } catch (e) {
@@ -344,11 +344,22 @@ export function startServer() {
         if (p === "/api/secrets" && req.method === "GET") return json(listGlobalSecrets());
         if (p === "/api/secrets" && req.method === "POST") {
           const b = await req.json();
-          return json(createGlobalSecret(b.name, b.value), 201);
+          return json(createGlobalSecret(b.name, b.value, { delivery: b.delivery, bindings: b.bindings }), 201);
         }
         m = p.match(/^\/api\/secrets\/([\w-]+)$/);
         if (m && req.method === "DELETE") {
           await deleteSecret(m[1]);
+          return json({ ok: true });
+        }
+        // bindings of a proxy-delivered secret (global or project-specific)
+        m = p.match(/^\/api\/secrets\/([\w-]+)\/bindings$/);
+        if (m && req.method === "POST") {
+          const b = await req.json();
+          return json(addBinding(m[1], { host: b.host, path: b.path, method: b.method, header: b.header, expiresAt: b.expiresAt }), 201);
+        }
+        m = p.match(/^\/api\/secrets\/([\w-]+)\/bindings\/([\w-]+)$/);
+        if (m && req.method === "DELETE") {
+          deleteBinding(m[1], m[2]);
           return json({ ok: true });
         }
       } catch (e) {

@@ -119,6 +119,42 @@ db.run(`
     status TEXT NOT NULL DEFAULT 'pending',   -- pending|injected|stale
     PRIMARY KEY (project_id, secret_id)
   )`);
+// delivery: how a secret reaches a VM (docs/research/11).
+//   env    the real value is written to the VM's env file
+//   proxy  the VM gets a placeholder; the egress proxy swaps in the real value
+//          on requests to the secret's bindings, so it never enters the VM
+{
+  const has = db.query<{ name: string }, []>("PRAGMA table_info(secrets)").all()
+    .some((c) => c.name === "delivery");
+  if (!has) db.run("ALTER TABLE secrets ADD COLUMN delivery TEXT NOT NULL DEFAULT 'env'");
+}
+// One placeholder per (project, proxy secret), stable across restarts and
+// rebuilds, different in every VM — a placeholder copied out of one VM is
+// worthless from another. No cascade from projects: project rows are soft-
+// deleted, so purgeProjectSecrets clears these explicitly.
+db.run(`
+  CREATE TABLE IF NOT EXISTS secret_placeholders (
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    secret_id TEXT NOT NULL REFERENCES secrets(id) ON DELETE CASCADE,
+    placeholder TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (project_id, secret_id)
+  )`);
+// Where a proxy secret's real value may be sent. Matched like net_rules:
+// host exact or *.suffix (never a bare *), optional path (exact | prefix*),
+// method and header name. expires_at drives time-boxed approvals.
+db.run(`
+  CREATE TABLE IF NOT EXISTS secret_bindings (
+    id TEXT PRIMARY KEY,
+    secret_id TEXT NOT NULL REFERENCES secrets(id) ON DELETE CASCADE,
+    host TEXT NOT NULL,
+    path TEXT,                                 -- exact | prefix* | NULL = any
+    method TEXT,                               -- GET/POST/... | NULL = any
+    header TEXT,                               -- lowercased | NULL = any header
+    expires_at TEXT,                           -- ISO 8601 | NULL = permanent
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+db.run("CREATE INDEX IF NOT EXISTS secret_bindings_secret ON secret_bindings(secret_id)");
 db.run(`
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,

@@ -234,13 +234,32 @@
       <section id="view-secrets" class="view" hidden>
         <div class="section-head"><h1>Global secrets</h1></div>
         <p class="hint">Shared secrets you can assign to any number of projects.
-          Project-specific secrets are managed from each project's <em>Secrets…</em> button.</p>
+          Project-specific secrets are managed from each project's <em>Secrets…</em> button.
+          A secret is delivered <b>in the VM</b> (its value in the VM's env) or <b>via the proxy</b>
+          (the VM only ever sees a placeholder).</p>
         <div class="panel">
           <ul id="secrets"></ul>
-          <form id="secret-form" class="row">
-            <input name="name" required placeholder="ANTHROPIC_API_KEY" pattern="[A-Z][A-Z0-9_]*">
-            <input name="value" required type="password" placeholder="value (write-only)">
-            <button type="submit" class="primary">Add</button>
+          <form id="secret-form" class="secret-form">
+            <div class="row">
+              <input name="name" required placeholder="ANTHROPIC_API_KEY" pattern="[A-Z][A-Z0-9_]*">
+              <input name="value" required type="password" placeholder="value (write-only)">
+              <select name="delivery" title="How the secret reaches the VM">
+                <option value="env">in the VM (env)</option>
+                <option value="proxy">via the proxy (placeholder)</option>
+              </select>
+              <button type="submit" class="primary">Add</button>
+            </div>
+          <div class="row proxy-only" hidden>
+            <input name="hosts" placeholder="hosts it may go to — api.github.com, github.com, *.example.com/api/*">
+          </div>
+          <div class="row proxy-only presets" hidden>
+            <span class="hint">presets:</span>
+            <button type="button" data-preset="github">GitHub</button>
+            <button type="button" data-preset="anthropic">Anthropic</button>
+            <button type="button" data-preset="openai">OpenAI</button>
+          </div>
+          <p class="hint proxy-only" hidden>The VM gets a placeholder that looks like the token. The proxy swaps in the
+            real value only over https, only to these hosts — it never enters the VM. Any other host asks first.</p>
           </form>
         </div>
       </section>
@@ -254,10 +273,27 @@
     </div>
     <h3 class="psec-h">Project-specific <span class="hint">— live only in this project, destroyed with it</span></h3>
     <ul id="psec-own" class="psec-list"></ul>
-    <form id="psec-add" class="row">
-      <input name="name" required placeholder="MY_TOKEN" pattern="[A-Z][A-Z0-9_]*">
-      <input name="value" required type="password" placeholder="value (write-only)">
-      <button type="submit" class="primary">Add</button>
+    <form id="psec-add" class="secret-form">
+      <div class="row">
+        <input name="name" required placeholder="MY_TOKEN" pattern="[A-Z][A-Z0-9_]*">
+        <input name="value" required type="password" placeholder="value (write-only)">
+        <select name="delivery" title="How the secret reaches the VM">
+          <option value="env">in the VM (env)</option>
+          <option value="proxy">via the proxy (placeholder)</option>
+        </select>
+        <button type="submit" class="primary">Add</button>
+      </div>
+      <div class="row proxy-only" hidden>
+        <input name="hosts" placeholder="hosts it may go to — api.github.com, github.com, *.example.com/api/*">
+      </div>
+      <div class="row proxy-only presets" hidden>
+        <span class="hint">presets:</span>
+        <button type="button" data-preset="github">GitHub</button>
+        <button type="button" data-preset="anthropic">Anthropic</button>
+        <button type="button" data-preset="openai">OpenAI</button>
+      </div>
+      <p class="hint proxy-only" hidden>The VM gets a placeholder that looks like the token. The proxy swaps in the
+        real value only over https, only to these hosts — it never enters the VM. Any other host asks first.</p>
     </form>
     <h3 class="psec-h">Assigned global secrets</h3>
     <div id="psec-globals" class="checks"></div>

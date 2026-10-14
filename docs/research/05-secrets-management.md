@@ -119,17 +119,20 @@ MMDS equivalent**; its idiom is vsock (`vminitd` GRPC). A vsock-based (c) is por
 both hypervisors; MMDS is not.
 **Use for**: nothing primary. Revisit only if we're Firecracker-only and want zero guest agents.
 
-### (e) Egress credential-injection proxy (deferred, note for the roadmap)
+### (e) Egress credential-injection proxy (**built 2026-10-14** — see `11-credential-proxy.md`)
 The 2025–26 state of the art for untrusted agents (Cloudflare Sandbox auth, agentgateway,
 Hermes iron-proxy, k8s agent-sandbox #1045): the guest holds *placeholder* strings; all
 egress is forced through a host-side proxy that swaps placeholders for real values on the
 wire to approved destinations. The only method where exfiltration of what the agent can read
 yields nothing. Requires TLS interception or per-API awareness — real engineering. Design the
 data model so a secret can later be flagged `delivery = proxy` (see §6), but don't build it now.
+*Update:* built as `secrets.delivery = 'proxy'` + per-project placeholders + bindings, on
+the MITM proxy from `10-network-proxy.md`; design, spike results and limits in
+[`11-credential-proxy.md`](11-credential-proxy.md).
 
 **Summary**: (b) files-on-tmpfs as the default; (c) vsock fetch for the Claude credential
 (via `apiKeyHelper`) and later for anything rotation-sensitive; (a) allowed as sugar;
-(d) skipped; (e) roadmap.
+(d) skipped; (e) built (`delivery = 'proxy'`).
 
 ---
 

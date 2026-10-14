@@ -23,7 +23,9 @@ plus a per-project detail view with live CPU/memory/disk/network usage and
 tmux state. Every VM's egress is routed through the supervisor as a **filtering
 MITM proxy** — block-by-default with interactive, time-boxed approvals, allow/
 block + header-rewrite rules (global or per-project), and a live request log on
-the detail view. See `docs/research/` for the design research and `spikes/` for
+the detail view. A secret can be delivered **via the proxy**: the VM only ever
+holds a placeholder, and the proxy swaps in the real token on the way out to the
+hosts that secret is allowed to reach. See `docs/research/` for the design research and `spikes/` for
 the de-risk experiments behind each piece, and [`docs/ROADMAP.md`](docs/ROADMAP.md)
 for what's next.
 
@@ -138,8 +140,9 @@ with `sadbox passwd`. Then, in the browser:
 
 1. **Add a Claude credential** under **Secrets**: run `claude setup-token` on
    your Mac and save the result as `CLAUDE_CODE_OAUTH_TOKEN` (or save an
-   `ANTHROPIC_API_KEY`). Skip this if you will use another agent or log in
-   inside the VM.
+   `ANTHROPIC_API_KEY`). Choose **via the proxy** and the **Anthropic** preset
+   so the real token never enters the VM. Skip this if you will use another
+   agent or log in inside the VM.
 2. **Create a project** under **Projects**: give it a name and either a local
    folder that is a git repository with at least one commit, or a git URL to
    clone. Tick the secret you just added.
@@ -322,7 +325,24 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   number of projects; **project-specific** secrets live in one project and are
   deleted with it (overriding a global of the same name). All encrypted at rest
   (AES-256-GCM) in SQLite, injected as a 0600 env file in the guest before tmux
-  starts, write-only in the API/UI.
+  starts, write-only in the API/UI. Each secret has a **delivery**:
+  - **in the VM** (`env`): the real value goes into the env file. Anything in
+    the VM — the agent included — can read it.
+  - **via the proxy** (`proxy`): the env file gets a **placeholder** shaped like
+    the token (`ghp_sbx…`, same prefix and length), different in every VM and
+    stable across restarts. The secret lists the hosts it may be sent to
+    (**bindings**: `api.github.com`, `*.example.com`, optionally a path like
+    `/v1/*`, a method, a header; presets for GitHub, Anthropic, OpenAI). When a
+    request from the VM carries the placeholder in a header — `Bearer`,
+    `token`, `x-api-key`, or inside git's `Basic` auth — over https to a bound
+    host, the proxy swaps in the real value. A real value showing up in a
+    response header is swapped back to the placeholder. Sending a placeholder
+    to any other host **asks first** (🔑 approval: allowing for a window or
+    always adds a binding); over plain http it is refused with a 403. The
+    request log shows which secret was used (🔑 name, never the value).
+    Changing the value takes effect on the next request — nothing to re-inject.
+    Tested with curl, git, gh, Claude Code (OAuth token and API key), Bun
+    `fetch` and Python `requests` (`spikes/d-credential-proxy/`).
 - **Git setup** (optional, at create): give a remote URL + access token and the
   project's `origin` is pointed there with the token stored via git's credential
   helper (`~/.git-credentials`, 0600) so the agent can push/pull. The token is
@@ -433,7 +453,8 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 | PUT | `/api/projects/:id/memory` | `{memoryMB}` — change this VM's memory; a running VM is restarted to take it (disk kept) |
 | PUT/DELETE | `/api/projects/:id/sync-folder` | connect (`{path}`) / disconnect a local folder for a project cloned from a git URL |
 | GET/PUT/POST | `/api/projects/:id/secrets` | view / assign globals / add project-specific |
-| GET/POST | `/api/secrets`, DELETE `/api/secrets/:id` | global secret store |
+| GET/POST | `/api/secrets`, DELETE `/api/secrets/:id` | global secret store; POST (here and on a project) takes `{name, value, delivery?: "env"\|"proxy", bindings?: [{host, path?, method?, header?, expiresAt?}]}` |
+| POST/DELETE | `/api/secrets/:id/bindings`, `/api/secrets/:id/bindings/:bid` | add / remove a host a proxy secret may be sent to |
 | GET/PUT | `/api/settings` | default VM resources (CPUs, memory, disk) for new projects |
 | GET | `/api/toolchain` | agents/tools + versions baked into the base image (`?refresh=1` to re-probe) |
 | GET | `/api/fs/dirs?path=` | folder picker (lists subdirs, flags git repos) |
@@ -568,7 +589,17 @@ Notes:
 - Apple silicon + macOS 26 only (see [Supported platforms](#supported-platforms));
   the Linux/Cloud Hypervisor driver and docker-compose packaging are designed
   (`docs/research/02`) but not built.
-- Secret rotation reaches new shells/panes only (env-file semantics).
+- Secret rotation reaches new shells/panes only (env-file semantics) — except
+  for secrets delivered **via the proxy**, which take effect on the next request.
+- Proxy-delivered secrets protect the **token string**, not its use: the agent
+  can still call the bound hosts with it, so prefer narrow bindings and
+  least-privilege tokens. Only request **headers** are swapped (not the URL or
+  body; a placeholder in the URL is flagged in the log), and only response
+  **headers** are scrubbed — an endpoint that echoes request headers into its
+  response *body* would show the real value. Flows that mint new credentials
+  (OAuth refresh, token-creation APIs) hand the VM real tokens in their bodies.
+  Bindings belong to the secret, so a binding added from one project's approval
+  applies wherever that secret is assigned.
 - Egress is HTTP(S)-only, through the proxy; tools find it via
   `HTTP(S)_PROXY` (curl, git, bun, pip do; Node's built-in `fetch` does with
   `NODE_USE_ENV_PROXY=1`, which is set). A program that ignores those variables
