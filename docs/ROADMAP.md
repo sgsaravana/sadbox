@@ -1,7 +1,7 @@
 # sadbox — Roadmap
 
 > What has shipped, what is next, and the plan for Linux support.
-> Last updated 2026-10-14. Design background lives in [`research/`](research/README.md).
+> Last updated 2026-10-15. Design background lives in [`research/`](research/README.md).
 
 ## Shipped (v0, macOS)
 
@@ -24,10 +24,12 @@ All on Apple silicon + macOS 26, through the Apple `container` driver
 | Auth | Password sign-in with session cookie |
 | Distribution | Release workflow (darwin + linux binaries), `install.sh`, Homebrew formula, version workflow, Caddy LAN deployment guide |
 
-## Current: credential proxy — built on `feature/proxy-credentials`, not merged
+## Current: credential proxy + network controls — built on `feature/proxy-credentials`, not merged
 
 Remaining before merge: Spike D **round 2** with real, short-lived tokens
 (create them as *via the proxy* secrets in the UI; see the spike README).
+Merge `feature/proxy` into `main` first, then this branch. In `acceptClient`,
+the cutoff check must stay before link handling.
 
 **Goal:** a secret can be delivered *via the proxy*. The VM only holds a
 placeholder (in its env / `.env`); the supervisor's MITM proxy swaps the
@@ -45,6 +47,16 @@ Design: [`research/11-credential-proxy.md`](research/11-credential-proxy.md).
 | C3 ½ | Env file writes placeholders ✓ (done in C1). Not built, moved to the backlog: switching an existing secret between env ⇄ proxy, and a workdir `.env` writer |
 | C4 ✓ | UI: delivery toggle, bindings editor with presets, placeholder display |
 | C5 ✓ | README (Secrets, API, Known limitations), `research/05` §(e) marked built, spike harness retired |
+
+### Also on this branch: network panel and controls
+
+| Item | What it does |
+|---|---|
+| Network panel redesign ✓ | Project details → Network has three tabs: **Activity** (by host or all requests, filter, blocked-only), **Rules** (this project / all projects, expired hidden by default) and **Header rules**. Counts sit on the tabs, and the tab and view choices are remembered |
+| Rule actions from activity ✓ | Allow / block / unblock a host from the activity list, for this project or all projects |
+| Move rules between scopes ✓ | Move a rule between *this project* and *all projects* (`PATCH /api/projects/:id/net/rules/:rid`). If the target scope already has the same rule, the moved copy is dropped instead of duplicated |
+| Internet cutoff ✓ | One-click switch on the project page that blocks all egress for the VM: CONNECT and HTTP are refused before rules are checked, and pending approvals are denied. Persisted (`projects.net_cutoff`), shown as "internet off" on the status card (`PUT /api/projects/:id/network`) |
+| Persistent request log ✓ | Requests are stored in SQLite `net_requests` (metadata and secret names only, never headers, bodies or values), batched every second and flushed on shutdown. Kept for **≥ 7 days** (`SADBOX_NET_LOG_DAYS`), pruned hourly. Activity can show the last 24 hours or 7 days by host, and "Load older requests" pages back through history. The log survives restarts and rebuilds |
 
 ## Then: Linux support
 

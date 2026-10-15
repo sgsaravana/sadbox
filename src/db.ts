@@ -217,6 +217,33 @@ db.run("CREATE INDEX IF NOT EXISTS net_header_rules_lookup ON net_header_rules(s
   if (!has) db.run("ALTER TABLE net_header_rules ADD COLUMN value_secret_id TEXT");
 }
 
+// Every request a VM made through the proxy (what the Network panel's Activity
+// shows), kept for config.netLogDays and pruned hourly (net/events.ts). Names
+// of secrets only — never values; paths can hold a placeholder, never a real one.
+db.run(`
+  CREATE TABLE IF NOT EXISTS net_requests (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    rid TEXT NOT NULL,                         -- the live feed's id for the row
+    project_id TEXT NOT NULL,
+    ts INTEGER NOT NULL,                       -- ms since epoch, when the request arrived
+    method TEXT NOT NULL,
+    scheme TEXT NOT NULL,
+    host TEXT NOT NULL,
+    path TEXT NOT NULL,
+    status INTEGER,
+    decision TEXT NOT NULL,                    -- allowed | blocked
+    rule_id TEXT,
+    req_bytes INTEGER NOT NULL DEFAULT 0,
+    resp_bytes INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    credentials TEXT,                          -- JSON array of secret names swapped in
+    redacted TEXT,                             -- JSON array of secret names scrubbed from the response
+    credential_in_url TEXT                     -- JSON array of secret names whose placeholder was in the URL
+  )`);
+db.run("CREATE INDEX IF NOT EXISTS net_requests_project_ts ON net_requests(project_id, ts)");
+db.run("CREATE INDEX IF NOT EXISTS net_requests_ts ON net_requests(ts)");
+
 // Inbound port forwards: a listener on the supervisor host (host_port) piped to
 // a port inside one project's VM (guest_port). host_port is unique across all
 // projects — it is a real socket on this machine.

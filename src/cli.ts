@@ -113,7 +113,7 @@ Usage: sadbox <command>
   help       Show this help
 
 Env: SADBOX_PORT, SADBOX_HOST, SADBOX_PASSWORD, SADBOX_AUTH=off, SADBOX_NETWORK, SADBOX_PROXY_PORT, SADBOX_PROXY_HOST,
-     SADBOX_FORWARD_HOST, SADBOX_DATA, SADBOX_BASE_IMAGE`;
+     SADBOX_FORWARD_HOST, SADBOX_DATA, SADBOX_BASE_IMAGE, SADBOX_NET_LOG_DAYS (network log retention, ≥ 7)`;
 
 export async function main(argv: string[]) {
   const cmd = argv[2] ?? "serve";

@@ -27,7 +27,7 @@ import { ensureCA, certForHost, leafKey, caCertPem, caReady } from "./ca";
 import { evaluate, applyHeaders } from "./rules";
 import { requestApproval } from "./approvals";
 import { inSetup } from "./setup";
-import { recordRequest, type RequestEntry } from "./events";
+import { recordRequest, startRequestLog, type RequestEntry } from "./events";
 import { redactResponse, substituteRequest, type SwapResult } from "./credentials";
 import { CUTOFF_MESSAGE, isCutOff } from "./cutoff";
 
@@ -508,6 +508,7 @@ export async function startProxy(): Promise<void> {
   if (started) return;
   await ensureCA(); // throws if openssl is missing -> caller logs, UI/API still run
   started = true;
+  startRequestLog(); // persisted request log: prune to the retention window, hourly
 
   httpServer = http.createServer(makeHandler("http"));
   await new Promise<void>((r) => httpServer!.listen(0, "127.0.0.1", () => r()));

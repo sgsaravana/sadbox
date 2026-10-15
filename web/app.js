@@ -981,14 +981,14 @@ async function renderPorts(id) {
 // ---- network activity panel (per-project egress proxy) ----
 let netES = null;
 let netId = null;
-let netModel = { requests: [], pending: [], rules: [], headerRules: [], cutoff: false, isolated: null };
+let netModel = { requests: [], pending: [], rules: [], headerRules: [], cutoff: false, isolated: null, older: [], noOlder: false, summary: null };
 let netOwnSecrets = []; // this project's own secrets (for header-value picker)
 const DUR_OPTS = [["once", "once"], ["1m", "1 min"], ["5m", "5 min"], ["30m", "30 min"], ["60m", "60 min"], ["forever", "forever"]];
 
 function openNet(id) {
   closeNet();
   netId = id;
-  netModel = { requests: [], pending: [], rules: [], headerRules: [], cutoff: false, isolated: null };
+  netModel = { requests: [], pending: [], rules: [], headerRules: [], cutoff: false, isolated: null, older: [], noOlder: false, summary: null };
   netOwnSecrets = [];
   const el = $("#detail-net");
   if (!el) return;
@@ -1047,6 +1047,7 @@ function connectNetStream(id) {
     } else if (ev.type === "request") {
       netModel.requests.push(ev.entry);
       if (netModel.requests.length > 500) netModel.requests.shift();
+      summaryStale();
       renderLog();
     } else if (ev.type === "pending") {
       if (!netModel.pending.some((p) => p.id === ev.pending.id)) netModel.pending.push(ev.pending);
@@ -1080,7 +1081,7 @@ async function reloadNetRules() {
 
 // UI state for the Network panel, remembered per browser (a convenience only)
 const NET_UI_KEY = "sadbox.net.ui";
-let netUi = { tab: "activity", mode: "hosts", filter: "", blockedOnly: false, showExpired: false };
+let netUi = { tab: "activity", mode: "hosts", range: "recent", filter: "", blockedOnly: false, showExpired: false };
 try { Object.assign(netUi, JSON.parse(localStorage.getItem(NET_UI_KEY) || "{}"), { filter: "" }); } catch {}
 const saveNetUi = () => { try { localStorage.setItem(NET_UI_KEY, JSON.stringify({ ...netUi, filter: undefined })); } catch {} };
 
@@ -1117,12 +1118,18 @@ function netShellHtml() {
           <button type="button" data-net-mode="hosts" class="${netUi.mode === "hosts" ? "on" : ""}">By host</button>
           <button type="button" data-net-mode="requests" class="${netUi.mode === "requests" ? "on" : ""}">All requests</button>
         </div>
+        <select id="net-range" title="By host over the live window, or over the stored log"${netUi.mode === "hosts" ? "" : " hidden"}>
+          <option value="recent"${netUi.range === "recent" ? " selected" : ""}>recent</option>
+          <option value="24h"${netUi.range === "24h" ? " selected" : ""}>last 24 hours</option>
+          <option value="7d"${netUi.range === "7d" ? " selected" : ""}>last 7 days</option>
+        </select>
         <input id="net-filter" type="search" placeholder="filter host or path">
         <label class="net-chk"><input type="checkbox" id="net-blocked-only"${netUi.blockedOnly ? " checked" : ""}> blocked only</label>
         <span class="grow"></span>
         <span id="net-activity-note" class="hint"></span>
       </div>
       <div class="net-log-wrap"><table class="net-log" id="net-activity"></table></div>
+      <button type="button" class="link-add" id="net-older" hidden>load older requests</button>
     </div>
 
     <div class="net-pane" data-pane="rules"${netUi.tab === "rules" ? "" : " hidden"}>
@@ -1258,25 +1265,98 @@ function renderLog() { // (kept name: called whenever requests or rules change)
   requestAnimationFrame(() => { activityQueued = false; renderActivity(); renderNetCounts(); });
 }
 
+const RANGE_MS = { "24h": 86_400_000, "7d": 7 * 86_400_000 };
+const RANGE_LABEL = { "24h": "in the last 24 hours", "7d": "in the last 7 days" };
+const fmtCount = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
 function activityRows() {
   const q = netUi.filter.trim().toLowerCase();
-  return netModel.requests.filter((r) =>
+  return [...netModel.older, ...netModel.requests].filter((r) =>
     (!netUi.blockedOnly || r.decision === "blocked") &&
     (!q || (r.host + r.path).toLowerCase().includes(q)));
+}
+
+/** Per-host groups: from the live rows, or (24h / 7d) from the stored log's summary. */
+function hostGroups() {
+  const q = netUi.filter.trim().toLowerCase();
+  if (netUi.range !== "recent") {
+    return (netModel.summary || [])
+      .filter((h) => (!netUi.blockedOnly || h.blocked) && (!q || h.host.toLowerCase().includes(q)))
+      .map((h) => ({ host: h.host, n: h.requests, ok: h.ok, err: h.errors, blocked: h.blocked, last: h.last,
+        creds: new Set(h.credentials), lastErr: h.lastError || "" }));
+  }
+  const by = new Map();
+  for (const r of activityRows()) {
+    let g = by.get(r.host);
+    if (!g) by.set(r.host, g = { host: r.host, n: 0, ok: 0, err: 0, blocked: 0, last: 0, creds: new Set(), lastErr: "" });
+    g.n++; g.last = Math.max(g.last, r.ts);
+    if (r.decision === "blocked") { g.blocked++; if (r.error) g.lastErr = r.error; }
+    else if (r.status != null && r.status < 400) g.ok++; else g.err++;
+    for (const c of r.credentials || []) g.creds.add(c);
+  }
+  return [...by.values()].sort((a, b) => b.last - a.last);
 }
 
 function renderActivity() {
   const el = $("#net-activity");
   if (!el) return;
-  const rows = activityRows();
-  const total = netModel.requests.length;
-  $("#net-activity-note").textContent = total
-    ? `${rows.length === total ? total : `${rows.length} of ${total}`} recent request${total === 1 ? "" : "s"}` : "";
-  if (!rows.length) {
-    el.innerHTML = `<tbody><tr><td class="empty">${total ? "nothing matches" : "no requests yet — traffic from the VM shows up here live"}</td></tr></tbody>`;
+  const byHost = netUi.mode === "hosts";
+  $("#net-range").hidden = !byHost;
+  const older = $("#net-older");
+  older.hidden = byHost || netModel.noOlder || !netModel.requests.length;
+  if (byHost && netUi.range !== "recent" && !netModel.summary) {
+    loadSummary();
+    el.innerHTML = `<tbody><tr><td class="empty">loading…</td></tr></tbody>`;
     return;
   }
-  el.innerHTML = netUi.mode === "requests" ? requestsTable(rows) : hostsTable(rows);
+  const groups = byHost ? hostGroups() : null;
+  const rows = byHost ? null : activityRows();
+  const shown = byHost ? groups.length : rows.length;
+  if (byHost && netUi.range !== "recent") {
+    const total = (netModel.summary || []).reduce((a, h) => a + h.requests, 0);
+    $("#net-activity-note").textContent = `${fmtCount(total, "request")} to ${fmtCount((netModel.summary || []).length, "host")} ${RANGE_LABEL[netUi.range]}`;
+  } else {
+    const total = netModel.older.length + netModel.requests.length;
+    $("#net-activity-note").textContent = total ? `${byHost ? fmtCount(shown, "host") + " · " : ""}${fmtCount(total, "recent request")}` : "";
+  }
+  if (!shown) {
+    const any = netModel.requests.length || (netModel.summary || []).length;
+    el.innerHTML = `<tbody><tr><td class="empty">${any ? "nothing matches" : "no requests yet — traffic from the VM shows up here live"}</td></tr></tbody>`;
+    return;
+  }
+  el.innerHTML = byHost ? hostsTable(groups) : requestsTable(rows);
+}
+
+// stored-log summary for 24h / 7d: fetched on demand, refreshed (at most every 5 s) as traffic arrives
+let summaryAt = 0, summaryTimer = null;
+async function loadSummary() {
+  const range = netUi.range, id = netId;
+  if (range === "recent" || !id) return;
+  summaryAt = Date.now();
+  try {
+    const s = await api(`/api/projects/${id}/net/hosts?since=${Date.now() - RANGE_MS[range]}`);
+    if (netId === id && netUi.range === range) { netModel.summary = s; renderActivity(); renderNetCounts(); }
+  } catch {}
+}
+function summaryStale() {
+  if (netUi.range === "recent" || netUi.mode !== "hosts") { netModel.summary = null; return; }
+  if (summaryTimer) return;
+  summaryTimer = setTimeout(() => { summaryTimer = null; loadSummary(); }, Math.max(0, 5000 - (Date.now() - summaryAt)));
+}
+
+async function loadOlder(btn) {
+  const first = netModel.older[0] || netModel.requests[0];
+  if (!first) return;
+  btn.disabled = true;
+  try {
+    const { requests } = await api(`/api/projects/${netId}/net/requests?before=${first.ts}&limit=200`);
+    const seen = new Set([...netModel.older, ...netModel.requests].map((r) => r.id));
+    const fresh = requests.filter((r) => !seen.has(r.id));
+    netModel.older = [...fresh, ...netModel.older];
+    if (requests.length < 200) netModel.noOlder = true;
+    renderActivity();
+  } catch (err) { alert(err.message); }
+  btn.disabled = false;
 }
 
 function accessCell(host) {
@@ -1308,17 +1388,11 @@ function hostActions(host) {
     + btn(`data-host-rule="allow" data-host="${h}" data-scope="global"`, "Allow for all", `Allow ${h} for every project`);
 }
 
-function hostsTable(rows) {
-  const by = new Map();
-  for (const r of rows) {
-    let g = by.get(r.host);
-    if (!g) by.set(r.host, g = { host: r.host, n: 0, ok: 0, err: 0, blocked: 0, last: 0, bytes: 0, creds: new Set(), lastErr: "" });
-    g.n++; g.last = Math.max(g.last, r.ts); g.bytes += r.respBytes || 0;
-    if (r.decision === "blocked") { g.blocked++; if (r.error) g.lastErr = r.error; }
-    else if (r.status != null && r.status < 400) g.ok++; else g.err++;
-    for (const c of r.credentials || []) g.creds.add(c);
-  }
-  const groups = [...by.values()].sort((a, b) => b.last - a.last);
+// a time of day, with the date in front once it isn't today (the log keeps a week)
+const fmtWhen = (ts) => new Date(ts).toDateString() === new Date().toDateString() ? fmtClock(ts)
+  : `${new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${fmtClock(ts).slice(0, 5)}`;
+
+function hostsTable(groups) {
   return `<thead><tr><th>host</th><th class="num">requests</th><th>results</th><th>access</th><th>last</th><th></th></tr></thead>
     <tbody>${groups.map((g) => {
       const res = [g.ok && `<span class="s2xx">${g.ok} ok</span>`, g.err && `<span class="s4xx">${g.err} error</span>`,
@@ -1329,20 +1403,21 @@ function hostsTable(rows) {
         <td class="mono num">${g.n}</td>
         <td class="res">${res}</td>
         <td class="acc-cell">${accessCell(g.host)}</td>
-        <td class="mono">${fmtClock(g.last)}</td>
+        <td class="mono">${fmtWhen(g.last)}</td>
         <td class="rowact">${hostActions(g.host)}</td>
       </tr>`;
     }).join("")}</tbody>`;
 }
 
 function requestsTable(rows) {
-  const shown = rows.slice(-150).reverse();
+  // the live window, plus whatever older pages were loaded
+  const shown = rows.slice(-(150 + netModel.older.length)).reverse();
   return `<thead><tr><th>time</th><th>method</th><th>host / path</th><th>status</th><th>decision</th><th class="num">size</th></tr></thead>
     <tbody>${shown.map((r) => {
       const s = r.status;
       const sc = s == null ? "" : s >= 500 ? "s5xx" : s >= 400 ? "s4xx" : s >= 300 ? "s3xx" : "s2xx";
       return `<tr class="dec-${r.decision}">
-        <td class="mono">${fmtClock(r.ts)}</td>
+        <td class="mono">${fmtWhen(r.ts)}</td>
         <td>${escapeHtml(r.method)}</td>
         <td class="np"><span class="host">${escapeHtml(r.host)}</span><span class="path">${escapeHtml(r.path)}</span>${credChips(r)}</td>
         <td class="mono ${sc}">${s ?? "—"}</td>
@@ -1460,6 +1535,10 @@ function bindNetHandlers(el) {
   });
   el.querySelector("#net-online").addEventListener("change", (e) => toggleCutoff(e.target));
   el.querySelector("#net-filter").addEventListener("input", (e) => { netUi.filter = e.target.value; renderActivity(); });
+  el.querySelector("#net-range").addEventListener("change", (e) => {
+    netUi.range = e.target.value; saveNetUi(); netModel.summary = null; renderActivity();
+  });
+  el.querySelector("#net-older").addEventListener("click", (e) => loadOlder(e.target));
   el.querySelector("#net-blocked-only").addEventListener("change", (e) => { netUi.blockedOnly = e.target.checked; saveNetUi(); renderActivity(); });
   el.querySelector("#net-rule-add").addEventListener("submit", async (e) => {
     e.preventDefault();

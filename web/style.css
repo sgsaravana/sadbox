@@ -473,3 +473,5 @@ table.net-log td.rowact .mini { margin-left: 4px; }
 .rule.expired { opacity: .5; }
 table.net-log td.rowact .mini { opacity: .55; }
 table.net-log tr:hover td.rowact .mini, table.net-log td.rowact .mini:focus-visible { opacity: 1; }
+.net-tools select { margin: 0; padding: 5px 8px; font-size: 12px; background: #0e0e15; color: var(--text); border: 1px solid var(--border); border-radius: 7px; }
+#net-older { margin-top: 6px; }

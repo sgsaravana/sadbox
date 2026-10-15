@@ -391,7 +391,14 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   in one click; expired timed rules folded away) and **Header rules**. An
   **Internet on/off** switch in the panel's header cuts the VM off completely:
   every request and CONNECT is refused before rules, approvals or secrets are
-  looked at, held approvals are denied, and it stays off across restarts. Wiring: guest tools honor
+  looked at, held approvals are denied, and it stays off across restarts.
+  Every request is also **stored** (SQLite `net_requests`, written in 1-second
+  batches) and kept for **7 days** — `SADBOX_NET_LOG_DAYS` keeps it longer,
+  never shorter; older rows are pruned at startup and hourly. Activity's by-host
+  view can span the last 24 hours or 7 days, "All requests" pages back through
+  it, and the live view refills from it after a restart. Stored: method, host,
+  path, status, decision, sizes, timing, and the *names* of secrets used — no
+  headers or bodies, and never a secret value. Wiring: guest tools honor
   `HTTP(S)_PROXY` → `net` proxy on the host catches `CONNECT`, MITMs via a
   per-host `https` server, filters/rewrites, forwards upstream, logs.
   **Isolated, not advisory:** a VM has **no network interface at all** — only
@@ -455,6 +462,8 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 | POST | `/api/projects/:id/sync` | sync-back (`{force?: bool}` overwrites files changed in the folder) |
 | GET | `/api/projects/:id/term/links` | links currently on the project's terminal (wrapped URLs re-joined) |
 | POST | `/api/projects/:id/rebuild` | destroy + recreate the VM from the project's original source (keeps secrets + net rules) |
+| GET | `/api/projects/:id/net/requests?before=&limit=` | stored request log, paged back from a timestamp (without `before`: the live view's recent requests + pending approvals) |
+| GET | `/api/projects/:id/net/hosts?since=` | requests per host since a timestamp (default 24 h) |
 | GET | `/api/projects/:id/sync/status` | count of uncommitted files in the VM |
 | PUT | `/api/projects/:id/memory` | `{memoryMB}` — change this VM's memory; a running VM is restarted to take it (disk kept) |
 | PUT/DELETE | `/api/projects/:id/sync-folder` | connect (`{path}`) / disconnect a local folder for a project cloned from a git URL |

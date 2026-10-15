@@ -14,7 +14,7 @@ import { baseImageToolchain } from "../core/toolchain";
 import { createRule, deleteRule, listRules, moveRule, createHeaderRule, deleteHeaderRule, listHeaderRules } from "../net/rules";
 import { isCutOff, setCutoff } from "../net/cutoff";
 import { resolveApproval, listPending, pendingCounts } from "../net/approvals";
-import { recentRequests, subscribe } from "../net/events";
+import { hostSummary, recentRequests, requestsBefore, subscribe } from "../net/events";
 import { caCertPem } from "../net/ca";
 import { createForward, deleteForward, listForwards } from "../net/forwards";
 import { AuthError, authEnabled, clearCookie, crossOrigin, login, logout, safeNext, sessionCookie, signedIn, tokenFrom } from "../core/auth";
@@ -188,7 +188,17 @@ export function startServer() {
         m = p.match(/^\/api\/projects\/([\w-]+)\/net\/stream$/);
         if (m && req.method === "GET") return netStream(m[1]);
         m = p.match(/^\/api\/projects\/([\w-]+)\/net\/requests$/);
-        if (m && req.method === "GET") return json({ requests: recentRequests(m[1]), pending: listPending(m[1]) });
+        if (m && req.method === "GET") {
+          // ?before=<ms>&limit=N pages back through the stored log; without it: the live view's recent requests
+          const before = Number(url.searchParams.get("before"));
+          if (before) return json({ requests: requestsBefore(m[1], before, Number(url.searchParams.get("limit")) || 200) });
+          return json({ requests: recentRequests(m[1]), pending: listPending(m[1]) });
+        }
+        // requests per host since ?since=<ms> (default: the last 24 hours)
+        m = p.match(/^\/api\/projects\/([\w-]+)\/net\/hosts$/);
+        if (m && req.method === "GET") {
+          return json(hostSummary(m[1], Number(url.searchParams.get("since")) || Date.now() - 86_400_000));
+        }
         m = p.match(/^\/api\/projects\/([\w-]+)\/net\/approvals\/([\w-]+)$/);
         if (m && req.method === "POST") {
           const b = await req.json();
