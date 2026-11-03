@@ -378,7 +378,7 @@ export function startServer() {
           const b = await req.json();
           return json(createItem({
             name: b.name, value: b.value, kind: b.kind, type: b.type, mode: b.mode, inEnv: b.inEnv,
-            askOnFetch: b.askOnFetch, bindings: b.bindings, projectIds: b.projectIds,
+            askOnFetch: b.askOnFetch, swapUrl: b.swapUrl, swapBody: b.swapBody, bindings: b.bindings, projectIds: b.projectIds,
           }), 201);
         }
         m = p.match(/^\/api\/vault\/([\w-]+)$/);
@@ -387,6 +387,7 @@ export function startServer() {
           const b = await req.json();
           return json(await updateItem(m[1], {
             name: b.name, value: b.value, kind: b.kind, type: b.type, mode: b.mode, inEnv: b.inEnv, askOnFetch: b.askOnFetch,
+            swapUrl: b.swapUrl, swapBody: b.swapBody,
           }));
         }
         if (m && req.method === "DELETE") {

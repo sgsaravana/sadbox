@@ -118,7 +118,11 @@ function modeBadges(s) {
     : `<span class="dbadge fetch" title="Nothing in the VM; the app fetches it at runtime">fetch at runtime</span>`;
   const env = s.inEnv ? `<span class="dbadge env" title="Also written into the VM's env file — readable inside the VM">+ env file</span>` : "";
   const ask = s.mode === "fetch" && s.askOnFetch ? `<span class="dbadge ask" title="Each fetch waits for your approval">asks first</span>` : "";
-  return mode + env + ask;
+  const where = s.mode === "proxy"
+    ? (s.swapUrl ? `<span class="dbadge env" title="Also swapped in the URL">+ url</span>` : "")
+      + (s.swapBody ? `<span class="dbadge env" title="Also swapped in request bodies">+ body</span>` : "")
+    : "";
+  return mode + where + env + ask;
 }
 const kindBadge = (s) => `<span class="kbadge ${s.kind}">${s.kind}</span><span class="tbadge">${s.type}</span>`;
 
@@ -295,6 +299,8 @@ async function openItemDialog(item, opts = {}) {
   vform.mode.value = item?.mode ?? "fetch";
   vform.askOnFetch.checked = item ? item.askOnFetch : true;
   vform.inEnv.checked = item?.inEnv ?? false;
+  vform.swapUrl.checked = item?.swapUrl ?? false;
+  vform.swapBody.checked = item?.swapBody ?? false;
   // a variable's value is known; a secret's is only replaced if a new one is typed
   const known = item?.kind === "variable" ? item.value ?? "" : "";
   vform.value.value = known; vform.valueJson.value = known;
@@ -339,6 +345,7 @@ vform.onsubmit = async (e) => {
   const fields = {
     name: vform.elements["name"].value.trim(), kind: vform.kind.value, type: vform.type.value, mode: vform.mode.value,
     inEnv: vform.mode.value === "fetch" && vform.inEnv.checked, askOnFetch: vform.askOnFetch.checked,
+    swapUrl: vform.swapUrl.checked, swapBody: vform.swapBody.checked,
   };
   const projectIds = [...vform.querySelectorAll("input[name=project]:checked")].map((c) => c.value);
   const hosts = fields.mode === "proxy" ? parseHosts(vform.hosts.value) : [];

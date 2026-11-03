@@ -6,7 +6,7 @@ import {
   addBinding, createItem, injectVault, listBindings, projectVaultView, setItemProjects, setProjectItems,
   type BindingInput,
 } from "../core/vault";
-import { bindFromApproval, redactResponse, substituteRequest } from "./credentials";
+import { bindFromApproval, bodyRedactor, redactResponse, substituteRequest, swapBody, swapsBodies, textualType } from "./credentials";
 import { listPending, requestApproval, resolveApproval } from "./approvals";
 
 const A = makeProject("cred-a");
@@ -24,8 +24,9 @@ beforeEach(() => {
 });
 
 /** A proxy item `projectId` has access to, injected; returns its id and that project's placeholder. */
-async function proxySecret(name: string, value: string, bindings: BindingInput[], projectId = A) {
-  const s = createItem({ name, value, mode: "proxy", bindings, projectIds: [projectId] });
+async function proxySecret(name: string, value: string, bindings: BindingInput[], projectId = A,
+  extra: { swapUrl?: boolean; swapBody?: boolean; type?: "string" | "number" | "json" } = {}) {
+  const s = createItem({ name, value, mode: "proxy", bindings, projectIds: [projectId], ...extra });
   await injectVault(projectId);
   const ph = projectVaultView(projectId).find((x) => x.id === s.id)!.placeholder!;
   return { id: s.id, ph };
@@ -40,7 +41,7 @@ describe("substituteRequest", () => {
     const h: Record<string, unknown> = { authorization: `Bearer ${ph}` };
     const r = substituteRequest(A, req("api.github.com", "/user"), h);
     expect(h.authorization).toBe(`Bearer ${GH}`);
-    expect(r).toEqual({ injected: ["GITHUB_TOKEN"], unbound: [], plainHttp: [], inUrl: [] });
+    expect(r).toEqual({ injected: ["GITHUB_TOKEN"], unbound: [], plainHttp: [], inUrl: [], path: "/user", body: null });
   });
 
   test("git's Basic credential is decoded, swapped and re-encoded", async () => {
@@ -128,7 +129,7 @@ describe("substituteRequest", () => {
     const h: Record<string, unknown> = { authorization: `Bearer ${phB}` };
     const r = substituteRequest(A, req("api.github.com"), h);
     expect(h.authorization).toBe(`Bearer ${phB}`);
-    expect(r).toEqual({ injected: [], unbound: [], plainHttp: [], inUrl: [] });
+    expect(r).toEqual({ injected: [], unbound: [], plainHttp: [], inUrl: [], path: "/", body: null });
   });
 
   test("a secret unassigned from the project stops being swapped", async () => {
@@ -226,5 +227,111 @@ describe("credential approvals", () => {
     expect(listBindings(id).map((b) => b.host)).toEqual(["api.github.com", "raw.example.com"]);
     addBinding(id, { host: "z.example.com" }); // and the normal path still works alongside
     expect(listBindings(id).length).toBe(3);
+  });
+});
+
+describe("swapping in the URL", () => {
+  test("not by default: the placeholder stays and the log flags it", async () => {
+    const { ph } = await proxySecret("API_KEY", GH, [{ host: "api.example.com" }]);
+    const r = substituteRequest(A, req("api.example.com", `/v1/x?key=${ph}`), {});
+    expect(r).toMatchObject({ injected: [], inUrl: ["API_KEY"], path: `/v1/x?key=${ph}` });
+  });
+
+  test("when the item allows it: swapped, URL-encoded, also where the placeholder came encoded", async () => {
+    const real = "k3y/with+odd=chars-0123456789";
+    const { ph } = await proxySecret("API_KEY", real, [{ host: "api.example.com" }], A, { swapUrl: true });
+    const r = substituteRequest(A, req("api.example.com", `/v1/x?key=${ph}&again=${encodeURIComponent(ph)}`), {});
+    expect(r.injected).toEqual(["API_KEY"]);
+    expect(r.inUrl).toEqual([]);
+    expect(r.path).toBe(`/v1/x?key=${encodeURIComponent(real)}&again=${encodeURIComponent(real)}`);
+  });
+
+  test("a binding scoped to one header does not cover the URL", async () => {
+    const { ph } = await proxySecret("API_KEY", GH, [{ host: "api.example.com", header: "authorization" }], A, { swapUrl: true });
+    const r = substituteRequest(A, req("api.example.com", `/x?key=${ph}`), {});
+    expect(r.unbound.map((u) => u.name)).toEqual(["API_KEY"]);
+    expect(r.path).toContain(ph);
+  });
+});
+
+describe("swapping in the request body", () => {
+  const json = (text: string) => ({ text, contentType: "application/json; charset=utf-8" });
+
+  test("not by default — and a project without body items doesn't hold bodies back", async () => {
+    const { ph } = await proxySecret("API_KEY", GH, [{ host: "api.example.com" }]);
+    expect(swapsBodies(A)).toBe(false);
+    const r = substituteRequest(A, req("api.example.com", "/", "https", "POST"), {}, new Set(), json(`{"k":"${ph}"}`));
+    expect(r).toMatchObject({ injected: [], body: `{"k":"${ph}"}` });
+  });
+
+  test("JSON: a whole-string placeholder takes the typed value; inside a longer string, escaped text", async () => {
+    const tok = await proxySecret("TOKEN", 'sk-"quoted"-0123456789', [{ host: "api.example.com" }], A, { swapBody: true });
+    const lim = await proxySecret("LIMIT", "50", [{ host: "api.example.com" }], A, { swapBody: true, type: "number" });
+    const cfg = await proxySecret("CFG", '{"region":"eu","retries":3}', [{ host: "api.example.com" }], A, { swapBody: true, type: "json" });
+    expect(swapsBodies(A)).toBe(true);
+    const body = JSON.stringify({ auth: `Bearer ${tok.ph}`, token: tok.ph, limit: lim.ph, cfg: cfg.ph });
+    const r = substituteRequest(A, req("api.example.com", "/", "https", "POST"), {}, new Set(), json(body));
+    expect(r.injected.sort()).toEqual(["CFG", "LIMIT", "TOKEN"]);
+    expect(JSON.parse(r.body!)).toEqual({ auth: 'Bearer sk-"quoted"-0123456789', token: 'sk-"quoted"-0123456789', limit: 50, cfg: { region: "eu", retries: 3 } });
+  });
+
+  test("forms get the value URL-encoded; other text gets it as is", () => {
+    expect(swapBody("a=PH&b=1", "application/x-www-form-urlencoded", "PH", "x y&z", "string")).toBe("a=x%20y%26z&b=1");
+    expect(swapBody("token: PH", "text/plain", "PH", "x y", "string")).toBe("token: x y");
+  });
+
+  test("needs https and a binding that covers bodies; otherwise nothing is swapped", async () => {
+    const { ph } = await proxySecret("TOKEN", GH, [{ host: "api.example.com", header: "x-api-key" }], A, { swapBody: true });
+    const body = json(`{"t":"${ph}"}`);
+    expect(substituteRequest(A, req("api.example.com", "/", "http", "POST"), {}, new Set(), body).plainHttp).toEqual(["TOKEN"]);
+    const r = substituteRequest(A, req("api.example.com", "/", "https", "POST"), {}, new Set(), body);
+    expect(r.unbound.map((u) => u.name)).toEqual(["TOKEN"]);
+    expect(r.body).toBe(body.text);
+  });
+
+  test("an item is swapped everywhere it sits, or nowhere", async () => {
+    const { ph } = await proxySecret("TOKEN", GH, [{ host: "api.example.com", header: "authorization" }], A, { swapBody: true });
+    const h: Record<string, unknown> = { authorization: `Bearer ${ph}` };
+    const r = substituteRequest(A, req("api.example.com", "/", "https", "POST"), h, new Set(), json(`{"t":"${ph}"}`));
+    expect(r.unbound.map((u) => u.name)).toEqual(["TOKEN"]);
+    expect(h.authorization).toBe(`Bearer ${ph}`); // the header was covered, but the body was not
+  });
+
+  test("textual types are recognised", () => {
+    for (const t of ["application/json", "application/vnd.api+json", "text/plain; charset=utf-8", "application/x-www-form-urlencoded", "text/event-stream", "application/xml"]) expect(textualType(t)).toBe(true);
+    for (const t of ["", "application/octet-stream", "image/png", "multipart/form-data; boundary=x"]) expect(textualType(t)).toBe(false);
+  });
+});
+
+describe("redacting responses", () => {
+  test("short or typed values are never redacted (they would corrupt ordinary responses)", async () => {
+    await proxySecret("LIMIT", "50", [{ host: "api.example.com" }], A, { type: "number" });
+    await proxySecret("SHORT", "abc123", [{ host: "api.example.com" }]);
+    const h: Record<string, unknown> = { "content-length": "50", "x-id": "abc123" };
+    expect(redactResponse(A, h)).toEqual([]);
+    expect(h).toEqual({ "content-length": "50", "x-id": "abc123" });
+    expect(bodyRedactor(A)).toBeNull();
+  });
+
+  test("a body: the real value becomes the placeholder wherever chunks split it", async () => {
+    const { ph } = await proxySecret("GITHUB_TOKEN", GH, [{ host: "api.github.com" }]);
+    const r = bodyRedactor(A)!;
+    const text = `{"echo":"${GH}","again":"${GH}"}`;
+    const cuts = [5, 14, 20, 21, 47, text.length]; // through the middle of both values
+    let out = "", from = 0;
+    for (const at of cuts) { out += r.write(Buffer.from(text.slice(from, at))).toString(); from = at; }
+    out += r.end().toString();
+    expect(out).toBe(`{"echo":"${ph}","again":"${ph}"}`);
+    expect([...r.redacted]).toEqual(["GITHUB_TOKEN"]);
+  });
+
+  test("a body: only a tail that could start a real value is held back (a stream isn't delayed)", async () => {
+    await proxySecret("GITHUB_TOKEN", GH, [{ host: "api.github.com" }]);
+    const r = bodyRedactor(A)!;
+    expect(r.write(Buffer.from("data: {\"a\":1}\n\n")).toString()).toBe("data: {\"a\":1}\n\n");
+    expect(r.write(Buffer.from("tail gh")).toString()).toBe("tail "); // "gh" could begin ghp_…
+    expect(r.write(Buffer.from("ost\n")).toString()).toBe("ghost\n");
+    expect(r.end().length).toBe(0);
+    expect(r.redacted.size).toBe(0);
   });
 });

@@ -13,6 +13,8 @@
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
+import zlib from "node:zlib";
+import { Transform } from "node:stream";
 import dns from "node:dns/promises";
 import { networkInterfaces } from "node:os";
 import { mkdirSync, rmSync, chmodSync } from "node:fs";
@@ -28,7 +30,7 @@ import { evaluate, applyHeaders } from "./rules";
 import { requestApproval } from "./approvals";
 import { inSetup } from "./setup";
 import { recordRequest, startRequestLog, type RequestEntry } from "./events";
-import { redactResponse, substituteRequest, type SwapResult } from "./credentials";
+import { bodyRedactor, redactResponse, substituteRequest, swapsBodies, textualType, type SwapBody, type SwapResult } from "./credentials";
 import { CUTOFF_MESSAGE, isCutOff } from "./cutoff";
 
 const driver = getDriver();
@@ -117,7 +119,7 @@ export function classifyAddress(addr: string, own: Set<string> = ownAddresses())
 const REACH_RANK: Record<Reach, number> = { public: 0, private: 1, self: 2 };
 
 /** Resolve a target and classify it by the most sensitive address it maps to. */
-async function resolveTarget(host: string): Promise<{ address: string; reach: Reach } | null> {
+export async function resolveTarget(host: string): Promise<{ address: string; reach: Reach } | null> {
   const bare = host.replace(/^\[|\]$/g, "");
   if (bare === "localhost" || bare.endsWith(".localhost")) return { address: "127.0.0.1", reach: "self" };
   let addrs: string[];
@@ -134,6 +136,39 @@ async function resolveTarget(host: string): Promise<{ address: string; reach: Re
 
 let seq = 0;
 const rid = () => `${(++seq).toString(36)}-${Date.now().toString(36)}`;
+
+/** Request bodies up to this size are held back to swap placeholders in them
+ *  (only for a project with items that are swapped in bodies); a larger one,
+ *  or one of a binary type, goes through as it is. */
+const BODY_CAP = 1 << 20;
+
+/** Read a request body, unless it grows past `cap`: then the chunks read so
+ *  far come back with `over` set, and the rest is still unread on `req`. */
+function readBody(req: IncomingMessage, cap: number): Promise<{ chunks: Buffer[]; over: boolean }> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let n = 0;
+    const onData = (c: Buffer) => {
+      chunks.push(c); n += c.length;
+      if (n > cap) { req.off("data", onData); req.off("end", onEnd); req.pause(); resolve({ chunks, over: true }); }
+    };
+    const onEnd = () => resolve({ chunks, over: false });
+    req.on("data", onData);
+    req.once("end", onEnd);
+    req.once("error", reject);
+  });
+}
+
+/** A decoder for a response body the redactor has to read, or null if it is
+ *  sent as is; undefined for an encoding it can't read (then it is not touched). */
+function decoderFor(encoding: string | undefined): Transform | null | undefined {
+  const e = (encoding || "identity").trim().toLowerCase();
+  if (e === "identity") return null;
+  if (e === "gzip" || e === "x-gzip") return zlib.createGunzip();
+  if (e === "deflate") return zlib.createInflate();
+  if (e === "br") return zlib.createBrotliDecompress();
+  return undefined;
+}
 
 // ---- the request handler (shared by the http + per-host https servers) ----
 function makeHandler(scheme: "http" | "https") {
@@ -199,12 +234,23 @@ function makeHandler(scheme: "http" | "https") {
     const headers: Record<string, unknown> = { ...req.headers };
     delete headers["proxy-connection"];
 
-    // proxy-delivered secrets: placeholder -> real value, before the header rules
+    // A textual body is held back to swap placeholders in it — only for a
+    // project with items swapped in bodies, and only up to BODY_CAP.
+    const contentType = String(req.headers["content-type"] || "");
+    let held: { chunks: Buffer[]; over: boolean } | null = null;
+    if (projectId && scheme === "https" && textualType(contentType) && swapsBodies(projectId)
+        && Number(req.headers["content-length"] || 0) <= BODY_CAP) {
+      held = await readBody(req, BODY_CAP);
+    }
+    const swapBodyIn: SwapBody | null = held && !held.over
+      ? { text: Buffer.concat(held.chunks).toString("utf8"), contentType } : null;
+
+    // proxy vault items: placeholder -> real value, before the header rules
     // run (so an explicit `set` rule still has the last word)
     let creds: SwapResult | null = null;
     if (projectId) {
       const swapReq = { scheme, host, path, method };
-      creds = substituteRequest(projectId, swapReq, headers);
+      creds = substituteRequest(projectId, swapReq, headers, new Set(), swapBodyIn);
       // a real value never travels unencrypted; fail loudly rather than send a placeholder that 401s
       let why = creds.plainHttp.length ? `${creds.plainHttp.join(", ")} is only sent over https` : null;
       const approved = new Set<string>();
@@ -225,7 +271,11 @@ function makeHandler(scheme: "http" | "https") {
         });
         return;
       }
-      if (approved.size) creds.injected.push(...substituteRequest(projectId, swapReq, headers, approved).injected);
+      if (approved.size) {
+        const more = substituteRequest(projectId, { ...swapReq, path: creds.path }, headers, approved,
+          swapBodyIn && { text: creds.body!, contentType });
+        creds = { ...creds, injected: [...creds.injected, ...more.injected], path: more.path, body: more.body };
+      }
       applyHeaders(projectId, host, "request", headers);
     }
     const credLog = (redacted: string[] = []) => ({
@@ -236,24 +286,53 @@ function makeHandler(scheme: "http" | "https") {
 
     let reqBytes = 0, respBytes = 0;
     req.on("data", (c: Buffer) => { reqBytes += c.length; });
+    // a body swapped here goes on as one piece, with its new length
+    const sendBody = swapBodyIn ? Buffer.from(creds?.body ?? swapBodyIn.text, "utf8") : null;
+    if (sendBody) {
+      reqBytes = sendBody.length;
+      delete headers["transfer-encoding"];
+      delete headers["expect"]; // answered here already
+      headers["content-length"] = String(sendBody.length);
+    }
 
     const mod = scheme === "https" ? https : http;
     const up = mod.request(
       // connect to the address that was classified; Host header + SNI keep the name
-      { host: target!.address, port, method, path, headers: headers as any, ...(net.isIP(host) ? {} : { servername: host }) },
+      { host: target!.address, port, method, path: creds?.path ?? path, headers: headers as any, ...(net.isIP(host) ? {} : { servername: host }) },
       (upRes) => {
         const out: Record<string, unknown> = { ...upRes.headers };
-        // a real secret value never reaches the VM, even echoed back in a header
+        // a real secret value never reaches the VM, even echoed back in a header…
         const redacted = projectId ? redactResponse(projectId, out) : [];
         if (projectId) applyHeaders(projectId, host, "response", out);
-        try { res.writeHead(upRes.statusCode || 502, out as any); } catch {}
+        // …or in a textual body (decoded first if compressed; sent on uncompressed)
+        const status = upRes.statusCode || 502;
+        const hasBody = method !== "HEAD" && status !== 204 && status !== 304;
+        const decoder = decoderFor(upRes.headers["content-encoding"] as string | undefined);
+        const redactor = projectId && hasBody && decoder !== undefined && textualType(String(upRes.headers["content-type"] || ""))
+          ? bodyRedactor(projectId) : null;
+        if (redactor) {
+          delete out["content-length"];
+          if (decoder) delete out["content-encoding"];
+        }
+        try { res.writeHead(status, out as any); } catch {}
         upRes.on("data", (c: Buffer) => { respBytes += c.length; });
-        upRes.pipe(res);
-        upRes.on("end", () => log(projectId, {
+        const done = () => log(projectId, {
           id: rid(), ts: started, method, scheme, host, path, status: upRes.statusCode ?? null,
           decision: "allowed", ruleId: verdict.rule?.id ?? null, reqBytes, respBytes, durationMs: Date.now() - started,
-          ...credLog(redacted),
-        }));
+          ...credLog([...new Set([...redacted, ...(redactor?.redacted ?? [])])]),
+        });
+        if (!redactor) {
+          upRes.pipe(res);
+          upRes.on("end", done);
+          return;
+        }
+        const scrub = new Transform({
+          transform(chunk: Buffer, _enc, cb) { cb(null, redactor.write(chunk)); },
+          flush(cb) { cb(null, redactor.end()); },
+        });
+        const fail = () => { try { res.destroy(); } catch {} };
+        (decoder ? upRes.pipe(decoder).on("error", fail) : upRes).pipe(scrub).pipe(res);
+        scrub.on("end", done);
       },
     );
     up.on("error", (e: Error) => {
@@ -264,7 +343,13 @@ function makeHandler(scheme: "http" | "https") {
         ...credLog(),
       });
     });
-    req.pipe(up);
+    if (sendBody) up.end(sendBody);
+    else if (held) {
+      // held back but too large to swap: what was read, then the rest as it comes
+      for (const c of held.chunks) { up.write(c); reqBytes += c.length; }
+      req.pipe(up);
+      req.resume();
+    } else req.pipe(up);
   };
 }
 

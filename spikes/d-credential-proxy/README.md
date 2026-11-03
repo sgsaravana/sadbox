@@ -14,7 +14,7 @@ runs against the built feature, no patch. Findings below.
 
 | File | What |
 |---|---|
-| `e2e.ts` | Host-only end-to-end run of the **built** credential proxy against httpbin.org with dummy tokens: bound / Basic / plain-http / approval deny + allow / redaction / in-URL. `bun spikes/d-credential-proxy/e2e.ts` |
+| `e2e.ts` | Host-only end-to-end run of the **built** credential proxy against httpbin.org with dummy tokens: bound / Basic / plain-http / approval deny + allow / redaction / in-URL; and since vault step 3 (2026-11-04) URL and body swapping, typed values, and body redaction (plain, gzip, streamed) — 16 checks, all passing. Because response bodies are redacted now, "sent upstream" is shown by the log recording a redaction of httpbin's echo. `bun spikes/d-credential-proxy/e2e.ts` |
 
 The spike-only harness (a `proxy.patch` hook, the standalone swap `subst.ts`
 and its tests, `smoke.ts`, the placeholder printer and map-file helper) was

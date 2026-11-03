@@ -1,12 +1,17 @@
-// Credential swap for proxy-delivered secrets (docs/research/11, Spike D).
-// A VM holds only placeholders. On the way out, a placeholder in a request
-// header becomes the real value — over https, to a host one of the secret's
-// bindings names. On the way back, a real value in a response header becomes
-// the placeholder again. Matching is on literal substrings (Bearer, `token`,
+// Credential swap for proxy vault items (docs/research/11, 12; Spikes D, F.4).
+// A VM holds only placeholders. On the way out, a placeholder becomes the real
+// value — over https, to a host one of the item's bindings names — in request
+// headers, and, where the item allows it, in the URL and the request body. On
+// the way back, a real value in a response header or body becomes the
+// placeholder again. Matching is on literal substrings (Bearer, `token`,
 // x-api-key) plus inside a `Basic base64(user:pass)` credential (git).
 //
+// Typed items: in a JSON body, a placeholder that is a whole string takes the
+// item's typed value (`"limit": "<ph>"` → `"limit": 50`); anywhere else the
+// value goes in as text, escaped for where it lands.
+//
 // Real values are decrypted only for the request or response that needs them,
-// and never logged: callers get secret names, not values.
+// and never logged: callers get item names, not values.
 import { db } from "../db";
 import { decrypt } from "../crypto";
 import { hostMatch, pathMatch } from "./rules";
@@ -16,6 +21,9 @@ interface Credential {
   name: string;
   placeholder: string;
   valueEnc: string;
+  valueType: "string" | "number" | "json";
+  swapUrl: number;
+  swapBody: number;
 }
 
 interface BindingRow {
@@ -34,10 +42,18 @@ export interface SwapRequest {
 }
 
 export interface SwapResult {
-  injected: string[];                               // names of secrets swapped in
+  injected: string[];                               // names of items swapped in
   unbound: { secretId: string; name: string }[];    // placeholder seen, no binding matched
   plainHttp: string[];                              // placeholder seen over plain http
-  inUrl: string[];                                  // placeholder in the URL: never swapped
+  inUrl: string[];                                  // placeholder in the URL of an item that is not swapped there
+  path: string;                                     // the request path, swapped where allowed
+  body: string | null;                              // the request body, swapped where allowed (null: not given)
+}
+
+/** A request body the proxy holds in full, so it can be swapped. */
+export interface SwapBody {
+  text: string;
+  contentType: string;
 }
 
 type Headers = Record<string, unknown>;
@@ -46,7 +62,8 @@ type Headers = Record<string, unknown>;
  *  placeholder left over from an item it lost access to doesn't count. */
 function projectCredentials(projectId: string): Credential[] {
   return db.query<Credential, [string, string]>(
-    `SELECT s.id AS secretId, s.name AS name, sp.placeholder AS placeholder, s.value_enc AS valueEnc
+    `SELECT s.id AS secretId, s.name AS name, sp.placeholder AS placeholder, s.value_enc AS valueEnc,
+            s.value_type AS valueType, s.swap_url AS swapUrl, s.swap_body AS swapBody
      FROM secret_placeholders sp JOIN secrets s ON s.id = sp.secret_id
      WHERE sp.project_id = ? AND s.delivery = 'proxy'
        AND EXISTS (SELECT 1 FROM project_secrets ps WHERE ps.project_id = ? AND ps.secret_id = s.id)`,
@@ -62,46 +79,86 @@ function bindingAllows(b: BindingRow, req: SwapRequest, header: string, now: num
   return true;
 }
 
-/** Swap this project's placeholders for real values in `headers`, in place.
- *  `alsoAllow` lets named secrets through without a binding (an approval
- *  answered "just this request"); everything else must match a binding. */
+/** Does any of this project's items get swapped in request bodies? (Only
+ *  then is a body worth holding back to look at.) */
+export function swapsBodies(projectId: string): boolean {
+  return projectCredentials(projectId).some((c) => c.swapBody);
+}
+
+/** Swap this project's placeholders for real values: in `headers` (in place),
+ *  and — for items that allow it — in the path and in `body`. `alsoAllow`
+ *  lets named items through without a binding (an approval answered "just
+ *  this request"); everything else must match a binding, in every place the
+ *  placeholder sits. An item is swapped everywhere or nowhere. */
 export function substituteRequest(
-  projectId: string, req: SwapRequest, headers: Headers, alsoAllow: Set<string> = new Set(),
+  projectId: string, req: SwapRequest, headers: Headers, alsoAllow: Set<string> = new Set(), body: SwapBody | null = null,
 ): SwapResult {
-  const out: SwapResult = { injected: [], unbound: [], plainHttp: [], inUrl: [] };
+  const out: SwapResult = { injected: [], unbound: [], plainHttp: [], inUrl: [], path: req.path, body: body?.text ?? null };
   const creds = projectCredentials(projectId);
   if (!creds.length) return out;
   const now = Date.now();
 
   for (const c of creds) {
-    if (req.path.includes(c.placeholder) || req.path.includes(encodeURIComponent(c.placeholder))) out.inUrl.push(c.name);
-    const keys = Object.keys(headers).filter((k) => carries(headers[k], c.placeholder));
-    if (!keys.length) continue;
+    const ph = c.placeholder;
+    const keys = Object.keys(headers).filter((k) => carries(headers[k], ph));
+    const inPath = out.path.includes(ph) || out.path.includes(encodeURIComponent(ph));
+    if (inPath && !c.swapUrl) out.inUrl.push(c.name); // never swapped there; flagged in the log
+    const url = inPath && !!c.swapUrl;
+    const inBody = !!c.swapBody && out.body != null && out.body.includes(ph);
+    if (!keys.length && !url && !inBody) continue;
     if (req.scheme !== "https") { out.plainHttp.push(c.name); continue; }
 
     const bindings = alsoAllow.has(c.secretId) ? null : db.query<BindingRow, [string]>(
       "SELECT host, path, method, header, expires_at FROM secret_bindings WHERE secret_id = ?",
     ).all(c.secretId);
-    const allowed = keys.filter((k) => !bindings || bindings.some((b) => bindingAllows(b, req, k.toLowerCase(), now)));
-    if (allowed.length < keys.length) {
-      // some header it sits in isn't covered: ask about the whole secret, swap nothing yet
+    // a header-scoped binding covers only that header; the URL and the body need an unscoped one
+    const covers = (header: string) => !bindings || bindings.some((b) => bindingAllows(b, req, header, now));
+    if (!keys.every((k) => covers(k.toLowerCase())) || ((url || inBody) && !covers(""))) {
+      // somewhere it sits isn't covered: ask about the whole item, swap nothing yet
       out.unbound.push({ secretId: c.secretId, name: c.name });
       continue;
     }
     const real = decrypt(c.valueEnc);
-    for (const k of allowed) headers[k] = mapValue(headers[k], (v) => swap(v, c.placeholder, real));
+    for (const k of keys) headers[k] = mapValue(headers[k], (v) => swap(v, ph, real));
+    if (url) out.path = out.path.split(ph).join(encodeURIComponent(real)).split(encodeURIComponent(ph)).join(encodeURIComponent(real));
+    if (inBody) out.body = swapBody(out.body!, body!.contentType, ph, real, c.valueType);
     out.injected.push(c.name);
   }
   return out;
 }
 
-/** Turn real values of this project's proxy secrets in response headers back
- *  into placeholders, in place. Returns the names of secrets it redacted. */
+/** Put `real` where `ph` sits in a request body, as its content type wants it. */
+export function swapBody(text: string, contentType: string, ph: string, real: string, type: Credential["valueType"]): string {
+  if (/json/i.test(contentType)) {
+    // the whole string → the typed value; inside a longer string → escaped text
+    const whole = type === "string" ? JSON.stringify(real) : real;
+    return text.split(`"${ph}"`).join(whole).split(ph).join(JSON.stringify(real).slice(1, -1));
+  }
+  if (/x-www-form-urlencoded/i.test(contentType)) return text.split(ph).join(encodeURIComponent(real));
+  return text.split(ph).join(real);
+}
+
+/** Request and response bodies of these types are text the proxy can swap in or redact. */
+export const textualType = (contentType: string) =>
+  /^text\/|json|x-www-form-urlencoded|javascript|xml|event-stream|graphql/i.test(contentType);
+
+/** The values worth redacting in responses: a string of some length. A short
+ *  or typed value (`50`, `true`, `{"a":1}`) is not unguessable, and replacing
+ *  it everywhere would corrupt ordinary responses. */
+const MIN_REDACT = 8;
+function redactable(projectId: string): { name: string; real: string; placeholder: string }[] {
+  return projectCredentials(projectId)
+    .filter((c) => c.valueType === "string")
+    .map((c) => ({ name: c.name, real: decrypt(c.valueEnc), placeholder: c.placeholder }))
+    .filter((c) => c.real.length >= MIN_REDACT);
+}
+
+/** Turn real values of this project's proxy items in response headers back
+ *  into placeholders, in place. Returns the names of items it redacted. */
 export function redactResponse(projectId: string, headers: Headers): string[] {
   const redacted: string[] = [];
-  for (const c of projectCredentials(projectId)) {
-    const real = decrypt(c.valueEnc);
-    if (!real) continue;
+  for (const c of redactable(projectId)) {
+    const real = c.real;
     let hit = false;
     for (const k of Object.keys(headers)) {
       if (!carries(headers[k], real)) continue;
@@ -111,6 +168,51 @@ export function redactResponse(projectId: string, headers: Headers): string[] {
     if (hit) redacted.push(c.name);
   }
   return redacted;
+}
+
+/** A streaming redactor for a response body: real values of this project's
+ *  proxy items become their placeholders, wherever chunk boundaries fall.
+ *  Only the tail of a chunk that could be the start of a real value is held
+ *  back, so a stream of events (SSE) is not delayed. Null if there is nothing
+ *  to redact. */
+export function bodyRedactor(projectId: string): { write(chunk: Buffer): Buffer; end(): Buffer; redacted: Set<string> } | null {
+  const items = redactable(projectId).map((c) => ({ ...c, realB: Buffer.from(c.real), phB: Buffer.from(c.placeholder) }));
+  if (!items.length) return null;
+  const redacted = new Set<string>();
+  let carry = Buffer.alloc(0);
+  const replaceAll = (buf: Buffer) => {
+    for (const c of items) {
+      let at = buf.indexOf(c.realB);
+      if (at < 0) continue;
+      const parts: Buffer[] = [];
+      let from = 0;
+      while (at >= 0) { parts.push(buf.subarray(from, at), c.phB); from = at + c.realB.length; at = buf.indexOf(c.realB, from); }
+      parts.push(buf.subarray(from));
+      buf = Buffer.concat(parts);
+      redacted.add(c.name);
+    }
+    return buf;
+  };
+  // how many trailing bytes could be the beginning of a real value
+  const heldBack = (buf: Buffer) => {
+    let hold = 0;
+    for (const c of items) {
+      for (let k = Math.min(c.realB.length - 1, buf.length); k > hold; k--) {
+        if (buf.subarray(buf.length - k).equals(c.realB.subarray(0, k))) { hold = k; break; }
+      }
+    }
+    return hold;
+  };
+  return {
+    redacted,
+    write(chunk) {
+      const buf = replaceAll(Buffer.concat([carry, chunk]));
+      const hold = heldBack(buf);
+      carry = Buffer.from(buf.subarray(buf.length - hold));
+      return buf.subarray(0, buf.length - hold);
+    },
+    end() { const rest = carry; carry = Buffer.alloc(0); return rest; },
+  };
 }
 
 /** Let a secret go to a host from now on (an approval answered with a window

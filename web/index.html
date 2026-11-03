@@ -299,6 +299,10 @@
             <button type="button" data-preset="openai">OpenAI</button>
           </div>
           <div id="vitem-hosts-now" class="hint"></div>
+          <label class="check"><input type="checkbox" name="swapUrl"> Also swap it in the URL
+            <span class="hint">— for APIs that take a key in the query</span></label>
+          <label class="check"><input type="checkbox" name="swapBody"> Also swap it in request bodies
+            <span class="hint">— JSON, forms, text. Only turn on for hosts that don't store and show back what you send them.</span></label>
         </div>
         <label class="check"><input type="radio" name="mode" value="fetch" checked> <b>Fetch at runtime</b>
           <span class="hint">— nothing in the VM; the app asks for it when it needs it.</span></label>

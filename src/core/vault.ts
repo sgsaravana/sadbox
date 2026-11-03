@@ -4,7 +4,9 @@
 //              secret   — hidden, revealed on request (each reveal is logged)
 //   a type     string | number | json (checked when the value is set)
 //   a mode     proxy — the VM gets a placeholder; the egress proxy swaps in the
-//                      real value on requests matching one of its bindings
+//                      real value on requests matching one of its bindings: in
+//                      headers, and — if the item says so — in the URL and the
+//                      request body
 //              fetch — nothing in the VM; the app fetches it at runtime.
 //                      `inEnv` also writes the real value into the VM's env
 //                      file, as every secret was before the vault
@@ -54,6 +56,8 @@ export interface ItemInput {
   mode?: Mode;            // default fetch
   inEnv?: boolean;        // fetch only; default false
   askOnFetch?: boolean;   // default: a secret asks, a variable does not
+  swapUrl?: boolean;      // proxy: also swap in the URL (default off)
+  swapBody?: boolean;     // proxy: also swap in request bodies (default off)
   bindings?: BindingInput[]; // used in proxy mode, which needs at least one
   projectIds?: string[];
 }
@@ -68,6 +72,8 @@ interface ItemRow {
   delivery: Mode;
   in_env: number;
   ask_on_fetch: number;
+  swap_url: number;
+  swap_body: number;
   value_enc: string;
   created_at: string;
   updated_at: string | null;
@@ -88,6 +94,8 @@ function view(r: ItemRow) {
     mode: r.delivery,
     inEnv: !!r.in_env,
     askOnFetch: !!r.ask_on_fetch,
+    swapUrl: !!r.swap_url,
+    swapBody: !!r.swap_body,
     ...(r.kind === "variable" ? { value: decrypt(r.value_enc) } : {}),
     bindings: listBindings(r.id),
     projectIds: projectsOf(r.id),
@@ -176,9 +184,10 @@ export function createItem(input: ItemInput): ItemView {
   const id = crypto.randomUUID().slice(0, 8);
   db.transaction(() => {
     db.query(
-      `INSERT INTO secrets (id, project_id, name, value_enc, delivery, kind, value_type, in_env, ask_on_fetch, updated_at)
-       VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
-    ).run(id, name, encrypt(value), mode, kind, type, inEnv ? 1 : 0, (input.askOnFetch ?? kind === "secret") ? 1 : 0);
+      `INSERT INTO secrets (id, project_id, name, value_enc, delivery, kind, value_type, in_env, ask_on_fetch, swap_url, swap_body, updated_at)
+       VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+    ).run(id, name, encrypt(value), mode, kind, type, inEnv ? 1 : 0, (input.askOnFetch ?? kind === "secret") ? 1 : 0,
+      input.swapUrl ? 1 : 0, input.swapBody ? 1 : 0);
     for (const b of bindings) insertBinding(id, b);
     const grant = db.query("INSERT INTO project_secrets (project_id, secret_id, status) VALUES (?, ?, 'pending')");
     for (const pid of projectIds) grant.run(pid, id);
@@ -206,8 +215,9 @@ export async function updateItem(id: string, patch: ItemPatch): Promise<ItemView
 
   db.query(
     `UPDATE secrets SET name = ?, kind = ?, value_type = ?, delivery = ?, in_env = ?, ask_on_fetch = ?,
-       value_enc = ?, updated_at = datetime('now') WHERE id = ?`,
+       swap_url = ?, swap_body = ?, value_enc = ?, updated_at = datetime('now') WHERE id = ?`,
   ).run(name, kind, type, mode, inEnv ? 1 : 0, (patch.askOnFetch ?? !!r.ask_on_fetch) ? 1 : 0,
+    (patch.swapUrl ?? !!r.swap_url) ? 1 : 0, (patch.swapBody ?? !!r.swap_body) ? 1 : 0,
     value === oldValue ? r.value_enc : encrypt(value), id);
   // a placeholder is shaped like the value it stands for (prefix, alphabet):
   // a value of another shape gets new ones, so tools sniffing a prefix still accept it

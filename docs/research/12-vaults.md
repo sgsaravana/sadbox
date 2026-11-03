@@ -113,6 +113,45 @@ The **Vaults** tab (`#vaults`; the old `#secrets` link redirects) in
 - The create-project form ticks vault items; a header rule picks a vault item
   (a project rule only among the items its project may use).
 
+## As built — step 3 (2026-11-04)
+
+The proxy side of V3, V4 and V8 (`src/net/credentials.ts`, `src/net/proxy.ts`):
+
+- **Per-item opt-ins** `swapUrl` and `swapBody` (columns `swap_url`,
+  `swap_body`; off by default — V4). Shown as "+ url" / "+ body" badges, set in
+  the item dialog.
+- **URL**: the placeholder (raw or URL-encoded) becomes the URL-encoded value.
+  Without `swapUrl` it is left alone and the log flags it, as before.
+- **Body**: held back only for a project with a body item, only over https,
+  only for a textual type (JSON, forms, text, XML, …) and only up to 1 MiB —
+  anything else goes through untouched. Sent on with a fresh `Content-Length`;
+  `Expect` and `Transfer-Encoding` are dropped. In JSON a whole-string
+  placeholder takes the typed value; inside a longer string it is escaped text;
+  in a form it is URL-encoded.
+- **One item, everywhere or nowhere**: it is swapped only if a binding covers
+  every place it sits. A binding scoped to one header covers that header only —
+  the URL and the body need a binding without a header. Otherwise it is
+  "unbound" and asks, as for headers.
+- **Response bodies are redacted** for every textual response to a project with
+  proxy items, not only responses to requests that carried one — a value
+  stored by one request and read back by another is caught too. Compressed
+  bodies (gzip, deflate, br) are decoded and sent on uncompressed; an unknown
+  encoding is passed through untouched. The redactor streams: it only holds
+  back a tail that could be the start of a real value, so an event stream
+  (SSE — e.g. Claude's responses) is not delayed.
+- **Only string values of 8+ characters are redacted** (headers and bodies).
+  A short or typed value (`50`, `true`, `{…}`) is not unguessable, and
+  replacing it in every response would corrupt them — this also fixed header
+  redaction, which before the vault assumed every value was a token.
+- **V8**: tests that `localhost`, `*.localhost`, loopback and every address of
+  this machine resolve to "self", which the proxy refuses before any rule.
+- Verified end to end against httpbin.org (`spikes/d-credential-proxy/e2e.ts`,
+  16 checks): URL swap, typed number in a JSON body, string in a body, body
+  echo redacted, gzip response decoded and redacted, streamed response redacted.
+
+**Moved to step 6**: the proxy answering a VM's OAuth refresh (A7) needs the
+supervisor-owned login store that step 6 builds.
+
 ## Not decided yet / open
 
 - Placeholder format for `number` / `json` items in env (a placeholder is a

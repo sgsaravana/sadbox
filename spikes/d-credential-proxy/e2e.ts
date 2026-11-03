@@ -39,9 +39,9 @@ const PH = placeholderFor(P, s.id, REAL); // what injectVault would write into t
 await startProxy();
 await Bun.sleep(300);
 
-async function curl(url: string, header: string) {
+async function curl(url: string, header: string, ...extra: string[]) {
   const p = Bun.spawn(["curl", "-sS", "--suppress-connect-headers", "-D", "-", "--max-time", "20",
-    "--proxy", `http://127.0.0.1:${port}`, "--cacert", caCertPath(), "-H", header, url], { stdout: "pipe", stderr: "pipe" });
+    "--proxy", `http://127.0.0.1:${port}`, "--cacert", caCertPath(), "-H", header, ...extra, url], { stdout: "pipe", stderr: "pipe" });
   const out = await new Response(p.stdout).text();
   await p.exited;
   const i = out.indexOf("\r\n\r\n");
@@ -56,7 +56,8 @@ const lastRow = () => recentRequests(P).at(-1)!;
 
 {
   const r = await curl("https://httpbin.org/headers", `Authorization: Bearer ${PH}`);
-  check("bound: real value sent upstream", r.body.includes(REAL) && !r.body.includes(PH));
+  // httpbin echoes the request: the real value came back (so it was sent) and was redacted on the way in
+  check("bound: real value sent upstream, its echo redacted", (lastRow().redacted ?? []).includes("DEMO_TOKEN") && r.body.includes(PH) && !r.body.includes(REAL));
   check("bound: log names the secret, never the value", JSON.stringify(lastRow().credentials) === '["DEMO_TOKEN"]' && !JSON.stringify(recentRequests(P)).includes(REAL));
 }
 {
@@ -82,7 +83,7 @@ const lastRow = () => recentRequests(P).at(-1)!;
   let ask; for (let i = 0; i < 50 && !ask; i++) { await Bun.sleep(100); ask = listPending(P).find((p) => p.credential); }
   resolveApproval(ask!.id, "allow", "once");
   const r = await pending;
-  check("unbound + allowed once: real value sent", r.status === 200 && r.body.includes(REAL));
+  check("unbound + allowed once: real value sent", r.status === 200 && (lastRow().redacted ?? []).includes("DEMO_TOKEN") && !r.body.includes(REAL));
 }
 {
   const r = await curl(`https://httpbin.org/response-headers?X-Echo=${REAL}`, "X-Noop: 1");
@@ -93,6 +94,42 @@ const lastRow = () => recentRequests(P).at(-1)!;
 {
   const r = await curl(`https://httpbin.org/headers?k=${PH}`, "X-Noop: 1");
   check("placeholder in URL: flagged, not swapped", JSON.stringify(lastRow().credentialInUrl) === '["DEMO_TOKEN"]' && !r.body.includes(REAL));
+}
+
+// ---- vault step 3: URL and body swapping, typed values, body redaction ----
+const KEY_REAL = "kq_DUMMYREALKEY000000000000000";
+const key = createItem({ name: "QUERY_KEY", value: KEY_REAL, mode: "proxy", swapUrl: true, bindings: [{ host: "httpbin.org" }], projectIds: [P] });
+const KEY_PH = placeholderFor(P, key.id, KEY_REAL);
+const lim = createItem({ name: "LIMIT", value: "50", type: "number", kind: "variable", mode: "proxy", swapBody: true, bindings: [{ host: "httpbin.org" }], projectIds: [P] });
+const LIM_PH = placeholderFor(P, lim.id, "50");
+const BODY_REAL = "bt_DUMMYREALBODYTOKEN00000000000";
+const bt = createItem({ name: "BODY_TOKEN", value: BODY_REAL, mode: "proxy", swapBody: true, bindings: [{ host: "httpbin.org" }], projectIds: [P] });
+const BT_PH = placeholderFor(P, bt.id, BODY_REAL);
+{
+  const r = await curl(`https://httpbin.org/get?key=${KEY_PH}`, "X-Noop: 1");
+  const args = JSON.parse(r.body).args ?? {};
+  check("URL: swapped upstream, and the echo is redacted back", lastRow().credentials?.includes("QUERY_KEY") && args.key === KEY_PH && !r.body.includes(KEY_REAL),
+    JSON.stringify(args));
+}
+{
+  const body = JSON.stringify({ limit: LIM_PH, token: BT_PH, note: `Bearer ${BT_PH}` });
+  const r = await curl("https://httpbin.org/anything", "Content-Type: application/json", "--data-binary", body);
+  const sent = JSON.parse(r.body).json ?? {};
+  check("body: a typed number arrives as a number", sent.limit === 50, JSON.stringify(sent));
+  check("body: string swapped upstream (log), echoed back as the placeholder", lastRow().credentials?.includes("BODY_TOKEN")
+    && sent.token === BT_PH && sent.note === `Bearer ${BT_PH}` && !r.body.includes(BODY_REAL));
+  check("body: log records the body redaction", (lastRow().redacted ?? []).includes("BODY_TOKEN"));
+}
+{
+  const r = await curl("https://httpbin.org/gzip", `Authorization: Bearer ${KEY_PH}`, "--compressed");
+  check("gzip response: decoded and redacted", r.status === 200 && r.body.includes(KEY_PH) && !r.body.includes(KEY_REAL) && !/content-encoding/i.test(r.headers),
+    r.body.slice(0, 80));
+}
+{
+  const r = await curl("https://httpbin.org/stream/3", `Authorization: Bearer ${KEY_PH}`);
+  const lines = r.body.trim().split("\n");
+  check("streamed response: every line redacted", lines.length === 3 && lines.every((l) => l.includes(KEY_PH) && !l.includes(KEY_REAL)),
+    `${lines.length} line(s)`);
 }
 
 console.log(failed ? `\n${failed} failed` : "\nall passed");

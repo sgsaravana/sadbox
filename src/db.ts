@@ -127,6 +127,8 @@ db.run(`
 // kind: variable (value shown in the UI) | secret (hidden until revealed)
 // value_type: string | number | json
 // ask_on_fetch: a fetch waits for the owner's approval
+// swap_url / swap_body: a proxy item is swapped in the URL / the request body
+//   too, not only in headers (docs/research/12, V3–V4)
 for (const [col, ddl] of [
   ["delivery", "delivery TEXT NOT NULL DEFAULT 'env'"],
   ["kind", "kind TEXT NOT NULL DEFAULT 'secret'"],
@@ -134,6 +136,8 @@ for (const [col, ddl] of [
   ["in_env", "in_env INTEGER NOT NULL DEFAULT 0"],
   ["ask_on_fetch", "ask_on_fetch INTEGER NOT NULL DEFAULT 1"],
   ["updated_at", "updated_at TEXT"],
+  ["swap_url", "swap_url INTEGER NOT NULL DEFAULT 0"],
+  ["swap_body", "swap_body INTEGER NOT NULL DEFAULT 0"],
 ]) {
   const has = db.query<{ name: string }, []>("PRAGMA table_info(secrets)").all().some((c) => c.name === col);
   if (!has) db.run(`ALTER TABLE secrets ADD COLUMN ${ddl}`);
