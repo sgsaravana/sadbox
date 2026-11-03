@@ -24,7 +24,22 @@ case "$1" in
   stop) for last; do :; done; : > "${dir}/stopped-$last";;
   start) rm -f "${dir}/stopped-$2";;
   kill) exit 0;;
+  # system status: down (as the real CLI says it) while the marker file exists
+  system) if [ -e "${dir}/service-down" ]; then
+            echo 'Error: internalError: "failed to get status" (cause: "interrupted: \\"XPC connection error: Connection invalid\\"")' >&2
+            echo 'Ensure container system service has been started with \`container system start\`.' >&2; exit 1
+          fi
+          echo '{"status":"running","server":{"version":"1.4.1"},"resources":{"containersRunning":1,"containersTotal":3}}';;
+  rm) if [ -e "${dir}/service-down" ]; then
+        echo 'Error: internalError: "failed to delete container" (cause: "interrupted: \\"XPC connection error: Connection invalid\\"")' >&2; exit 1
+      fi;;
   list) echo '[]';;
+  # build ... --label sadbox.recipe=<hash> ...: logged; the image then carries
+  # that label for image inspect (no image at all until the first build)
+  build) for a; do case "$a" in sadbox.recipe=*) printf %s "\${a#sadbox.recipe=}" > "${dir}/image-recipe";; esac; done
+         echo build >> "${dir}/builds.log";;
+  image) [ "$2" = inspect ] && [ -e "${dir}/image-recipe" ] || exit 1
+         echo '[{"variants":[{"config":{"config":{"Labels":{"sadbox.recipe":"'"$(cat "${dir}/image-recipe")"'"}}}}]}]';;
   # stats --no-stream --format json <ref>: slow like the real one, and logged so
   # a test can count calls. A ref containing "stuck" never answers.
   stats) echo "$5" >> "${statsLog}"
@@ -51,6 +66,9 @@ chmodSync(bin, 0o755);
 
 process.env.SADBOX_TEST_WORKDIR = workdir; // for the tests themselves, to seed and inspect it
 process.env.SADBOX_TEST_STATS_LOG = statsLog;
+process.env.SADBOX_TEST_IMAGE_RECIPE = join(dir, "image-recipe"); // the label on the stub's base image
+process.env.SADBOX_TEST_BUILDS_LOG = join(dir, "builds.log");
+process.env.SADBOX_TEST_SERVICE_DOWN = join(dir, "service-down"); // touch it to take the container service down
 process.env.SADBOX_DATA = join(dir, "data");
 process.env.SADBOX_CONTAINER_BIN = bin;
 process.env.SADBOX_CONTAINER_DATA = containerData;

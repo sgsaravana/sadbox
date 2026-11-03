@@ -50,11 +50,36 @@ function route() {
     refreshProjects();
     if (openCreateNext) { openCreateNext = false; openCreateForm(); } else closeCreateForm();
   }
-  // isHome: static overview, nothing to load
+  else if (isHome) refreshServiceStatus();
   refreshNavTree();
 }
 addEventListener("hashchange", route);
 const showView = (v) => { location.hash = v; };
+
+// ---- container service status (home page) ----
+// Every VM operation goes through the backend's service; when it is down,
+// start / rebuild / destroy all fail, so say so up front and how to fix it.
+async function refreshServiceStatus() {
+  const el = $("#svc-status");
+  let s;
+  try {
+    s = await api("/api/system/status");
+  } catch (e) {
+    s = { running: false, error: `could not ask sadbox: ${e.message}` };
+  }
+  el.hidden = false;
+  el.classList.toggle("down", !s.running);
+  if (s.running) {
+    const vms = s.containersTotal != null ? ` · ${s.containersRunning ?? 0} of ${s.containersTotal} VMs running` : "";
+    el.innerHTML = `<span class="dot running"></span><b>Container service running</b>
+      <span class="svc-meta">${s.version ? `v${escapeHtml(s.version)}` : ""}${vms}</span>`;
+    return;
+  }
+  el.innerHTML = `<h3><span class="dot down"></span>Container service is not running</h3>
+    <p>${escapeHtml(s.error || "unknown error")}</p>
+    ${s.fix ? `<p>Start it from a terminal on this machine: <code>${escapeHtml(s.fix)}</code></p>` : ""}
+    <p class="svc-meta">Until it is back, projects cannot be started, stopped, rebuilt or destroyed.</p>`;
+}
 
 // ---- nested project list in the sidebar ----
 async function refreshNavTree() {
@@ -241,6 +266,7 @@ async function refreshProjects() {
         <button data-term="${p.id}" data-name="${p.name}">${ICON.terminal}Terminal ↗</button>
         <button data-edit="${p.id}" data-name="${p.name}">${ICON.editor}Editor ↗</button>
         ${p.sync_folder ? `<button data-sync="${p.id}">${ICON.sync}Sync back</button>` : ""}
+        ${p.sync_folder ? pushButton(p) : ""}
         <button data-secrets="${p.id}" data-name="${p.name}">${ICON.secrets}Secrets…</button>
         <button class="danger" data-destroy="${p.id}" data-name="${p.name}">${ICON.destroy}Destroy</button>
       </div>
@@ -262,6 +288,31 @@ function syncSummary(r) {
   return `Nothing in ${r.folder} was changed: ${r.note}` +
     (r.blocking.length ? `:\n\n${r.blocking.map((f) => "  " + f).join("\n")}\n\nCommit, stash or move them and press Sync back again — or overwrite them with the VM's versions.` : "");
 }
+// ---- push: the folder on this machine → the VM's workdir ----
+function pushButton(p) {
+  return p.state === "running"
+    ? `<button data-push="${p.id}" title="Copy the folder's changed files into the VM (never .env files)">${ICON.push}Push to VM</button>`
+    : `<button disabled title="Start the VM to push into it">${ICON.push}Push to VM</button>`;
+}
+function pushSummary(r) {
+  const env = r.excluded.length ? `\n\nNot pushed (env files never are): ${r.excluded.join(", ")}` : "";
+  const odd = r.skipped.length ? `\n\nCould not push (line break in the name): ${r.skipped.length} file(s)` : "";
+  if (r.applied === "copied") {
+    return `Pushed ${r.changed.length} file${r.changed.length === 1 ? "" : "s"} from ${r.folder} into the VM${r.forced ? " (overwriting uncommitted changes there)" : ""}. ` +
+      `They show up there as uncommitted changes.\n\n${r.changed.map((f) => "  " + f).join("\n")}${env}${odd}`;
+  }
+  if (r.applied === "current") return `Nothing to push — the VM already has the folder's files.${env}${odd}`;
+  return `Nothing was pushed: these files have uncommitted changes in the VM, which the push would overwrite:\n\n` +
+    `${r.blocking.map((f) => "  " + f).join("\n")}\n\nCommit or stash them in the VM and push again — or overwrite them with the folder's versions.${env}${odd}`;
+}
+async function runPush(id, container, force) {
+  const r = await api(`/api/projects/${id}/push`, { method: "POST", body: { force } });
+  const again = r.applied === "not-applied"
+    ? `<button class="danger mini" data-push="${id}" data-force="1">Overwrite ${r.blocking.length} file${r.blocking.length === 1 ? "" : "s"} in the VM</button>`
+    : "";
+  container.querySelector(".sync-result").innerHTML = `<pre class="result">${escapeHtml(pushSummary(r))}</pre>${again}`;
+}
+
 /** Run a sync and show what it did under the project (with a way to force it
  *  when files in the folder were in the way). */
 async function runSync(id, container, force) {
@@ -280,6 +331,7 @@ const svg = (body) => `<svg class="ico" viewBox="0 0 24 24" width="14" height="1
 const ICON = {
   terminal: svg(`<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>`),
   editor: svg(`<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>`),
+  push: svg(`<path d="M12 19V5"/><polyline points="5 12 12 5 19 12"/><line x1="5" y1="21" x2="19" y2="21"/>`),
   sync: svg(`<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>`),
   secrets: svg(`<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/>`),
   rebuild: svg(`<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>`),
@@ -364,12 +416,22 @@ document.addEventListener("click", async (e) => {
       b.disabled = true; b.innerHTML = `<span class="spinner"></span> Syncing…`;
       try { await runSync(b.dataset.sync, container, force); }
       finally { b.disabled = false; b.innerHTML = label; }
+    } else if (b.dataset.push) {
+      const force = b.dataset.force === "1";
+      if (force && !confirm("Overwrite the VM's versions of these files with the folder's? The uncommitted changes to them in the VM are lost.")) return;
+      const label = b.innerHTML;
+      const container = b.closest(".card") || $("#view-detail");
+      b.disabled = true; b.innerHTML = `<span class="spinner"></span> Pushing…`;
+      try { await runPush(b.dataset.push, container, force); }
+      finally { b.disabled = false; b.innerHTML = label; }
     } else if (b.dataset.linkFolder) {
       // connect a local folder to a project cloned from a git URL (reuses the folder picker)
       const id = b.dataset.linkFolder;
       pickerOnSelect = (path) => { setSyncFolder(id, path); };
       picker.showModal();
       loadDir(b.dataset.current || null).catch(() => loadDir(null));
+    } else if (b.dataset.gitRemote) {
+      openGitRemote(b.dataset);
     } else if (b.dataset.unlinkFolder) {
       if (confirm("Disconnect this folder? Nothing in it is changed; the project just stops syncing there.")) {
         setSyncFolder(b.dataset.unlinkFolder, null);
@@ -482,6 +544,41 @@ $("#psec-apply").onclick = async () => {
     $("#psec-status").textContent = "globals updated & injected";
   } catch (err) { $("#psec-status").textContent = err.message; }
 };
+
+// ---- git remote of an existing project (origin in the VM's workdir) ----
+const gitremote = $("#gitremote");
+let gitremoteFor = null;
+function openGitRemote({ gitRemote: id, name, current, token, cloned }) {
+  gitremoteFor = id;
+  const f = $("#gitremote-form");
+  f.reset();
+  f.remote.value = current;
+  f.token.placeholder = token === "1" ? "leave blank to keep the current token" : "leave blank for none";
+  $("#gitremote-title").textContent = `Git remote — ${name}`;
+  $("#gitremote-hint").textContent = "Set as origin in the VM's workdir, so the agent can fetch and push."
+    + (cloned === "1" && current ? " Rebuild re-clones from this URL." : "");
+  $("#gitremote-status").textContent = "";
+  gitremote.showModal();
+}
+$("#gitremote-close").onclick = () => gitremote.close();
+$("#gitremote-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const btn = f.querySelector("button[type=submit]");
+  btn.disabled = true;
+  $("#gitremote-status").textContent = "Saving…";
+  try {
+    await api(`/api/projects/${gitremoteFor}/git-remote`, {
+      method: "PUT", body: { remote: f.remote.value.trim(), token: f.token.value || undefined },
+    });
+    gitremote.close();
+    if (location.hash === `#project/${gitremoteFor}`) renderDetail(gitremoteFor);
+  } catch (err) {
+    $("#gitremote-status").textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 // ---- folder picker ----
 const picker = $("#picker");
@@ -850,6 +947,7 @@ function paintDetail(d) {
     <button data-term="${d.id}" data-name="${d.name}">${ICON.terminal}Terminal ↗</button>
     <button data-edit="${d.id}" data-name="${d.name}" title="Browse and edit the workdir">${ICON.editor}Editor ↗</button>
     ${d.sync_folder ? `<button data-sync="${d.id}">${ICON.sync}Sync back</button>` : ""}
+    ${d.sync_folder ? pushButton(d) : ""}
     <button data-secrets="${d.id}" data-name="${escapeHtml(d.name)}">${ICON.secrets}Secrets…</button>
     ${powerButton(d)}
     <button data-rebuild="${d.id}" data-name="${d.name}" title="Destroy the VM and recreate it from the original source">${ICON.rebuild}Rebuild</button>
@@ -905,7 +1003,12 @@ function paintDetail(d) {
           <dt>Workdir (in VM)</dt><dd class="mono">${escapeHtml(d.workdir)}</dd>
           <dt>Work branch</dt><dd class="mono">${escapeHtml(d.branch)}</dd>
           <dt>Uncommitted</dt><dd>${d.git.dirty ?? 0} file(s)</dd>
-          <dt>Git remote</dt><dd class="mono">${d.git_remote ? escapeHtml(d.git_remote) + (d.has_git_token ? " 🔑" : "") : "—"}</dd>
+          <dt>Git remote</dt><dd>${d.git_remote
+            ? `<span class="mono">${escapeHtml(d.git_remote)}${d.has_git_token ? " 🔑" : ""}</span>`
+            : `<span class="dim">none</span>`}
+            <button class="mini" data-git-remote="${d.id}" data-name="${escapeHtml(d.name)}" data-current="${escapeHtml(d.git_remote || "")}"
+              data-token="${d.has_git_token ? 1 : 0}" data-cloned="${d.source_path ? 0 : 1}"
+              ${state === "running" ? "" : `disabled title="Start the VM to change its git remote"`}>${d.git_remote ? "Change" : "Connect a remote…"}</button></dd>
         </dl>
       </div>
 
@@ -1593,3 +1696,4 @@ $("#nav-signout").onclick = async (e) => {
 // boot: secrets cache first (for create-form checkboxes), then route
 refreshSecrets().then(() => { if (!location.hash) location.hash = "home"; else route(); });
 setInterval(() => { if (!$("#view-projects").hidden) { refreshProjects(); refreshNavTree(); } }, 5000);
+setInterval(() => { if (!$("#view-home").hidden) refreshServiceStatus(); }, 5000);

@@ -67,7 +67,7 @@ swappable per-platform backends.
 | 8 | **Workdir: per-worker ext4 block device built on host** | True copy semantics (agent can't touch the source), portable to Firecracker (which rejects virtiofs), faster than virtiofs for small files. Exclude `node_modules`/`.venv`/`target` — macOS-built natives are broken in Linux anyway; reinstall inside. | 03, 06 |
 | 9 | **Terminal chain: xterm.js 6 ⇄ WS ⇄ Bun PTY ⇄ `container exec -it … tmux new -A -s main` ⇄ vsock** | Zero guest daemons; auth collapses into supervisor session auth; one WS + tmux client per browser tab; `new -A` kills creation races; sessions survive supervisor restarts (tmux lives in-guest). xterm.js 6 + tmux ≥ 3.4 synchronized output fixes Claude Code's flicker. Fallback: ttyd in-guest, reverse-proxied. | 04 |
 | 10 | **Secrets: SQLite + libsodium column encryption; delivery as tmpfs files over vsock** | KEK in macOS Keychain (via Bun.secrets) or compose `secrets:` file on Linux; DEK-envelope scheme. Nothing hides secrets from the agent itself — design for per-worker blast radius, image/log hygiene, rotation. `delivery='proxy'` reserved for a future egress credential-injection proxy. | 05 |
-| 11 | **Claude Code auth: host-minted `claude setup-token` OAuth token as a built-in secret** | Documented headless path (Pro/Max, 1-year token). N workers share one subscription's rate buckets — support optional `ANTHROPIC_API_KEY` for burst; never copy `.credentials.json`. | 05 |
+| 11 | **Claude Code auth: host-minted `claude setup-token` OAuth token as a built-in secret** | Documented headless path (Pro/Max, 1-year token). N workers share one subscription's rate buckets — support optional `ANTHROPIC_API_KEY` for burst; never copy `.credentials.json`. *Superseded 2026-11-03: agent logins are captured by the supervisor and copied into VMs (13, A4–A5).* | 05, 13 |
 | 12 | **Sync-back: git-native primary, tar-out fallback** | Guest autocommits to `sadbox/<worker>` branch, exports incremental `git bundle` over vsock; host fetches into a remote-tracking ref. Preview is free, source worktree untouched until explicit apply. Non-git folders: tar-out to staging + `git diff --no-index` preview + backed-up apply. Mutagen (stale), Unison, raw rsync (openrsync limitations) rejected. | 06 |
 | 13 | **Stack: Bun + TypeScript; Vite + React; bun:sqlite + Drizzle; Litestream backup** | Bun ≥ 1.3.5 has first-party PTY (`Bun.spawn({terminal})`), native WS server, `$` shell, single-file cross-compiled binaries. The Swift-only Apple framework forces CLI shell-out for *every* non-Swift stack, neutralizing Go's usual edge; Firecracker/CH REST-over-UDS works with Bun `fetch({unix})`. Go is the named runner-up; escape hatch: rewrite only the PTY bridge in Go if the 48 h / 20-terminal soak fails. | 07 |
 
@@ -123,10 +123,14 @@ swappable per-platform backends.
    edge case documented.
 4. ~~Scaffold the supervisor~~ — **done**: v0 ships on macOS (terminal,
    secrets, sync-back, editor, MITM proxy, port forwards, auth).
-5. **Credential proxy** — **← current step.** Placeholders in the VM, real
+5. **Credential proxy** — built. Placeholders in the VM, real
    tokens swapped in by the proxy ([11](11-credential-proxy.md)); starts with
    Spike D (`spikes/d-credential-proxy/`).
-6. **Linux support (Cloud Hypervisor driver)** — phased plan, starting with
+6. **Vaults + agent sessions** — **← current step.** Vault items usable but
+   not readable by VMs ([12](12-vaults.md)); agent logins and per-project
+   conversation history kept by the supervisor ([13](13-agent-sessions.md)).
+   Starts with the spikes in `spikes/f-agent-sessions/`.
+7. **Linux support (Cloud Hypervisor driver)** — phased plan, starting with
    Spike E, in [`../ROADMAP.md`](../ROADMAP.md).
 
 ## Doc index
@@ -144,3 +148,5 @@ swappable per-platform backends.
 | [09-mac-mini-deployment.md](09-mac-mini-deployment.md) | Mac mini home-server deployment |
 | [10-network-proxy.md](10-network-proxy.md) | Egress MITM proxy, rules, approvals |
 | [11-credential-proxy.md](11-credential-proxy.md) | Placeholder secrets swapped in by the proxy |
+| [12-vaults.md](12-vaults.md) | Vaults: variables and secrets, proxy and fetch-at-runtime modes |
+| [13-agent-sessions.md](13-agent-sessions.md) | Agent logins and per-project conversation history |

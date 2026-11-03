@@ -16,6 +16,9 @@ const TOOLS: { key: string; label: string; cmd: string }[] = [
   { key: "omp",      label: "omp",         cmd: "omp --version" },
   { key: "opencode", label: "opencode",    cmd: "opencode --version" },
   { key: "bun",      label: "Bun",         cmd: "bun --version" },
+  { key: "node",     label: "Node.js",     cmd: "node --version" },
+  { key: "npm",      label: "npm",         cmd: "npm --version" },
+  { key: "nvm",      label: "nvm",         cmd: "nvm --version" },
   { key: "git",      label: "git",         cmd: "git --version" },
   { key: "rg",       label: "ripgrep",     cmd: "rg --version" },
   { key: "jq",       label: "jq",          cmd: "jq --version" },
@@ -24,13 +27,16 @@ const TOOLS: { key: string; label: string; cmd: string }[] = [
 
 // A POSIX-sh script that prints "<key>\t<first line of version output>" for
 // each tool. PATH is set explicitly (the agents live in ~/.local/bin and
-// ~/.bun/bin) so this works under a plain `sh -c`, not just a login shell.
+// ~/.bun/bin, node under ~/.nvm/current/bin) so this works under a plain
+// `sh -c`, not just a login shell. nvm is a shell function: sourced, not run.
 function probeScript(): string {
   const lines = TOOLS.map((t) => {
     const bin = t.cmd.split(" ")[0];
     return `command -v ${bin} >/dev/null 2>&1 && printf '${t.key}\\t%s\\n' "$(${t.cmd} 2>/dev/null | head -1)"`;
   });
-  return `export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"\n${lines.join("\n")}`;
+  return `export PATH="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.nvm/current/bin:$PATH"
+[ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh" --no-use
+${lines.join("\n")}`;
 }
 
 // Pull a clean version token out of a tool's raw `--version` line, e.g.

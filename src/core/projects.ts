@@ -16,6 +16,8 @@ import { clearProjectFeed } from "../net/events";
 import { purgeProjectForwards } from "../net/forwards";
 import { duringSetup } from "../net/setup";
 import { type ToolInfo } from "./toolchain";
+import { ensureBaseImage } from "./baseimage";
+import { isEnvFile } from "./envfiles";
 import { forgetVitals, liveStats, liveToolchain, QUERY_TIMEOUT_MS } from "./vitals";
 
 const driver = getDriver();
@@ -67,7 +69,15 @@ async function imageExists(image: string): Promise<boolean> {
   }).exited) === 0;
 }
 
-async function resolveImage(): Promise<string> {
+/** The image a new VM boots from: the base image, first brought up to date
+ *  with its recipe (so tools added to it since reach the VM). Should that build
+ *  fail — offline, say — the image there is still used, and `note` says so. */
+async function resolveImage(note: (msg: string) => void): Promise<string> {
+  try {
+    await ensureBaseImage(note);
+  } catch (e) {
+    note(`${e instanceof Error ? e.message : e}\nusing the existing image`);
+  }
   for (const img of [config.baseImage, ...config.baseImageFallbacks]) {
     if (await imageExists(img)) return img;
   }
@@ -75,20 +85,24 @@ async function resolveImage(): Promise<string> {
 }
 
 /** Tar up the source folder respecting .gitignore (spike B + C recipes):
- *  tracked + untracked-but-not-ignored files, plus .git for full history.
+ *  tracked + untracked-but-not-ignored files, plus .git for full history —
+ *  but never an env file, tracked or not (envfiles.ts). Returns the env files
+ *  the repository tracks too: missing from the copy, they must be marked so
+ *  git in the VM does not take them for deleted (see markEnvFilesSkipped).
  *  The name list is materialized first — tar reads it from stdin (-T -)
  *  while the archive streams out on stdout. */
-async function tarSource(sourcePath: string): Promise<Uint8Array> {
-  const list = Bun.spawn(["git", "-C", sourcePath, "ls-files", "-coz", "--exclude-standard"], {
-    stdout: "pipe", stderr: "ignore",
-  });
-  const listed = await new Response(list.stdout).bytes();
-  if ((await list.exited) !== 0) throw new Error("git ls-files failed on source folder");
+export async function tarSource(sourcePath: string): Promise<{ bytes: Uint8Array; trackedEnv: string[] }> {
+  const ls = async (...args: string[]) => {
+    const list = Bun.spawn(["git", "-C", sourcePath, "ls-files", "-z", ...args], { stdout: "pipe", stderr: "ignore" });
+    const out = await new Response(list.stdout).text();
+    if ((await list.exited) !== 0) throw new Error("git ls-files failed on source folder");
+    return out.split("\0").filter(Boolean);
+  };
+  const tracked = await ls("-c");
+  const listed = [...new Set([...tracked, ...await ls("-o", "--exclude-standard")])];
   // .git rides in the NUL-separated name list — bsdtar stops option parsing
   // at the first positional arg, so everything must stay an option
-  const names = new Uint8Array(listed.length + 5);
-  names.set(listed);
-  names.set(new TextEncoder().encode(".git\0"), listed.length);
+  const names = new TextEncoder().encode([...listed.filter((n) => !isEnvFile(n)), ".git"].map((n) => n + "\0").join(""));
   const tar = Bun.spawn(
     ["tar", "--no-xattrs", "--null", "-C", sourcePath, "-T", "-", "-cf", "-"],
     {
@@ -100,7 +114,18 @@ async function tarSource(sourcePath: string): Promise<Uint8Array> {
   );
   const bytes = await new Response(tar.stdout).bytes();
   if ((await tar.exited) !== 0) throw new Error("tar failed on source folder");
-  return bytes;
+  return { bytes, trackedEnv: tracked.filter(isEnvFile) };
+}
+
+/** Env files the repository tracks are left out of the VM's copy. Marked
+ *  skip-worktree there, git treats them as unchanged rather than deleted — so
+ *  neither a commit in the VM nor a Sync back can delete them from the folder. */
+export async function markEnvFilesSkipped(ref: string, paths: string[]) {
+  if (!paths.length) return;
+  const r = await driver.execWithStdin(ref,
+    `cd ${config.guestWorkdir} && git update-index -z --skip-worktree --stdin`,
+    new TextEncoder().encode(paths.map((n) => n + "\0").join("")));
+  if (r.exitCode !== 0) throw new Error(`could not leave env files out of the VM's git: ${r.stderr.trim()}`);
 }
 
 export function listProjects(): ProjectRow[] {
@@ -243,7 +268,7 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
     if (head.code !== 0) throw new Error(`source folder is not a git repository with a commit: ${p.source_path}`);
     db.query("UPDATE projects SET base_sha = ?, last_synced_sha = ?, source_branch = ? WHERE id = ?")
       .run(head.out, head.out, branch.out || "HEAD", p.id);
-    const tarBytes = await tarSource(p.source_path);
+    const { bytes: tarBytes, trackedEnv } = await tarSource(p.source_path);
     const cp = await driver.execWithStdin(
       ref,
       `mkdir -p ${config.guestWorkdir} && tar -xf - -C ${config.guestWorkdir}`,
@@ -251,6 +276,7 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
       { timeoutMs: LONG_TASK_MS },
     );
     if (cp.exitCode !== 0) throw new Error(`copy-in failed: ${cp.stderr}`);
+    await markEnvFilesSkipped(ref, trackedEnv);
     const setup = await driver.exec(ref, ["sh", "-c",
       `cd ${config.guestWorkdir} && ` +
       `git config user.name "sadbox project ${p.name}" && ` +
@@ -266,6 +292,22 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   // external git remote + credentials — local mode only; clone mode already has
   // origin (from the clone) and credentials written above.
   if (!cloneMode) await configureGitRemote(ref, p);
+
+  // The base image is built once and its agents go stale, so bring claude, omp
+  // and opencode to their latest releases in every new or rebuilt VM. Best
+  // effort (an offline registry must not fail the create), each tool on its own.
+  await duringSetup(p.id, async () => {
+    const env = `[ -f ${config.guestNetEnvFile} ] && . ${config.guestNetEnvFile}; export PATH="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.nvm/current/bin:$PATH"; `;
+    const steps: [string, string][] = [
+      ["claude", "claude update"],
+      ["omp", "bun install -g @oh-my-pi/pi-coding-agent@latest"],
+      ["opencode", "bun install -g opencode-ai@latest"],
+    ];
+    for (const [tool, cmd] of steps) {
+      const r = await driver.exec(ref, ["sh", "-c", env + cmd], { timeoutMs: LONG_TASK_MS });
+      logEvent(p.id, "agent.update", `${tool}: ${r.exitCode === 0 ? "latest" : `exit ${r.exitCode} ${r.stderr.trim().slice(-200)}`}`);
+    }
+  });
 
   // extra apps (best effort — base toolchain is baked into the image). Run as
   // root with the proxy env, inside the provisioning window; the image ships
@@ -320,7 +362,8 @@ export async function createProject(opts: {
   }
 
   const id = crypto.randomUUID().slice(0, 8);
-  const image = await resolveImage();
+  const notes: string[] = []; // logged once the project's row exists
+  const image = await resolveImage((m) => notes.push(m));
   const gitRemote = opts.git?.remote ?? null;
   const gitTokenEnc = opts.git?.token ? encrypt(opts.git.token) : null;
   // base_sha/source_branch recorded by provisionVM once the workdir is seeded
@@ -329,6 +372,7 @@ export async function createProject(opts: {
      VALUES (?, ?, ?, 'creating', ?, NULL, NULL, NULL, ?, ?, ?)`,
   ).run(id, name, image, cloneMode ? "" : opts.sourcePath!,
         JSON.stringify(opts.apps ?? []), gitRemote, gitTokenEnc);
+  for (const n of notes) logEvent(id, "image", n);
   logEvent(id, "create.start", cloneMode ? `${name} cloning ${gitRemote}` : `${name} from ${opts.sourcePath}`);
 
   try {
@@ -494,6 +538,27 @@ export async function connectSyncFolder(id: string, path: string | null) {
   return { sync_path: repo, hasBase, isGitRepo: isRepo };
 }
 
+/** Give a project an external git remote (origin) after it was created, or
+ *  change it or its token. Without a new token the stored one is kept, for the
+ *  same host. It is set in the VM's workdir now, so the VM must be running; a
+ *  Rebuild sets it again — and for a project cloned from a URL, re-clones the
+ *  new one. */
+export async function setGitRemote(id: string, git: { remote?: string; token?: string }) {
+  const p = getProject(id);
+  if (!p || p.state === "destroyed") throw new Error("project not found");
+  const remote = String(git.remote ?? "").trim();
+  if (!/^https?:\/\//.test(remote)) throw new Error("git remote must be an http(s) URL");
+  const ref = refFor(p.name);
+  if ((await driver.inspect(ref)).state !== "running") throw new Error("start the VM first — the remote is set inside it");
+  const token = git.token?.trim();
+  const sameHost = p.git_remote != null && hostFromUrl(p.git_remote) === hostFromUrl(remote);
+  const tokenEnc = token ? encrypt(token) : sameHost ? p.git_token_enc : null;
+  await configureGitRemote(ref, { ...p, git_remote: remote, git_token_enc: tokenEnc });
+  db.query("UPDATE projects SET git_remote = ?, git_token_enc = ? WHERE id = ?").run(remote, tokenEnc, id);
+  logEvent(id, "git.remote", `${p.git_remote ? `${p.git_remote} → ` : ""}${remote}${tokenEnc ? " (with token)" : ""}`);
+  return { git_remote: remote, has_git_token: tokenEnc != null };
+}
+
 export async function destroyProject(id: string): Promise<void> {
   const p = getProject(id);
   if (!p) throw new Error("project not found");
@@ -527,9 +592,9 @@ export async function rebuildProject(id: string): Promise<ProjectRow> {
   }
 
   // Rebuild onto the CURRENT base image (not the stale image the project was
-  // first created with) so newly-baked tools — e.g. opencode added to the base
-  // after this project — land in the fresh VM.
-  const image = await resolveImage();
+  // first created with), built afresh if its recipe has changed, so tools
+  // added to the base after this project — e.g. nvm — land in the fresh VM.
+  const image = await resolveImage((m) => logEvent(id, "image", m));
   logEvent(id, "rebuild.start",
     (cloneMode ? `re-clone ${p.git_remote}` : `re-copy ${p.source_path}`) +
     (image !== p.image ? ` · image ${p.image} → ${image}` : ""));

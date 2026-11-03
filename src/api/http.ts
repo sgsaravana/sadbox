@@ -6,8 +6,9 @@ import { staticRoutes, aceFiles } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
 import { addBinding, assignSecrets, createGlobalSecret, createProjectSecret, deleteBinding, deleteSecret, injectSecrets, listGlobalSecrets, projectSecretView } from "../core/secrets";
-import { connectSyncFolder, createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject, setProjectMemory, startProject, stopProject } from "../core/projects";
+import { connectSyncFolder, setGitRemote, createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject, setProjectMemory, startProject, stopProject } from "../core/projects";
 import { syncStatus, syncProject } from "../core/sync";
+import { pushProject } from "../core/push";
 import { terminalLinks } from "../core/links";
 import { getSettings, updateSettings } from "../core/settings";
 import { baseImageToolchain } from "../core/toolchain";
@@ -164,6 +165,11 @@ export function startServer() {
           const b = await req.json().catch(() => ({}));
           return json(await syncProject(m[1], { force: b.force === true }));
         }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/push$/);
+        if (m && req.method === "POST") {           // copy the local folder into the VM
+          const b = await req.json().catch(() => ({}));
+          return json(await pushProject(m[1], { force: b.force === true }));
+        }
         m = p.match(/^\/api\/projects\/([\w-]+)\/term\/links$/);
         if (m && req.method === "GET") return json(await terminalLinks(m[1]));
         m = p.match(/^\/api\/projects\/([\w-]+)\/rebuild$/);
@@ -181,6 +187,11 @@ export function startServer() {
           return json(await connectSyncFolder(m[1], b.path ?? null));
         }
         if (m && req.method === "DELETE") return json(await connectSyncFolder(m[1], null));
+        m = p.match(/^\/api\/projects\/([\w-]+)\/git-remote$/);
+        if (m && req.method === "PUT") {            // add or change origin on an existing VM
+          const b = await req.json();
+          return json(await setGitRemote(m[1], { remote: b.remote, token: b.token ? String(b.token) : undefined }));
+        }
         m = p.match(/^\/api\/projects\/([\w-]+)\/sync\/status$/);
         if (m && req.method === "GET") return json(await syncStatus(m[1]));
 
@@ -351,6 +362,11 @@ export function startServer() {
             home: homedir(),
             dirs,
           });
+        }
+
+        // the VM backend's own service (Apple's container-apiserver): up or not, and why
+        if (p === "/api/system/status" && req.method === "GET") {
+          return json(await getDriver().serviceStatus());
         }
 
         // toolchain baked into the image new projects boot from (name + version)

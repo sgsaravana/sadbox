@@ -3,7 +3,7 @@
 import { readFile, rename, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { config } from "../config";
-import type { ByteStream, ExecResult, TerminalHandle, ProjectDriver, ProjectInfo, ProjectStats } from "./types";
+import type { ByteStream, ExecResult, TerminalHandle, ProjectDriver, ProjectInfo, ProjectStats, ServiceStatus } from "./types";
 
 const BIN = config.containerBin;
 const volname = (ref: string) => `${ref}-workdir`;
@@ -33,6 +33,18 @@ function orTimeout<T>(proc: { kill(signal?: number | NodeJS.Signals): void }, do
     }, ms);
   });
   return Promise.race([done, gaveUp]).finally(() => clearTimeout(timer));
+}
+
+// What the CLI says when its service (container-apiserver) is not running: it
+// does not come back by itself after a reboot or a `brew upgrade container`.
+const SERVICE_DOWN = /XPC connection error|container system start|apiserver is not running/i;
+const START_CMD = "container system start";
+
+/** The error for a failed CLI call — naming the real cause when the service is down. */
+function failed(what: string, stderr: string): Error {
+  const msg = stderr.trim();
+  if (SERVICE_DOWN.test(msg)) return new Error(`${what}: the container service is not running — start it with \`${START_CMD}\``);
+  return new Error(`${what}: ${msg}`);
 }
 
 async function run(args: string[], stdin?: Blob | Uint8Array, timeoutMs = QUICK_MS): Promise<ExecResult> {
@@ -97,6 +109,30 @@ export const containerDriver: ProjectDriver = {
   name: "container",
   capabilities: { snapshot: false, sharedMount: true, routableIp: true },
 
+  // `system status --format json` (container CLI 1.4.1):
+  // { status: "running", server: { version }, resources: { containersRunning, containersTotal } }
+  async serviceStatus(): Promise<ServiceStatus> {
+    let r: ExecResult;
+    try {
+      r = await run(["system", "status", "--format", "json"], undefined, 10_000);
+    } catch {
+      return { running: false, error: `the \`${BIN}\` CLI was not found — install Apple's container tool (brew install container)` };
+    }
+    let j: any = null;
+    try { j = JSON.parse(r.stdout); } catch {}
+    if (r.exitCode === 0 && j?.status === "running") {
+      return {
+        running: true,
+        version: j.server?.version,
+        containersRunning: j.resources?.containersRunning,
+        containersTotal: j.resources?.containersTotal,
+      };
+    }
+    if (r.exitCode === TIMED_OUT) return { running: false, error: "the container service did not answer within 10 s", fix: "container system stop && container system start" };
+    const said = (r.stderr.trim() || r.stdout.trim()).split("\n")[0];
+    return { running: false, error: said || `the container service is ${j?.status ?? "not running"}`, fix: START_CMD };
+  },
+
   async create(ref, image, opts) {
     const res: string[] = [];
     if (opts?.cpus) res.push("--cpus", String(opts.cpus));
@@ -107,7 +143,7 @@ export const containerDriver: ProjectDriver = {
       const vol = volname(ref);
       await run(["volume", "delete", vol]); // clear any stale volume, ignore error
       const v = await run(["volume", "create", "-s", `${opts.diskGB}G`, vol]);
-      if (v.exitCode !== 0) throw new Error(`volume create failed: ${v.stderr.trim()}`);
+      if (v.exitCode !== 0) throw failed("volume create failed", v.stderr);
       res.push("--mount", `type=volume,source=${vol},target=${config.guestWorkdir}`);
     }
     if (opts?.network) res.push("--network", opts.network);
@@ -118,21 +154,21 @@ export const containerDriver: ProjectDriver = {
       res.push("--publish-socket", `${opts.socket.host}:${opts.socket.guest}`);
     }
     const r = await run(["run", "--name", ref, "--detach", ...res, image], undefined, LIFECYCLE_MS);
-    if (r.exitCode !== 0) throw new Error(`container run failed: ${r.stderr.trim()}`);
+    if (r.exitCode !== 0) throw failed("container run failed", r.stderr);
   },
 
   async destroy(ref) {
     await this.stop(ref).catch(() => {}); // also gets a hung VM out of the way
     const r = await run(["rm", "--force", ref], undefined, LIFECYCLE_MS);
     if (r.exitCode !== 0 && !/no such|not found/i.test(r.stderr)) {
-      throw new Error(`container rm failed: ${r.stderr.trim()}`);
+      throw failed("container rm failed", r.stderr);
     }
     await run(["volume", "delete", volname(ref)]); // best effort; ignore if none
   },
 
   async start(ref) {
     const r = await run(["start", ref], undefined, 60_000);
-    if (r.exitCode !== 0) throw new Error(`container start failed: ${r.stderr.trim()}`);
+    if (r.exitCode !== 0) throw failed("container start failed", r.stderr);
   },
 
   async stop(ref) {
@@ -144,7 +180,8 @@ export const containerDriver: ProjectDriver = {
     if (await settledOff(this, ref, 2_000)) return;
     await unloadRuntime(ref);
     if (await settledOff(this, ref, 8_000)) return;
-    throw new Error(`could not stop the VM${r.stderr.trim() ? `: ${r.stderr.trim()}` : " (it is not responding)"}`);
+    if (r.stderr.trim()) throw failed("could not stop the VM", r.stderr);
+    throw new Error("could not stop the VM (it is not responding)");
   },
 
   // The CLI has no way to resize an existing container, and recreating one

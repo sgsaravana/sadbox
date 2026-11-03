@@ -34,6 +34,7 @@
     <main class="content">
       <!-- HOME / OVERVIEW VIEW -->
       <section id="view-home" class="view" hidden>
+        <div id="svc-status" class="svc" hidden></div>
         <div class="hero">
           <div class="hero-badge"><span class="logo">▪</span> sadbox</div>
           <h1 class="hero-title">Run AI coding agents in throwaway microVMs</h1>
@@ -301,6 +302,23 @@
       <span id="psec-status" class="hint"></span>
       <button type="button" id="psec-apply" class="primary">Apply globals</button>
     </div>
+  </dialog>
+
+  <dialog id="gitremote">
+    <form id="gitremote-form" method="dialog">
+      <div class="picker-head">
+        <strong id="gitremote-title">Git remote</strong>
+        <button type="button" id="gitremote-close">✕</button>
+      </div>
+      <label>Remote URL <input name="remote" required placeholder="https://github.com/you/repo.git" pattern="https?://.+"></label>
+      <label>Access token <span class="hint">optional — for private repos and pushing</span>
+        <input name="token" type="password" autocomplete="off" placeholder="leave blank for none"></label>
+      <p class="hint" id="gitremote-hint"></p>
+      <div class="row picker-foot">
+        <span id="gitremote-status" class="hint"></span>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
   </dialog>
 
   <dialog id="picker">

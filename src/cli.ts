@@ -1,8 +1,6 @@
-import { mkdtempSync, mkdirSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
+import { mkdirSync } from "fs";
 import { config, VERSION } from "./config";
-import { baseImageFiles } from "./assets";
+import { buildBaseImage } from "./core/baseimage";
 import { startServer } from "./api/http";
 import { startProxy } from "./net/proxy";
 import { startForwards } from "./net/forwards";
@@ -22,17 +20,6 @@ async function sh(cmd: string[], opts: { inherit?: boolean } = {}) {
 
 async function has(bin: string) {
   return (await sh(["sh", "-c", `command -v ${bin}`])).code === 0;
-}
-
-/** Build the base image from the embedded Dockerfile + tmux.conf. */
-async function buildBaseImage() {
-  const ctx = mkdtempSync(join(tmpdir(), "sadbox-img-"));
-  for (const [name, embeddedPath] of Object.entries(baseImageFiles)) {
-    await Bun.write(join(ctx, name), Bun.file(embeddedPath));
-  }
-  console.log("→ building base image sadbox-base:latest (~1 min)…");
-  const r = await sh([BIN, "build", "-t", "sadbox-base:latest", ctx], { inherit: true });
-  if (r.code !== 0) throw new Error("base image build failed");
 }
 
 async function setup() {
@@ -57,7 +44,8 @@ async function setup() {
   mkdirSync(config.dataDir, { recursive: true });
   console.log(`✓ data dir ${config.dataDir}`);
 
-  await buildBaseImage();
+  console.log(`→ building base image ${config.baseImage} (a few minutes)…`);
+  await buildBaseImage({ inherit: true });
   console.log("\n✓ setup complete — run 'sadbox serve' and open http://localhost:7070");
 }
 

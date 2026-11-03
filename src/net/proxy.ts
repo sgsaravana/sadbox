@@ -442,6 +442,7 @@ export async function installGuestProxy(ref: string): Promise<void> {
     `export NO_PROXY="${noProxy}"`, `export no_proxy="${noProxy}"`,
     `export NODE_EXTRA_CA_CERTS="${config.guestCaPath}"`,
     `export NODE_USE_ENV_PROXY=1`, // Node's built-in fetch ignores the proxy vars without it
+    `export PI_PROXY="${url}"`, // oh-my-pi sends Anthropic calls over node:https and only hands off to a proxy for PI_PROXY
     `export REQUESTS_CA_BUNDLE="${config.guestCaBundle}"`,
     `export SSL_CERT_FILE="${config.guestCaBundle}"`,
     `export GIT_SSL_CAINFO="${config.guestCaBundle}"`,
