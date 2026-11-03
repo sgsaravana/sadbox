@@ -135,13 +135,12 @@ export function createHeaderRule(o: {
 
   let valueSecretId: string | null = null;
   if (o.op === "set" && o.valueSecretId) {
-    const s = db.query<{ id: string; project_id: string | null }, [string]>(
-      "SELECT id, project_id FROM secrets WHERE id=?",
-    ).get(o.valueSecretId);
-    if (!s) throw new Error("secret not found");
-    // a project-specific secret is only usable by a rule scoped to that project
-    if (s.project_id && (o.scope !== "project" || s.project_id !== o.projectId)) {
-      throw new Error("that secret belongs to another project");
+    const s = db.query<{ id: string }, [string]>("SELECT id FROM secrets WHERE id=?").get(o.valueSecretId);
+    if (!s) throw new Error("vault item not found");
+    // a project's rule may only use what the project has access to; a global
+    // rule fills the header only in projects that have (see applyHeaders)
+    if (o.scope === "project" && !db.query("SELECT 1 FROM project_secrets WHERE project_id=? AND secret_id=?").get(o.projectId!, s.id)) {
+      throw new Error("this project has no access to that vault item");
     }
     valueSecretId = s.id;
   }
@@ -211,9 +210,10 @@ export function applyHeaders(
     }
     let value = r.value ?? "";
     if (r.value_secret_id) {
-      // resolve from the secret store; only globals or this project's own secret
+      // resolve from the vault — only an item this project has access to
       const s = db.query<{ value_enc: string }, [string, string | null]>(
-        "SELECT value_enc FROM secrets WHERE id=? AND (project_id IS NULL OR project_id=?)",
+        `SELECT s.value_enc FROM secrets s JOIN project_secrets ps ON ps.secret_id = s.id
+         WHERE s.id=? AND ps.project_id=?`,
       ).get(r.value_secret_id, projectId);
       if (!s) continue; // secret gone or not accessible → leave the header untouched
       value = decrypt(s.value_enc);

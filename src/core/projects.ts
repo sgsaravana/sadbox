@@ -6,7 +6,7 @@ import { encrypt, decrypt } from "../crypto";
 import { db, logEvent } from "../db";
 import { getDriver } from "../driver";
 import { LONG_TASK_MS, type ProjectInfo, type ProjectStats } from "../driver/types";
-import { injectSecrets, assignSecrets, purgeProjectSecrets } from "./secrets";
+import { injectVault, setProjectItems, purgeProjectVault } from "./vault";
 import { getSettings, validMemoryMB } from "./settings";
 import { installGuestProxy, openProjectSocket, closeProjectSocket, redialProjectSocket } from "../net/proxy";
 import { forgetGuestTools, startGuestRelay } from "../net/guest";
@@ -328,8 +328,8 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   }
 
   // assign (create only) then (re)write the env file from whatever's assigned
-  if (opts.assignSecretIds?.length) assignSecrets(p.id, opts.assignSecretIds);
-  await injectSecrets(p.id);
+  if (opts.assignSecretIds?.length) setProjectItems(p.id, opts.assignSecretIds);
+  await injectVault(p.id);
 
   // tmux starts last so its shells are born with the secrets + proxy env in place
   const tmux = await driver.exec(ref, ["tmux", "new-session", "-d",
@@ -563,7 +563,7 @@ export async function destroyProject(id: string): Promise<void> {
   const p = getProject(id);
   if (!p) throw new Error("project not found");
   await driver.destroy(refFor(p.name));
-  purgeProjectSecrets(id); // project-specific secrets die with the VM
+  purgeProjectVault(id);   // its vault access and placeholders go; the items stay
   purgeProjectNet(id);     // per-project net rules die with the VM too
   purgeProjectForwards(id); // …and so do its port forwards (frees the host ports)
   await rm(join(config.dataDir, "sync", `${id}.git`), { recursive: true, force: true });
@@ -694,7 +694,7 @@ export async function startProject(id: string): Promise<ProjectRow> {
       await startGuestRelay(ref);
       redialProjectSocket(id); // carriers dialed before the shutdown are dead
     }
-    await injectSecrets(id).catch((e) => logEvent(id, "secrets.inject.error", String(e)));
+    await injectVault(id).catch((e) => logEvent(id, "vault.inject.error", String(e)));
     const tmux = await driver.exec(ref, ["sh", "-c",
       `tmux has-session -t ${config.tmuxSession} 2>/dev/null || ` +
       `tmux new-session -d -s ${config.tmuxSession} -c ${config.guestWorkdir}`]);

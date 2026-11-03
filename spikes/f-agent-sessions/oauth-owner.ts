@@ -17,7 +17,7 @@ import { createHash } from "crypto";
 import { db } from "../../src/db";
 import { decrypt, encrypt } from "../../src/crypto";
 import { getDriver } from "../../src/driver";
-import { createProjectSecret, deleteSecret, injectSecrets } from "../../src/core/secrets";
+import { createItem, deleteItem, injectVault } from "../../src/core/vault";
 import { existingPlaceholder } from "../../src/core/placeholders";
 import { refFor } from "../../src/core/projects";
 
@@ -36,7 +36,8 @@ if (!project) throw new Error(`usage: ${cmd ?? "<take|refresh|status|drop>"} <pr
 const ref = refFor(project.name);
 
 const secret = (n: string) => db.query<{ id: string; value_enc: string }, [string, string]>(
-  "SELECT id, value_enc FROM secrets WHERE project_id = ? AND name = ?").get(project.id, n);
+  `SELECT s.id, s.value_enc FROM secrets s JOIN project_secrets ps ON ps.secret_id = s.id
+   WHERE ps.project_id = ? AND s.name = ?`).get(project.id, n);
 
 async function readVmCreds(): Promise<any> {
   const r = await driver.exec(ref, ["cat", CREDS]);
@@ -55,11 +56,11 @@ if (cmd === "take") {
   const o = j.claudeAiOauth;
   if (!o?.accessToken || !o?.refreshToken) throw new Error("the VM's login has no OAuth tokens");
   if (String(o.accessToken).includes("sbx")) throw new Error("the VM already holds placeholders");
-  const a = createProjectSecret(project.id, ACCESS, o.accessToken, { delivery: "proxy", bindings: [{ host: "api.anthropic.com", header: "authorization" }] });
-  const r = createProjectSecret(project.id, REFRESH, o.refreshToken, { delivery: "proxy", bindings: [{ host: "platform.claude.com", path: "/v1/oauth/token" }] });
+  const a = createItem({ name: ACCESS, value: o.accessToken, mode: "proxy", bindings: [{ host: "api.anthropic.com", header: "authorization" }], projectIds: [project.id] });
+  const r = createItem({ name: REFRESH, value: o.refreshToken, mode: "proxy", bindings: [{ host: "platform.claude.com", path: "/v1/oauth/token" }], projectIds: [project.id] });
   db.query("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
     .run(`spike-f5:${project.id}:expiresAt`, String(o.expiresAt));
-  await injectSecrets(project.id); // makes the placeholders
+  await injectVault(project.id); // makes the placeholders
   const pa = existingPlaceholder(project.id, a.id)!, pr = existingPlaceholder(project.id, r.id)!;
   await writeVmCreds({ ...j, claudeAiOauth: { ...o, accessToken: pa, refreshToken: pr, expiresAt: Date.now() + FAR } });
   console.log(`taken: real access ${fp(o.accessToken)} refresh ${fp(o.refreshToken)} → VM placeholders ${pa.slice(0, 16)}… / ${pr.slice(0, 16)}…`);
@@ -95,9 +96,9 @@ if (cmd === "take") {
     : "not taken");
   console.log(`VM holds access ${String(vm.accessToken).slice(0, 16)}… (placeholder: ${String(vm.accessToken).includes("sbx")}), expires in ${((vm.expiresAt - Date.now()) / 864e5).toFixed(0)} days`);
 } else if (cmd === "drop") {
-  for (const n of [ACCESS, REFRESH]) { const s = secret(n); if (s) await deleteSecret(s.id); }
+  for (const n of [ACCESS, REFRESH]) { const s = secret(n); if (s) await deleteItem(s.id); }
   db.query("DELETE FROM settings WHERE key = ?").run(`spike-f5:${project.id}:expiresAt`);
-  await injectSecrets(project.id);
+  await injectVault(project.id);
   console.log("dropped (the VM's login file still holds placeholders — log in again there to use Claude)");
 } else {
   throw new Error("usage: take | refresh | status | drop <project name>");

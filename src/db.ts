@@ -99,9 +99,10 @@ if (refsOldTable("secrets") || refsOldTable("project_secrets")) {
   db.run("PRAGMA foreign_keys = ON");
 }
 
-// secrets.project_id: NULL = global (assignable to many projects via
-// project_secrets); set = project-specific (owned by that project, deleted
-// when the project is destroyed)
+// secrets: the vault's items (docs/research/12). The table keeps its old name
+// so placeholders, bindings and header rules keep pointing at it. Which
+// projects may use an item is project_secrets. secrets.project_id is from
+// before the vault (a project-specific secret) — migrateToVault() empties it.
 db.run(`
   CREATE TABLE IF NOT EXISTS secrets (
     id TEXT PRIMARY KEY,
@@ -110,10 +111,6 @@ db.run(`
     value_enc TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
-db.run(`CREATE UNIQUE INDEX IF NOT EXISTS secrets_global_name
-        ON secrets(name) WHERE project_id IS NULL`);
-db.run(`CREATE UNIQUE INDEX IF NOT EXISTS secrets_project_name
-        ON secrets(project_id, name) WHERE project_id IS NOT NULL`);
 db.run(`
   CREATE TABLE IF NOT EXISTS project_secrets (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -121,19 +118,51 @@ db.run(`
     status TEXT NOT NULL DEFAULT 'pending',   -- pending|injected|stale
     PRIMARY KEY (project_id, secret_id)
   )`);
-// delivery: how a secret reaches a VM (docs/research/11).
-//   env    the real value is written to the VM's env file
+// delivery: how an item reaches a VM (docs/research/11, 12).
 //   proxy  the VM gets a placeholder; the egress proxy swaps in the real value
-//          on requests to the secret's bindings, so it never enters the VM
-{
-  const has = db.query<{ name: string }, []>("PRAGMA table_info(secrets)").all()
-    .some((c) => c.name === "delivery");
-  if (!has) db.run("ALTER TABLE secrets ADD COLUMN delivery TEXT NOT NULL DEFAULT 'env'");
+//          on requests to the item's bindings, so it never enters the VM
+//   fetch  nothing in the VM; fetched at runtime (`in_env`: also written to
+//          the env file, as every secret was before the vault)
+//   env    before the vault: the real value in the env file → fetch + in_env
+// kind: variable (value shown in the UI) | secret (hidden until revealed)
+// value_type: string | number | json
+// ask_on_fetch: a fetch waits for the owner's approval
+for (const [col, ddl] of [
+  ["delivery", "delivery TEXT NOT NULL DEFAULT 'env'"],
+  ["kind", "kind TEXT NOT NULL DEFAULT 'secret'"],
+  ["value_type", "value_type TEXT NOT NULL DEFAULT 'string'"],
+  ["in_env", "in_env INTEGER NOT NULL DEFAULT 0"],
+  ["ask_on_fetch", "ask_on_fetch INTEGER NOT NULL DEFAULT 1"],
+  ["updated_at", "updated_at TEXT"],
+]) {
+  const has = db.query<{ name: string }, []>("PRAGMA table_info(secrets)").all().some((c) => c.name === col);
+  if (!has) db.run(`ALTER TABLE secrets ADD COLUMN ${ddl}`);
 }
+
+/** Secrets → vault items (docs/research/12, V9). Idempotent, run at every start.
+ *  An env secret becomes a fetch item still written to the env file, with no
+ *  approval, so nothing using it breaks. A project-specific secret becomes an
+ *  item its project has access to — and, as before, wins over an assigned
+ *  global of the same name, which that project loses access to. Names are
+ *  unique per project now, not across the vault. */
+export function migrateToVault(): void {
+  db.transaction(() => {
+    db.run("DROP INDEX IF EXISTS secrets_global_name");
+    db.run("DROP INDEX IF EXISTS secrets_project_name");
+    db.run("UPDATE secrets SET delivery = 'fetch', in_env = 1, ask_on_fetch = 0 WHERE delivery = 'env'");
+    db.run(`DELETE FROM project_secrets WHERE EXISTS (
+              SELECT 1 FROM secrets g JOIN secrets own ON own.name = g.name AND own.id != g.id
+              WHERE g.id = project_secrets.secret_id AND own.project_id = project_secrets.project_id)`);
+    db.run(`INSERT OR IGNORE INTO project_secrets (project_id, secret_id, status)
+            SELECT project_id, id, 'injected' FROM secrets WHERE project_id IS NOT NULL`);
+    db.run("UPDATE secrets SET project_id = NULL WHERE project_id IS NOT NULL");
+  })();
+}
+migrateToVault();
 // One placeholder per (project, proxy secret), stable across restarts and
 // rebuilds, different in every VM — a placeholder copied out of one VM is
 // worthless from another. No cascade from projects: project rows are soft-
-// deleted, so purgeProjectSecrets clears these explicitly.
+// deleted, so purgeProjectVault clears these explicitly.
 db.run(`
   CREATE TABLE IF NOT EXISTS secret_placeholders (
     project_id TEXT NOT NULL REFERENCES projects(id),

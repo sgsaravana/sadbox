@@ -23,7 +23,7 @@ const { startProxy } = await import("../../src/net/proxy");
 const { createRule } = await import("../../src/net/rules");
 const { caCertPath } = await import("../../src/config");
 const { db } = await import("../../src/db");
-const { createGlobalSecret, assignSecrets } = await import("../../src/core/secrets");
+const { createItem } = await import("../../src/core/vault");
 const { placeholderFor } = await import("../../src/core/placeholders");
 const { listPending, resolveApproval } = await import("../../src/net/approvals");
 const { recentRequests } = await import("../../src/net/events");
@@ -33,9 +33,8 @@ db.query("INSERT INTO projects (id, name, image, state, source_path) VALUES (?, 
 createRule({ scope: "global", action: "allow", host: "httpbin.org" });
 
 const REAL = "ghp_DUMMYREAL0000000000000000000000000000";
-const s = createGlobalSecret("DEMO_TOKEN", REAL, { delivery: "proxy", bindings: [{ host: "httpbin.org", path: "/headers" }] });
-assignSecrets(P, [s.id]);
-const PH = placeholderFor(P, s.id, REAL); // what injectSecrets would write into the VM
+const s = createItem({ name: "DEMO_TOKEN", value: REAL, mode: "proxy", bindings: [{ host: "httpbin.org", path: "/headers" }], projectIds: [P] });
+const PH = placeholderFor(P, s.id, REAL); // what injectVault would write into the VM
 
 await startProxy();
 await Bun.sleep(300);

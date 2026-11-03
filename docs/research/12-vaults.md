@@ -59,6 +59,60 @@ quietly.
 | V8 | **The VM can never reach the supervisor's own API** through the proxy — verified, with a test. | Otherwise the reveal endpoint (V7) would undo everything. |
 | V9 | **Migration:** existing `proxy` secrets → proxy items, bindings kept. Existing `env` secrets → **fetch** items **without** approval, and they keep being written to the env file until the owner turns that off per item, so nothing using them breaks. Global assignments become the item's projects; a project-specific secret gets access to its one project. | Owner's choice: keep existing secrets working, tighten item by item. |
 
+## As built — step 1 (2026-11-04)
+
+`src/core/vault.ts` (was `secrets.ts`), migration `migrateToVault()` in
+`src/db.ts`, routes under `/api/vault` in `src/api/http.ts`.
+
+- **The `secrets` table is the vault**, extended — not new `vault_items` /
+  `vault_access` tables as first sketched (V1). New columns `kind`,
+  `value_type`, `in_env`, `ask_on_fetch`, `updated_at`; `delivery` is the mode
+  (`proxy` | `fetch`). Access is `project_secrets`. Placeholders, bindings and
+  header rules keep pointing at the same rows, so the proxy is unchanged.
+- **Names are unique per project, not across the vault**: a VM refers to an
+  item by name, so a project can't have two of one name; two projects can each
+  have their own `GITHUB_TOKEN`. Needed because project-specific secrets (which
+  could share a name with a global, or with another project's) become ordinary
+  items.
+- **Destroying a project no longer deletes anything from the vault** — it loses
+  its access and placeholders; the items stay (they used to die with it when
+  project-specific).
+- Header rules (`net/rules.ts`) resolve an item only in a project that has
+  access to it, also from a global rule; a project rule can only be created
+  with an item its project has access to.
+- Hosts (bindings) can be added to any item, so one can get its hosts before
+  it is switched to proxy; only proxy mode uses them.
+- A new value of another shape (prefix) gets new placeholders everywhere;
+  every change rewrites the env file of the running projects using the item.
+- Defaults for a new item: secret, string, fetch, not in the env file, asks
+  on fetch (a variable does not ask).
+- Until step 4 a fetch item **not** marked "in env" reaches no VM at all.
+- The old Secrets page kept working through legacy routes until step 2
+  replaced it; they are gone.
+
+API: `GET/POST /api/vault`, `GET/PATCH/DELETE /api/vault/:id`,
+`GET /api/vault/:id/value` (reveal, logged), `PUT /api/vault/:id/projects`,
+`POST/DELETE /api/vault/:id/bindings[/:bid]`, `GET/PUT /api/projects/:id/vault`.
+
+## As built — step 2 (2026-11-04)
+
+The **Vaults** tab (`#vaults`; the old `#secrets` link redirects) in
+`web/index.html` / `web/app.js`:
+
+- One card per item: name, kind / type / mode badges ("asks first", "+ env
+  file"), the value (a variable's in full; a secret's as `••••` with an eye
+  that fetches it from `GET /api/vault/:id/value` — logged — and hides it again
+  on a second click or after 30 s), the projects that may use it (links), and
+  its hosts as chips.
+- One dialog creates and edits an item: secret / variable, name, type (a JSON
+  value gets a text area), value (a secret's is a password field with its own
+  eye; left empty when editing, it is kept), the mode with its hosts (presets
+  for GitHub / Anthropic / OpenAI) or the fetch options, and the projects.
+- A project's **Vault…** button lists every item with a checkbox, shows the
+  placeholder its VM holds for a proxy item, and can create an item for it.
+- The create-project form ticks vault items; a header rule picks a vault item
+  (a project rule only among the items its project may use).
+
 ## Not decided yet / open
 
 - Placeholder format for `number` / `json` items in env (a placeholder is a

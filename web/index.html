@@ -19,8 +19,8 @@
           <span class="nav-ico">▦</span> Projects
         </a>
         <ul id="nav-projects" class="nav-tree"></ul>
-        <a href="#secrets" class="nav-item" data-view="secrets">
-          <span class="nav-ico">⚿</span> Secrets
+        <a href="#vaults" class="nav-item" data-view="vaults">
+          <span class="nav-ico">⚿</span> Vaults
         </a>
         <a href="#settings" class="nav-item nav-bottom" data-view="settings">
           <span class="nav-ico">⚙</span> Settings
@@ -76,9 +76,9 @@
           </div>
           <div class="feature">
             <span class="feat-ico">🔑</span>
-            <h3>Encrypted secrets</h3>
-            <p>Global or per-project secrets, encrypted at rest and injected into the VM as env —
-              write-only in the UI, never echoed back.</p>
+            <h3>Vaults</h3>
+            <p>Variables and secrets, encrypted at rest, given to the projects you pick. A VM uses them
+              without holding the real value — the proxy swaps it in on the way out.</p>
           </div>
           <div class="feature">
             <span class="feat-ico">↩️</span>
@@ -106,11 +106,11 @@
           <h3>Good to know</h3>
           <ul>
             <li><b>Rebuild</b> a project from its detail page to redeploy a fresh VM from the same
-              source (folder re-copied or git repo re-cloned) — secrets and network rules are kept,
+              source (folder re-copied or git repo re-cloned) — vault access and network rules are kept,
               and it uses the latest base image, so newly-baked tools (e.g. opencode) show up.</li>
             <li>Set default VM CPU / memory / disk and global network rules in <a href="#settings">Settings</a>.</li>
-            <li>Add shared API keys and tokens under <a href="#secrets">Secrets</a>, then assign them to projects.</li>
-            <li>For Claude Code auth, create a <code>CLAUDE_CODE_OAUTH_TOKEN</code> (or <code>ANTHROPIC_API_KEY</code>) secret and assign it to the project.</li>
+            <li>Add API keys, tokens and settings under <a href="#vaults">Vaults</a>, and tick the projects that may use each.</li>
+            <li>For Claude Code auth, create a <code>CLAUDE_CODE_OAUTH_TOKEN</code> (or <code>ANTHROPIC_API_KEY</code>) secret in a vault and give the project access.</li>
             <li>VMs have no network of their own: they cannot reach the internet, this machine, your LAN or each other except through the proxy's rules. Projects created before this show <b>not isolated</b> on their detail page until you Rebuild them.</li>
             <li>The web UI needs a password (<code>sadbox passwd</code> to change it) and listens on localhost only; put a TLS reverse proxy in front before reaching it from other machines.</li>
           </ul>
@@ -168,7 +168,7 @@
           </fieldset>
           <label>Extra apt packages <input name="apps" placeholder="python3, htop (optional)"></label>
 
-          <fieldset><legend>Global secrets</legend><div id="create-secrets" class="checks"></div></fieldset>
+          <fieldset><legend>Vault items</legend><div id="create-secrets" class="checks"></div></fieldset>
           <div class="row">
             <button type="submit" class="primary">Create</button>
             <button type="button" id="btn-cancel">Cancel</button>
@@ -232,76 +232,92 @@
       </section>
 
       <!-- SECRETS VIEW -->
-      <section id="view-secrets" class="view" hidden>
-        <div class="section-head"><h1>Global secrets</h1></div>
-        <p class="hint">Shared secrets you can assign to any number of projects.
-          Project-specific secrets are managed from each project's <em>Secrets…</em> button.
-          A secret is delivered <b>in the VM</b> (its value in the VM's env) or <b>via the proxy</b>
-          (the VM only ever sees a placeholder).</p>
-        <div class="panel">
-          <ul id="secrets"></ul>
-          <form id="secret-form" class="secret-form">
-            <div class="row">
-              <input name="name" required placeholder="ANTHROPIC_API_KEY" pattern="[A-Z][A-Z0-9_]*">
-              <input name="value" required type="password" placeholder="value (write-only)">
-              <select name="delivery" title="How the secret reaches the VM">
-                <option value="env">in the VM (env)</option>
-                <option value="proxy">via the proxy (placeholder)</option>
-              </select>
-              <button type="submit" class="primary">Add</button>
-            </div>
-          <div class="row proxy-only" hidden>
-            <input name="hosts" placeholder="hosts it may go to — api.github.com, github.com, *.example.com/api/*">
-          </div>
-          <div class="row proxy-only presets" hidden>
-            <span class="hint">presets:</span>
-            <button type="button" data-preset="github">GitHub</button>
-            <button type="button" data-preset="anthropic">Anthropic</button>
-            <button type="button" data-preset="openai">OpenAI</button>
-          </div>
-          <p class="hint proxy-only" hidden>The VM gets a placeholder that looks like the token. The proxy swaps in the
-            real value only over https, only to these hosts — it never enters the VM. Any other host asks first.</p>
-          </form>
+      <section id="view-vaults" class="view" hidden>
+        <div class="section-head">
+          <h1>Vaults</h1>
+          <button id="vault-new" class="primary">+ New item</button>
         </div>
+        <p class="hint vault-intro"><b>Variables</b> show their value here; <b>secrets</b> stay hidden until you reveal them.
+          Tick the projects that may use an item. A VM never holds a real value it isn't meant to:
+          <b>via proxy</b> — the VM gets a placeholder and the proxy swaps in the value on requests to the item's hosts;
+          <b>fetch at runtime</b> — the app asks for it when it needs it.</p>
+        <div id="vault-list" class="vault-list"></div>
       </section>
     </main>
   </div>
 
   <dialog id="psec">
     <div class="picker-head">
-      <strong id="psec-title">Project secrets</strong>
+      <strong id="psec-title">Vault</strong>
       <button type="button" id="psec-close">✕</button>
     </div>
-    <h3 class="psec-h">Project-specific <span class="hint">— live only in this project, destroyed with it</span></h3>
-    <ul id="psec-own" class="psec-list"></ul>
-    <form id="psec-add" class="secret-form">
-      <div class="row">
-        <input name="name" required placeholder="MY_TOKEN" pattern="[A-Z][A-Z0-9_]*">
-        <input name="value" required type="password" placeholder="value (write-only)">
-        <select name="delivery" title="How the secret reaches the VM">
-          <option value="env">in the VM (env)</option>
-          <option value="proxy">via the proxy (placeholder)</option>
-        </select>
-        <button type="submit" class="primary">Add</button>
-      </div>
-      <div class="row proxy-only" hidden>
-        <input name="hosts" placeholder="hosts it may go to — api.github.com, github.com, *.example.com/api/*">
-      </div>
-      <div class="row proxy-only presets" hidden>
-        <span class="hint">presets:</span>
-        <button type="button" data-preset="github">GitHub</button>
-        <button type="button" data-preset="anthropic">Anthropic</button>
-        <button type="button" data-preset="openai">OpenAI</button>
-      </div>
-      <p class="hint proxy-only" hidden>The VM gets a placeholder that looks like the token. The proxy swaps in the
-        real value only over https, only to these hosts — it never enters the VM. Any other host asks first.</p>
-    </form>
-    <h3 class="psec-h">Assigned global secrets</h3>
-    <div id="psec-globals" class="checks"></div>
+    <p class="hint">The vault items this project may use. A proxy item shows the placeholder this VM holds.</p>
+    <div id="psec-items" class="psec-items"></div>
     <div class="row picker-foot">
+      <button type="button" id="psec-new" class="link-add">+ New item for this project</button>
       <span id="psec-status" class="hint"></span>
-      <button type="button" id="psec-apply" class="primary">Apply globals</button>
+      <button type="button" id="psec-apply" class="primary">Apply</button>
     </div>
+  </dialog>
+
+  <dialog id="vitem">
+    <form id="vitem-form">
+      <div class="picker-head">
+        <strong id="vitem-title">New vault item</strong>
+        <button type="button" id="vitem-close">✕</button>
+      </div>
+      <div class="seg" id="vitem-kind">
+        <label class="seg-opt"><input type="radio" name="kind" value="secret" checked><span>🔒 Secret</span></label>
+        <label class="seg-opt"><input type="radio" name="kind" value="variable"><span>𝑥 Variable</span></label>
+      </div>
+      <div class="row vitem-row">
+        <label class="grow">Name <input name="name" required placeholder="DB_PASSWORD" pattern="[A-Z][A-Z0-9_]*"
+          title="Upper case, digits and _ — the name the VM refers to it by"></label>
+        <label>Type
+          <select name="type"><option value="string">string</option><option value="number">number</option><option value="json">json</option></select>
+        </label>
+      </div>
+      <label>Value
+        <span class="row input-with-btn">
+          <input name="value" autocomplete="off" spellcheck="false">
+          <textarea name="valueJson" rows="5" spellcheck="false" hidden></textarea>
+          <button type="button" id="vitem-eye" class="mini" title="Show / hide">👁</button>
+        </span>
+      </label>
+      <p class="hint" id="vitem-keep" hidden>Leave the value empty to keep the current one.</p>
+
+      <fieldset>
+        <legend>How a VM uses it</legend>
+        <label class="check"><input type="radio" name="mode" value="proxy"> <b>Via proxy</b>
+          <span class="hint">— the VM gets a placeholder; the proxy swaps in the value on https requests to these hosts. Never readable in the VM.</span></label>
+        <div class="vitem-proxy">
+          <input name="hosts" placeholder="hosts it may go to — api.github.com, github.com, *.example.com/api/*">
+          <div class="row presets">
+            <span class="hint">presets:</span>
+            <button type="button" data-preset="github">GitHub</button>
+            <button type="button" data-preset="anthropic">Anthropic</button>
+            <button type="button" data-preset="openai">OpenAI</button>
+          </div>
+          <div id="vitem-hosts-now" class="hint"></div>
+        </div>
+        <label class="check"><input type="radio" name="mode" value="fetch" checked> <b>Fetch at runtime</b>
+          <span class="hint">— nothing in the VM; the app asks for it when it needs it.</span></label>
+        <div class="vitem-fetch">
+          <label class="check"><input type="checkbox" name="askOnFetch" checked> Ask me before each fetch</label>
+          <label class="check"><input type="checkbox" name="inEnv"> Also write it into the VM's env file
+            <span class="hint">— readable inside the VM</span></label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Projects that may use it</legend>
+        <div id="vitem-projects" class="checks"></div>
+      </fieldset>
+      <div class="row picker-foot">
+        <span id="vitem-status" class="hint"></span>
+        <button type="submit" class="primary" id="vitem-save">Create</button>
+      </div>
+    </form>
   </dialog>
 
   <dialog id="gitremote">

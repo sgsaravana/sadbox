@@ -14,13 +14,15 @@ const api = async (path, opts = {}) => {
   return data;
 };
 
-let secretsCache = [];
+let vaultCache = [];    // every vault item (a variable with its value, a secret without)
+let projectNames = {};  // id → name, for showing which projects use an item
 
 // ---- side nav routing ----
-// hashes: #projects (list) · #secrets · #project/<id> (detail)
+// hashes: #projects (list) · #vaults · #project/<id> (detail)
 let detailTimer = null;
 let openCreateNext = false; // set by the Home CTA so #projects opens the create form
 function route() {
+  if (location.hash === "#secrets") { location.replace("#vaults"); return; } // the page's old name
   const hash = location.hash.slice(1);
   const [head, arg] = hash.split("/");
   clearInterval(detailTimer); detailTimer = null;
@@ -28,22 +30,22 @@ function route() {
 
   const detail = head === "project" && arg;
   const isProjects = head === "projects";
-  const isSecrets = head === "secrets";
+  const isVaults = head === "vaults";
   const isSettings = head === "settings";
-  const isHome = !detail && !isProjects && !isSecrets && !isSettings; // default / #home / unknown
+  const isHome = !detail && !isProjects && !isVaults && !isSettings; // default / #home / unknown
 
   $("#view-home").hidden = !isHome;
   $("#view-projects").hidden = !isProjects;
-  $("#view-secrets").hidden = !isSecrets;
+  $("#view-vaults").hidden = !isVaults;
   $("#view-settings").hidden = !isSettings;
   $("#view-detail").hidden = !detail;
 
-  const activeNav = isSecrets ? "secrets" : isSettings ? "settings"
+  const activeNav = isVaults ? "vaults" : isSettings ? "settings"
     : (isProjects || detail) ? "projects" : "home";
   document.querySelectorAll(".nav-item").forEach((a) =>
     a.classList.toggle("active", a.dataset.view === activeNav));
 
-  if (isSecrets) refreshSecrets();
+  if (isVaults) refreshVault();
   else if (isSettings) loadSettings();
   else if (detail) openDetail(arg);
   else if (isProjects) {
@@ -98,23 +100,30 @@ async function refreshNavTree() {
   }).join("");
 }
 
-// ---- secret delivery: in the VM (env) or via the proxy (placeholder) ----
-// A proxy secret carries bindings: the hosts (optionally path/method) its real
-// value may be sent to. Shown as chips; ✕ removes one, "+ host" adds one.
+// ---- vault (docs/research/12) ----
+// An item is a variable (value shown) or a secret (hidden until the eye icon
+// asks for it), typed string / number / json, and used by a VM either via the
+// proxy (the VM holds a placeholder; the proxy swaps in the value on requests
+// to the item's hosts) or fetched at runtime. Hosts are shown as chips;
+// ✕ removes one, "+ host" adds one.
 const SECRET_PRESETS = {
   github: { name: "GITHUB_TOKEN", hosts: ["api.github.com", "github.com", "uploads.github.com"] },
   anthropic: { name: "ANTHROPIC_API_KEY", hosts: ["api.anthropic.com"] },
   openai: { name: "OPENAI_API_KEY", hosts: ["api.openai.com"] },
 };
 
-function deliveryBadge(s) {
-  return s.delivery === "proxy"
+function modeBadges(s) {
+  const mode = s.mode === "proxy"
     ? `<span class="dbadge proxy" title="The VM holds a placeholder; the proxy swaps in the real value">via proxy</span>`
-    : `<span class="dbadge env" title="The real value is in the VM's env">in VM</span>`;
+    : `<span class="dbadge fetch" title="Nothing in the VM; the app fetches it at runtime">fetch at runtime</span>`;
+  const env = s.inEnv ? `<span class="dbadge env" title="Also written into the VM's env file — readable inside the VM">+ env file</span>` : "";
+  const ask = s.mode === "fetch" && s.askOnFetch ? `<span class="dbadge ask" title="Each fetch waits for your approval">asks first</span>` : "";
+  return mode + env + ask;
 }
+const kindBadge = (s) => `<span class="kbadge ${s.kind}">${s.kind}</span><span class="tbadge">${s.type}</span>`;
 
 function bindingChips(s) {
-  if (s.delivery !== "proxy") return "";
+  if (s.mode !== "proxy" && !(s.bindings || []).length) return "";
   const now = Date.now();
   const chips = (s.bindings || []).map((b) => {
     const expired = b.expires_at && Date.parse(b.expires_at) <= now;
@@ -141,39 +150,9 @@ function parseBinding(spec) {
   const i = t.indexOf("/");
   return i < 0 ? { host: t } : { host: t.slice(0, i), path: t.slice(i) };
 }
+const parseHosts = (text) => String(text || "").split(/[\s,]+/).filter(Boolean).map(parseBinding);
 
-/** The create body for a secret form: name, value, delivery and (proxy) bindings. */
-function secretFormBody(form) {
-  const f = new FormData(form);
-  const delivery = f.get("delivery") || "env";
-  const body = { name: f.get("name"), value: f.get("value"), delivery };
-  if (delivery === "proxy") {
-    body.bindings = String(f.get("hosts") || "").split(/[\s,]+/).filter(Boolean).map(parseBinding);
-  }
-  return body;
-}
-
-/** Show the hosts row only for proxy delivery; presets fill hosts (and a name, if empty). */
-function wireSecretForm(form) {
-  const sync = () => {
-    const proxy = form.delivery.value === "proxy";
-    for (const el of form.querySelectorAll(".proxy-only")) el.hidden = !proxy;
-    form.hosts.required = proxy;
-  };
-  form.delivery.addEventListener("change", sync);
-  form.addEventListener("reset", () => setTimeout(sync));
-  form.addEventListener("click", (e) => {
-    const b = e.target.closest("[data-preset]");
-    if (!b) return;
-    const p = SECRET_PRESETS[b.dataset.preset];
-    form.hosts.value = p.hosts.join(", ");
-    const name = form.elements["name"]; // (form.name is the form's own attribute)
-    if (!name.value) name.value = p.name;
-  });
-  sync();
-}
-
-/** Clicks on binding chips / "+ host" forms inside `root`; `after` re-renders. */
+/** Clicks on host chips / "+ host" forms inside `root`; `after` re-renders. */
 function wireBindings(root, after) {
   root.addEventListener("click", async (e) => {
     const open = e.target.closest("[data-bind-open]");
@@ -187,7 +166,7 @@ function wireBindings(root, after) {
     if (!del) return;
     e.stopPropagation();
     try {
-      await api(`/api/secrets/${del.dataset.unbind}/bindings/${del.dataset.bid}`, { method: "DELETE" });
+      await api(`/api/vault/${del.dataset.unbind}/bindings/${del.dataset.bid}`, { method: "DELETE" });
       await after();
     } catch (err) { alert(err.message); }
   });
@@ -196,7 +175,7 @@ function wireBindings(root, after) {
     if (!f) return;
     e.preventDefault();
     try {
-      await api(`/api/secrets/${f.dataset.bind}/bindings`, {
+      await api(`/api/vault/${f.dataset.bind}/bindings`, {
         // (f.method is the form's own method; the select is f.elements)
         method: "POST", body: { ...parseBinding(f.elements["host"].value), method: f.elements["method"].value || undefined },
       });
@@ -205,20 +184,185 @@ function wireBindings(root, after) {
   });
 }
 
-// ---- secrets (global) ----
-async function refreshSecrets() {
-  secretsCache = await api("/api/secrets");
-  $("#secrets").innerHTML = secretsCache.length
-    ? secretsCache.map((s) =>
-        `<li><div class="sec-main"><span class="sec-name">${s.name}</span>${deliveryBadge(s)}
-           <button class="danger" data-del-secret="${s.id}">delete</button></div>
-         ${bindingChips(s)}</li>`).join("")
-    : `<li class="empty">No secrets yet.</li>`;
-  $("#create-secrets").innerHTML = secretsCache.length
-    ? secretsCache.map((s) =>
-        `<label><input type="checkbox" name="secret" value="${s.id}">${s.name}${s.delivery === "proxy" ? ` <span class="hint">· via proxy</span>` : ""}</label>`).join("")
-    : `<span class="empty">none defined</span>`;
+// a secret's value, once revealed, until hidden again (or 30 s pass)
+const revealed = new Map(); // id → value
+const MASK = "••••••••";
+
+function valueCell(s) {
+  if (s.kind === "variable") return `<code class="vval">${escapeHtml(s.value ?? "")}</code>`;
+  const shown = revealed.has(s.id);
+  return `<code class="vval${shown ? "" : " masked"}">${shown ? escapeHtml(revealed.get(s.id)) : MASK}</code>
+    <button type="button" class="mini eye" data-reveal="${s.id}" title="${shown ? "Hide" : "Reveal (logged)"}">${shown ? "🙈" : "👁"}</button>`;
 }
+
+function projectChips(s) {
+  if (!s.projectIds.length) return `<span class="bnote">no project can use it</span>`;
+  return s.projectIds.map((id) => `<a class="pchip" href="#project/${id}">${escapeHtml(projectNames[id] || id)}</a>`).join("");
+}
+
+async function loadProjectNames() {
+  const list = await api("/api/projects").catch(() => []);
+  projectNames = Object.fromEntries(list.map((p) => [p.id, p.name]));
+  return list;
+}
+
+async function refreshVault() {
+  [vaultCache] = await Promise.all([api("/api/vault"), loadProjectNames()]);
+  renderVaultList();
+  $("#create-secrets").innerHTML = vaultCache.length
+    ? vaultCache.map((s) =>
+        `<label><input type="checkbox" name="secret" value="${s.id}">${escapeHtml(s.name)} <span class="hint">· ${s.kind}${s.mode === "proxy" ? ", via proxy" : ""}</span></label>`).join("")
+    : `<span class="empty">none in the vault yet</span>`;
+}
+
+function renderVaultList() {
+  const el = $("#vault-list");
+  if (!el) return;
+  el.innerHTML = vaultCache.length
+    ? vaultCache.map((s) => `
+      <div class="vitem-card" data-item="${s.id}">
+        <div class="vrow">
+          <span class="sec-name">${escapeHtml(s.name)}</span>${kindBadge(s)}${modeBadges(s)}
+          <span class="vactions">
+            <button type="button" class="mini" data-edit-item="${s.id}">Edit</button>
+            <button type="button" class="mini danger" data-del-item="${s.id}" data-name="${escapeHtml(s.name)}">Delete</button>
+          </span>
+        </div>
+        <div class="vrow vvalue">${valueCell(s)}</div>
+        <div class="vrow"><span class="hint">projects:</span> ${projectChips(s)}</div>
+        ${bindingChips(s)}
+      </div>`).join("")
+    : `<div class="empty">The vault is empty. Add a variable or a secret to get started.</div>`;
+}
+
+const vaultList = $("#vault-list");
+vaultList.addEventListener("click", async (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  try {
+    if (b.dataset.reveal) {
+      const id = b.dataset.reveal;
+      if (revealed.has(id)) revealed.delete(id);
+      else {
+        revealed.set(id, (await api(`/api/vault/${id}/value`)).value);
+        setTimeout(() => { revealed.delete(id); renderVaultList(); }, 30_000);
+      }
+      renderVaultList();
+    } else if (b.dataset.editItem) {
+      openItemDialog(vaultCache.find((s) => s.id === b.dataset.editItem));
+    } else if (b.dataset.delItem) {
+      if (!confirm(`Delete ${b.dataset.name} from the vault? Every project using it loses it.`)) return;
+      await api(`/api/vault/${b.dataset.delItem}`, { method: "DELETE" });
+      revealed.delete(b.dataset.delItem);
+      await refreshVault();
+    }
+  } catch (err) { alert(err.message); }
+});
+wireBindings(vaultList, refreshVault);
+$("#vault-new").onclick = () => openItemDialog(null);
+
+// ---- the item dialog: create or edit ----
+const vitem = $("#vitem");
+const vform = $("#vitem-form");
+let vitemEditing = null;      // the item being edited, or null for a new one
+let vitemAfter = null;        // what else to re-render after a save (a project's dialog)
+
+function syncItemForm() {
+  const json = vform.type.value === "json";
+  const secret = vform.kind.value === "secret";
+  vform.value.hidden = json;
+  vform.valueJson.hidden = !json;
+  $("#vitem-eye").hidden = json || !secret;
+  if (!json) vform.value.type = secret && !vform.value.dataset.shown ? "password" : "text";
+  vform.value.inputMode = vform.type.value === "number" ? "decimal" : "text";
+  const proxy = vform.mode.value === "proxy";
+  vform.querySelector(".vitem-proxy").hidden = !proxy;
+  vform.querySelector(".vitem-fetch").hidden = proxy;
+}
+
+async function openItemDialog(item, opts = {}) {
+  vitemEditing = item;
+  vitemAfter = opts.after || null;
+  vform.reset();
+  delete vform.value.dataset.shown;
+  const editing = !!item;
+  $("#vitem-title").textContent = editing ? `Edit ${item.name}` : "New vault item";
+  $("#vitem-save").textContent = editing ? "Save" : "Create";
+  $("#vitem-status").textContent = "";
+  vform.elements["name"].value = item?.name ?? "";
+  vform.kind.value = item?.kind ?? "secret";
+  vform.type.value = item?.type ?? "string";
+  vform.mode.value = item?.mode ?? "fetch";
+  vform.askOnFetch.checked = item ? item.askOnFetch : true;
+  vform.inEnv.checked = item?.inEnv ?? false;
+  // a variable's value is known; a secret's is only replaced if a new one is typed
+  const known = item?.kind === "variable" ? item.value ?? "" : "";
+  vform.value.value = known; vform.valueJson.value = known;
+  $("#vitem-keep").hidden = !(editing && item.kind === "secret");
+  $("#vitem-hosts-now").textContent = editing && item.bindings.length
+    ? `already: ${item.bindings.map((b) => b.host + (b.path || "")).join(", ")} — remove them on the vault page` : "";
+  const projects = await loadProjectNames();
+  const have = new Set(item?.projectIds ?? opts.projectIds ?? []);
+  $("#vitem-projects").innerHTML = projects.length
+    ? projects.map((p) => `<label><input type="checkbox" name="project" value="${p.id}" ${have.has(p.id) ? "checked" : ""}>${escapeHtml(p.name)}</label>`).join("")
+    : `<span class="empty">no projects yet</span>`;
+  syncItemForm();
+  vitem.showModal();
+}
+
+vform.addEventListener("change", (e) => {
+  // a new secret asks before each fetch by default, a new variable does not
+  if (e.target.name === "kind" && !vitemEditing) vform.askOnFetch.checked = vform.kind.value === "secret";
+  if (e.target.name === "type") {
+    if (vform.type.value === "json") vform.valueJson.value = vform.value.value;
+    else vform.value.value = vform.valueJson.value.trim() || vform.value.value;
+  }
+  syncItemForm();
+});
+$("#vitem-eye").onclick = () => {
+  if (vform.value.dataset.shown) delete vform.value.dataset.shown; else vform.value.dataset.shown = "1";
+  syncItemForm();
+};
+vform.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-preset]");
+  if (!b) return;
+  const p = SECRET_PRESETS[b.dataset.preset];
+  vform.hosts.value = p.hosts.join(", ");
+  if (!vform.elements["name"].value) vform.elements["name"].value = p.name;
+});
+$("#vitem-close").onclick = () => vitem.close();
+
+vform.onsubmit = async (e) => {
+  e.preventDefault();
+  const status = $("#vitem-status");
+  const value = vform.type.value === "json" ? vform.valueJson.value : vform.value.value;
+  const fields = {
+    name: vform.elements["name"].value.trim(), kind: vform.kind.value, type: vform.type.value, mode: vform.mode.value,
+    inEnv: vform.mode.value === "fetch" && vform.inEnv.checked, askOnFetch: vform.askOnFetch.checked,
+  };
+  const projectIds = [...vform.querySelectorAll("input[name=project]:checked")].map((c) => c.value);
+  const hosts = fields.mode === "proxy" ? parseHosts(vform.hosts.value) : [];
+  // an empty value is only "keep it" for a secret being edited
+  const keep = vitemEditing?.kind === "secret" && value === "";
+  if (!keep && value === "" && fields.type !== "string") { status.textContent = "a value is needed"; return; }
+  if (!vitemEditing && value === "") { status.textContent = "a value is needed"; return; }
+  status.textContent = "Saving…";
+  try {
+    if (!vitemEditing) {
+      await api("/api/vault", { method: "POST", body: { ...fields, value, projectIds, bindings: hosts } });
+    } else {
+      const id = vitemEditing.id;
+      // hosts first: switching to proxy needs one
+      for (const b of hosts) await api(`/api/vault/${id}/bindings`, { method: "POST", body: b });
+      await api(`/api/vault/${id}`, { method: "PATCH", body: { ...fields, ...(keep ? {} : { value }) } });
+      await api(`/api/vault/${id}/projects`, { method: "PUT", body: { projectIds } });
+      revealed.delete(id);
+    }
+    vitem.close();
+    await refreshVault();
+    if (vitemAfter) await vitemAfter();
+  } catch (err) { status.textContent = err.message; }
+};
 
 // ---- projects ----
 function skeletonCards(n) {
@@ -267,7 +411,7 @@ async function refreshProjects() {
         <button data-edit="${p.id}" data-name="${p.name}">${ICON.editor}Editor ↗</button>
         ${p.sync_folder ? `<button data-sync="${p.id}">${ICON.sync}Sync back</button>` : ""}
         ${p.sync_folder ? pushButton(p) : ""}
-        <button data-secrets="${p.id}" data-name="${p.name}">${ICON.secrets}Secrets…</button>
+        <button data-secrets="${p.id}" data-name="${p.name}">${ICON.secrets}Vault…</button>
         <button class="danger" data-destroy="${p.id}" data-name="${p.name}">${ICON.destroy}Destroy</button>
       </div>
       <div class="sync-result"></div>
@@ -455,11 +599,6 @@ document.addEventListener("click", async (e) => {
         if (location.hash.startsWith("#project/")) location.hash = "projects";
         else { refreshProjects(); refreshNavTree(); }
       }
-    } else if (b.dataset.delSecret) {
-      if (confirm("Delete this secret?")) {
-        await api(`/api/secrets/${b.dataset.delSecret}`, { method: "DELETE" });
-        refreshSecrets();
-      }
     }
   } catch (err) {
     alert(err.message);
@@ -467,68 +606,40 @@ document.addEventListener("click", async (e) => {
   }
 });
 
-// ---- project secrets dialog ----
+// ---- a project's vault dialog: which items it may use ----
 const psec = $("#psec");
 let psecProjectId = null;
 
-// what this VM holds for a proxy secret — safe to show and copy (it's not the value)
+// what this VM holds for a proxy item — safe to show and copy (it's not the value)
 function placeholderLine(s) {
-  if (s.delivery !== "proxy") return "";
-  if (!s.placeholder) return `<div class="phline hint">placeholder made when the secret is next injected</div>`;
+  if (s.mode !== "proxy") return "";
+  if (!s.placeholder) return `<div class="phline hint">placeholder made when the VM next gets its vault items</div>`;
   return `<div class="phline"><span class="hint">in this VM:</span> <code>${escapeHtml(s.placeholder)}</code>
     <button type="button" class="link-add" data-copy="${escapeHtml(s.placeholder)}">copy</button></div>`;
 }
 
-async function renderProjectSecrets() {
-  const view = await api(`/api/projects/${psecProjectId}/secrets`);
-  $("#psec-own").innerHTML = view.own.length
-    ? view.own.map((s) =>
-        `<li><div class="sec-main"><span class="sec-name">${s.name}</span>${deliveryBadge(s)}
-           <button class="danger" data-del-own="${s.id}">delete</button></div>
-         ${placeholderLine(s)}${bindingChips(s)}</li>`).join("")
-    : `<li class="empty">none — add one below</li>`;
-  const assigned = new Map(view.assigned.map((s) => [s.id, s]));
-  $("#psec-globals").innerHTML = secretsCache.length
-    ? secretsCache.map((s) => {
-        const a = assigned.get(s.id);
-        return `<div class="psec-g"><label><input type="checkbox" name="psec-g" value="${s.id}"
-          ${a ? "checked" : ""}>${s.name}</label> ${deliveryBadge(s)}${a ? placeholderLine(a) : ""}</div>`;
+async function renderProjectVault() {
+  const [view] = await Promise.all([api(`/api/projects/${psecProjectId}/vault`), refreshVault()]);
+  const mine = new Map(view.map((s) => [s.id, s]));
+  $("#psec-items").innerHTML = vaultCache.length
+    ? vaultCache.map((s) => {
+        const m = mine.get(s.id);
+        return `<div class="psec-g"><label><input type="checkbox" name="psec-g" value="${s.id}" ${m ? "checked" : ""}>
+          <span class="sec-name">${escapeHtml(s.name)}</span></label> ${kindBadge(s)}${modeBadges(s)}${m ? placeholderLine(m) : ""}</div>`;
       }).join("")
-    : `<span class="empty">no global secrets defined</span>`;
+    : `<span class="empty">the vault is empty</span>`;
   $("#psec-status").textContent = "";
 }
 
 async function openProjectSecrets(id, name) {
   psecProjectId = id;
-  $("#psec-title").textContent = `Secrets — ${name}`;
-  if (!secretsCache.length) await refreshSecrets();
+  $("#psec-title").textContent = `Vault — ${name}`;
   psec.showModal();
-  await renderProjectSecrets();
+  await renderProjectVault();
 }
 
 $("#psec-close").onclick = () => psec.close();
-$("#psec-add").onsubmit = async (e) => {
-  e.preventDefault();
-  try {
-    await api(`/api/projects/${psecProjectId}/secrets`, { method: "POST", body: secretFormBody(e.target) });
-    e.target.reset();
-    await renderProjectSecrets();
-    $("#psec-status").textContent = "project secret added & injected";
-  } catch (err) { $("#psec-status").textContent = err.message; }
-};
-// (data-del-own, not data-del-secret: the page-wide handler owns that one)
-$("#psec-own").onclick = async (e) => {
-  const b = e.target.closest("button[data-del-own]");
-  if (!b) return;
-  if (!confirm("Delete this project-specific secret?")) return;
-  try {
-    await api(`/api/secrets/${b.dataset.delOwn}`, { method: "DELETE" });
-    await renderProjectSecrets();
-  } catch (err) { $("#psec-status").textContent = err.message; }
-};
-wireSecretForm($("#psec-add"));
-wireBindings($("#psec-own"), renderProjectSecrets);
-wireBindings($("#secrets"), refreshSecrets);
+$("#psec-new").onclick = () => openItemDialog(null, { projectIds: [psecProjectId], after: renderProjectVault });
 psec.addEventListener("click", async (e) => {
   const b = e.target.closest("[data-copy]");
   if (!b) return;
@@ -539,9 +650,9 @@ psec.addEventListener("click", async (e) => {
 $("#psec-apply").onclick = async () => {
   const ids = [...psec.querySelectorAll("input[name=psec-g]:checked")].map((c) => c.value);
   try {
-    await api(`/api/projects/${psecProjectId}/secrets`, { method: "PUT", body: { secretIds: ids } });
-    await renderProjectSecrets(); // newly assigned proxy secrets now have their placeholders
-    $("#psec-status").textContent = "globals updated & injected";
+    await api(`/api/projects/${psecProjectId}/vault`, { method: "PUT", body: { itemIds: ids } });
+    await renderProjectVault(); // newly given proxy items now have their placeholders
+    $("#psec-status").textContent = "saved — the VM has its items";
   } catch (err) { $("#psec-status").textContent = err.message; }
 };
 
@@ -791,17 +902,6 @@ $("#create-form").onsubmit = async (e) => {
   }
 };
 
-wireSecretForm($("#secret-form"));
-$("#secret-form").onsubmit = async (e) => {
-  e.preventDefault();
-  try {
-    await api("/api/secrets", { method: "POST", body: secretFormBody(e.target) });
-    e.target.reset();
-    refreshSecrets();
-  } catch (err) {
-    alert(err.message);
-  }
-};
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) =>
@@ -948,7 +1048,7 @@ function paintDetail(d) {
     <button data-edit="${d.id}" data-name="${d.name}" title="Browse and edit the workdir">${ICON.editor}Editor ↗</button>
     ${d.sync_folder ? `<button data-sync="${d.id}">${ICON.sync}Sync back</button>` : ""}
     ${d.sync_folder ? pushButton(d) : ""}
-    <button data-secrets="${d.id}" data-name="${escapeHtml(d.name)}">${ICON.secrets}Secrets…</button>
+    <button data-secrets="${d.id}" data-name="${escapeHtml(d.name)}">${ICON.secrets}Vault…</button>
     ${powerButton(d)}
     <button data-rebuild="${d.id}" data-name="${d.name}" title="Destroy the VM and recreate it from the original source">${ICON.rebuild}Rebuild</button>
     <button class="danger" data-destroy="${d.id}" data-name="${d.name}">${ICON.destroy}Destroy</button>`;
@@ -1085,25 +1185,20 @@ async function renderPorts(id) {
 let netES = null;
 let netId = null;
 let netModel = { requests: [], pending: [], rules: [], headerRules: [], cutoff: false, isolated: null, older: [], noOlder: false, summary: null };
-let netOwnSecrets = []; // this project's own secrets (for header-value picker)
 const DUR_OPTS = [["once", "once"], ["1m", "1 min"], ["5m", "5 min"], ["30m", "30 min"], ["60m", "60 min"], ["forever", "forever"]];
 
 function openNet(id) {
   closeNet();
   netId = id;
   netModel = { requests: [], pending: [], rules: [], headerRules: [], cutoff: false, isolated: null, older: [], noOlder: false, summary: null };
-  netOwnSecrets = [];
   const el = $("#detail-net");
   if (!el) return;
   el.innerHTML = netShellHtml();
   bindNetHandlers(el);
   renderPending(); renderLog(); renderRules(); renderHeaders(); renderCutoff();
   connectNetStream(id);
-  // secrets available as header values: globals (secretsCache) + this project's own
-  Promise.all([
-    secretsCache.length ? Promise.resolve() : refreshSecrets(),
-    api(`/api/projects/${id}/secrets`).then((v) => { netOwnSecrets = v.own || []; }).catch(() => {}),
-  ]).then(() => { if (netId === id) syncHeaderForm(); });
+  // vault items available as header values
+  refreshVault().catch(() => {}).then(() => { if (netId === id) syncHeaderForm(); });
 }
 
 // show/hide the header-form value vs. secret picker based on op + source + scope
@@ -1118,12 +1213,12 @@ function syncHeaderForm() {
   if (isSet && useSecret) form.valueSecretId.innerHTML = headerSecretOptions(form.scope.value);
 }
 
+// a project rule can use the items this project may use; a global rule any
+// item (it fills the header only in projects that may use it)
 function headerSecretOptions(scope) {
-  const g = (secretsCache || []).map((s) => `<option value="${s.id}">${escapeHtml(s.name)} · global</option>`).join("");
-  const p = scope === "project"
-    ? (netOwnSecrets || []).map((s) => `<option value="${s.id}">${escapeHtml(s.name)} · project</option>`).join("")
-    : "";
-  return `<option value="">— pick a secret —</option>${g}${p}`;
+  const items = (vaultCache || []).filter((s) => scope !== "project" || s.projectIds.includes(netId));
+  const opts = items.map((s) => `<option value="${s.id}">${escapeHtml(s.name)} · ${s.kind}</option>`).join("");
+  return `<option value="">— pick a vault item —</option>${opts}`;
 }
 
 function closeNet() {
@@ -1694,6 +1789,6 @@ $("#nav-signout").onclick = async (e) => {
 };
 
 // boot: secrets cache first (for create-form checkboxes), then route
-refreshSecrets().then(() => { if (!location.hash) location.hash = "home"; else route(); });
+refreshVault().catch(() => {}).then(() => { if (!location.hash) location.hash = "home"; else route(); });
 setInterval(() => { if (!$("#view-projects").hidden) { refreshProjects(); refreshNavTree(); } }, 5000);
 setInterval(() => { if (!$("#view-home").hidden) refreshServiceStatus(); }, 5000);

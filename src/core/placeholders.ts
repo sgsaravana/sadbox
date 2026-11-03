@@ -86,6 +86,11 @@ export function existingPlaceholder(projectId: string, secretId: string): string
   ).get(projectId, secretId)?.placeholder ?? null;
 }
 
+/** Every project's placeholder for an item — they are made afresh on next use. */
+export function dropItemPlaceholders(secretId: string): void {
+  db.query("DELETE FROM secret_placeholders WHERE secret_id = ?").run(secretId);
+}
+
 export function dropPlaceholders(projectId: string, secretIds?: string[]): void {
   if (!secretIds) {
     db.query("DELETE FROM secret_placeholders WHERE project_id = ?").run(projectId);

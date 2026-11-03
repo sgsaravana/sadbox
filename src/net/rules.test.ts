@@ -16,9 +16,11 @@ beforeEach(() => {
   db.run("DELETE FROM secrets");
 });
 
-function secret(id: string, value: string, projectId: string | null = null) {
-  db.query("INSERT INTO secrets (id, project_id, name, value_enc) VALUES (?, ?, ?, ?)")
-    .run(id, projectId, `S_${id}`, encrypt(value));
+/** A vault item the given projects have access to. */
+function secret(id: string, value: string, projectIds: string[] = [A, B]) {
+  db.query("INSERT INTO secrets (id, name, value_enc, delivery) VALUES (?, ?, ?, 'fetch')")
+    .run(id, `S_${id}`, encrypt(value));
+  for (const pid of projectIds) db.query("INSERT INTO project_secrets (project_id, secret_id) VALUES (?, ?)").run(pid, id);
   return id;
 }
 
@@ -181,7 +183,7 @@ describe("createHeaderRule", () => {
     expect(() => createHeaderRule({ ...base, op: "replace" as any, value: "v" })).toThrow(/op/);
     expect(() => createHeaderRule({ ...base, op: "set", value: "v", header: "  " })).toThrow(/header name/);
     expect(() => createHeaderRule({ ...base, op: "set" })).toThrow(/value or a secret/);
-    expect(() => createHeaderRule({ ...base, op: "set", valueSecretId: "nope" })).toThrow(/secret not found/);
+    expect(() => createHeaderRule({ ...base, op: "set", valueSecretId: "nope" })).toThrow(/vault item not found/);
   });
 
   test("a secret-backed rule stores the reference, not a value, and lists the secret's name", () => {
@@ -192,13 +194,14 @@ describe("createHeaderRule", () => {
     expect(r.value_secret_name).toBe("S_g1");
   });
 
-  test("a project's own secret is usable only by a rule scoped to that project", () => {
-    const sid = secret("pa", "tok", A);
-    expect(() => createHeaderRule({ ...base, op: "set", valueSecretId: sid })).toThrow(/another project/);
+  test("a project's rule may only use an item that project has access to", () => {
+    const sid = secret("pa", "tok", [A]);
     expect(() => createHeaderRule({ ...base, scope: "project", projectId: B, op: "set", valueSecretId: sid }))
-      .toThrow(/another project/);
+      .toThrow(/no access/);
     expect(createHeaderRule({ ...base, scope: "project", projectId: A, op: "set", valueSecretId: sid }).value_secret_id)
       .toBe(sid);
+    // a global rule may name it; it fills the header only where there is access
+    expect(createHeaderRule({ ...base, op: "set", valueSecretId: sid }).value_secret_id).toBe(sid);
   });
 
   test("remove discards any value or secret given", () => {
@@ -265,8 +268,8 @@ describe("applyHeaders", () => {
     expect(h.authorization).toBe("original");
   });
 
-  test("another project's secret is never resolved, even if a rule references it", () => {
-    const sid = secret("pb", "b-token", B);
+  test("an item is resolved only in projects with access to it, even from a global rule", () => {
+    const sid = secret("pb", "b-token", [B]);
     // bypass createHeaderRule's guard to simulate a stale/hand-edited row
     db.query(
       `INSERT INTO net_header_rules (id, scope, project_id, host, direction, op, header, value_secret_id)

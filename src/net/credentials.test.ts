@@ -3,9 +3,9 @@ import { db } from "../db";
 import { getDriver } from "../driver";
 import { makeProject } from "../../test/helpers";
 import {
-  addBinding, assignSecrets, createGlobalSecret, createProjectSecret, injectSecrets, listBindings, projectSecretView,
+  addBinding, createItem, injectVault, listBindings, projectVaultView, setItemProjects, setProjectItems,
   type BindingInput,
-} from "../core/secrets";
+} from "../core/vault";
 import { bindFromApproval, redactResponse, substituteRequest } from "./credentials";
 import { listPending, requestApproval, resolveApproval } from "./approvals";
 
@@ -14,7 +14,7 @@ const B = makeProject("cred-b");
 const GH = "ghp_" + "R3alT0kenR3alT0kenR3alT0kenR3alT0ken";
 const ANT = "sk-ant-api03-" + "k".repeat(40);
 
-// injectSecrets writes into the VM; here it only needs to mint placeholders
+// injectVault writes into the VM; here it only needs to mint placeholders
 const exec = spyOn(getDriver(), "execWithStdin").mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
 afterAll(() => exec.mockRestore());
 
@@ -23,14 +23,11 @@ beforeEach(() => {
   db.run("DELETE FROM secret_placeholders");
 });
 
-/** A proxy secret assigned to `projectId`, injected; returns its id and that project's placeholder. */
+/** A proxy item `projectId` has access to, injected; returns its id and that project's placeholder. */
 async function proxySecret(name: string, value: string, bindings: BindingInput[], projectId = A) {
-  const s = createGlobalSecret(name, value, { delivery: "proxy", bindings });
-  const assigned = db.query<{ secret_id: string }, [string]>(
-    "SELECT secret_id FROM project_secrets WHERE project_id = ?").all(projectId).map((r) => r.secret_id);
-  assignSecrets(projectId, [...assigned, s.id]);
-  await injectSecrets(projectId);
-  const ph = projectSecretView(projectId).assigned.find((x) => x.id === s.id)!.placeholder!;
+  const s = createItem({ name, value, mode: "proxy", bindings, projectIds: [projectId] });
+  await injectVault(projectId);
+  const ph = projectVaultView(projectId).find((x) => x.id === s.id)!.placeholder!;
   return { id: s.id, ph };
 }
 
@@ -136,17 +133,20 @@ describe("substituteRequest", () => {
 
   test("a secret unassigned from the project stops being swapped", async () => {
     const { ph } = await proxySecret("GITHUB_TOKEN", GH, [{ host: "api.github.com" }]);
-    assignSecrets(A, []);
+    setProjectItems(A, []);
     const h: Record<string, unknown> = { authorization: `Bearer ${ph}` };
     expect(substituteRequest(A, req("api.github.com"), h).injected).toEqual([]);
   });
 
-  test("a project-specific proxy secret works like a global one", async () => {
-    const s = createProjectSecret(A, "OWN", GH, { delivery: "proxy", bindings: [{ host: "api.github.com" }] });
-    await injectSecrets(A);
-    const ph = projectSecretView(A).own.find((o) => o.id === s.id)!.placeholder!;
-    const h: Record<string, unknown> = { authorization: `Bearer ${ph}` };
-    expect(substituteRequest(A, req("api.github.com"), h).injected).toEqual(["OWN"]);
+  test("an item taken away from a project (from the item's side) stops being swapped there only", async () => {
+    const { id, ph } = await proxySecret("GITHUB_TOKEN", GH, [{ host: "api.github.com" }]);
+    await setItemProjects(id, [A, B]);
+    await injectVault(B);
+    const phB = projectVaultView(B).find((x) => x.id === id)!.placeholder!;
+    expect(phB).not.toBe(ph);
+    await setItemProjects(id, [B]);
+    expect(substituteRequest(A, req("api.github.com"), { authorization: `Bearer ${ph}` }).injected).toEqual([]);
+    expect(substituteRequest(B, req("api.github.com"), { authorization: `Bearer ${phB}` }).injected).toEqual(["GITHUB_TOKEN"]);
   });
 });
 

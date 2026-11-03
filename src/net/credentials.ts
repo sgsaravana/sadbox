@@ -42,16 +42,15 @@ export interface SwapResult {
 
 type Headers = Record<string, unknown>;
 
-/** The proxy secrets this project holds a placeholder for — assigned globals
- *  and its own. A placeholder left over from an unassigned secret doesn't count. */
+/** The proxy items this project holds a placeholder for and may use. A
+ *  placeholder left over from an item it lost access to doesn't count. */
 function projectCredentials(projectId: string): Credential[] {
-  return db.query<Credential, [string, string, string]>(
+  return db.query<Credential, [string, string]>(
     `SELECT s.id AS secretId, s.name AS name, sp.placeholder AS placeholder, s.value_enc AS valueEnc
      FROM secret_placeholders sp JOIN secrets s ON s.id = sp.secret_id
      WHERE sp.project_id = ? AND s.delivery = 'proxy'
-       AND (s.project_id = ? OR EXISTS (
-         SELECT 1 FROM project_secrets ps WHERE ps.project_id = ? AND ps.secret_id = s.id))`,
-  ).all(projectId, projectId, projectId);
+       AND EXISTS (SELECT 1 FROM project_secrets ps WHERE ps.project_id = ? AND ps.secret_id = s.id)`,
+  ).all(projectId, projectId);
 }
 
 function bindingAllows(b: BindingRow, req: SwapRequest, header: string, now: number): boolean {

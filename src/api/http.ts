@@ -5,7 +5,7 @@ import { config } from "../config";
 import { staticRoutes, aceFiles } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
-import { addBinding, assignSecrets, createGlobalSecret, createProjectSecret, deleteBinding, deleteSecret, injectSecrets, listGlobalSecrets, projectSecretView } from "../core/secrets";
+import { addBinding, createItem, deleteBinding, deleteItem, getItem, injectVault, listItems, projectVaultView, revealItem, setItemProjects, setProjectItems, updateItem } from "../core/vault";
 import { connectSyncFolder, setGitRemote, createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject, setProjectMemory, startProject, stopProject } from "../core/projects";
 import { syncStatus, syncProject } from "../core/sync";
 import { pushProject } from "../core/push";
@@ -141,24 +141,14 @@ export function startServer() {
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/details$/);
         if (m && req.method === "GET") return json(await projectDetails(m[1]));
-        m = p.match(/^\/api\/projects\/([\w-]+)\/secrets$/);
-        if (m && req.method === "GET") return json(projectSecretView(m[1]));
-        if (m && req.method === "PUT") {          // assign globals
+        // the vault items a project may use (and what its VM holds for each)
+        m = p.match(/^\/api\/projects\/([\w-]+)\/vault$/);
+        if (m && req.method === "GET") return json(projectVaultView(m[1]));
+        if (m && req.method === "PUT") {
           const b = await req.json();
-          assignSecrets(m[1], b.secretIds ?? []);
-          await injectSecrets(m[1]);
-          return json(projectSecretView(m[1]));
-        }
-        if (m && req.method === "POST") {         // create project-specific secret
-          const b = await req.json();
-          const s = createProjectSecret(m[1], b.name, b.value, { delivery: b.delivery, bindings: b.bindings });
-          try {
-            await injectSecrets(m[1]);
-          } catch (e) {
-            await deleteSecret(s.id);             // keep create+inject atomic
-            throw e;
-          }
-          return json(projectSecretView(m[1]), 201);
+          setProjectItems(m[1], b.itemIds ?? []);
+          if (getProject(m[1])?.state === "running") await injectVault(m[1]);
+          return json(projectVaultView(m[1]));
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/sync$/);
         if (m && req.method === "POST") {
@@ -382,23 +372,42 @@ export function startServer() {
           }));
         }
 
-        if (p === "/api/secrets" && req.method === "GET") return json(listGlobalSecrets());
-        if (p === "/api/secrets" && req.method === "POST") {
+        // ---- vault ----
+        if (p === "/api/vault" && req.method === "GET") return json(listItems());
+        if (p === "/api/vault" && req.method === "POST") {
           const b = await req.json();
-          return json(createGlobalSecret(b.name, b.value, { delivery: b.delivery, bindings: b.bindings }), 201);
+          return json(createItem({
+            name: b.name, value: b.value, kind: b.kind, type: b.type, mode: b.mode, inEnv: b.inEnv,
+            askOnFetch: b.askOnFetch, bindings: b.bindings, projectIds: b.projectIds,
+          }), 201);
         }
-        m = p.match(/^\/api\/secrets\/([\w-]+)$/);
+        m = p.match(/^\/api\/vault\/([\w-]+)$/);
+        if (m && req.method === "GET") return json(getItem(m[1]));
+        if (m && req.method === "PATCH") {
+          const b = await req.json();
+          return json(await updateItem(m[1], {
+            name: b.name, value: b.value, kind: b.kind, type: b.type, mode: b.mode, inEnv: b.inEnv, askOnFetch: b.askOnFetch,
+          }));
+        }
         if (m && req.method === "DELETE") {
-          await deleteSecret(m[1]);
+          await deleteItem(m[1]);
           return json({ ok: true });
         }
-        // bindings of a proxy-delivered secret (global or project-specific)
-        m = p.match(/^\/api\/secrets\/([\w-]+)\/bindings$/);
+        // the eye icon: a secret's value (logged)
+        m = p.match(/^\/api\/vault\/([\w-]+)\/value$/);
+        if (m && req.method === "GET") return json(revealItem(m[1]));
+        m = p.match(/^\/api\/vault\/([\w-]+)\/projects$/);
+        if (m && req.method === "PUT") {
+          const b = await req.json();
+          return json(await setItemProjects(m[1], b.projectIds ?? []));
+        }
+        // where a proxy item's real value may go
+        m = p.match(/^\/api\/vault\/([\w-]+)\/bindings$/);
         if (m && req.method === "POST") {
           const b = await req.json();
           return json(addBinding(m[1], { host: b.host, path: b.path, method: b.method, header: b.header, expiresAt: b.expiresAt }), 201);
         }
-        m = p.match(/^\/api\/secrets\/([\w-]+)\/bindings\/([\w-]+)$/);
+        m = p.match(/^\/api\/vault\/([\w-]+)\/bindings\/([\w-]+)$/);
         if (m && req.method === "DELETE") {
           deleteBinding(m[1], m[2]);
           return json({ ok: true });
