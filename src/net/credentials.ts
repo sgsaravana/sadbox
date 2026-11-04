@@ -93,6 +93,31 @@ function bindingAllows(b: BindingRow, req: SwapRequest, header: string, now: num
   return true;
 }
 
+/** The proxy item a git client in this project presents to `host` (git's
+ *  credential helper asks — net/guest.ts): its name and this VM's placeholder,
+ *  which git sends as the password in `Basic` auth, where the proxy swaps in
+ *  the real value. Only an item whose binding would let it go there as git
+ *  sends it (any method, the Authorization header); the closest binding wins —
+ *  the exact host, then `*.host`; one without a path before one with.
+ *  Null: nothing in the vault for that host, and git carries on without. */
+export function gitCredentialFor(projectId: string, host: string): { name: string; placeholder: string } | null {
+  const now = Date.now();
+  let best: { name: string; placeholder: string; rank: number } | null = null;
+  for (const c of vaultCredentials(projectId)) {
+    if (c.valueType !== "string") continue;
+    const bindings = db.query<BindingRow, [string]>(
+      "SELECT host, path, method, header, expires_at FROM secret_bindings WHERE secret_id = ?",
+    ).all(c.secretId);
+    for (const b of bindings) {
+      if (b.expires_at && Date.parse(b.expires_at) <= now) continue;
+      if (b.method || (b.header && b.header !== "authorization") || !hostMatch(b.host, host)) continue;
+      const rank = (b.host === host ? 0 : 2) + (b.path ? 1 : 0);
+      if (!best || rank < best.rank) best = { name: c.name, placeholder: c.placeholder, rank };
+    }
+  }
+  return best && { name: best.name, placeholder: best.placeholder };
+}
+
 /** Does any of this project's items get swapped in request bodies? (Only
  *  then is a body worth holding back to look at.) */
 export function swapsBodies(projectId: string): boolean {

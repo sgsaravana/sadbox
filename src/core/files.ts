@@ -69,13 +69,26 @@ export async function listDir(projectId: string, rawPath: unknown): Promise<{ pa
 }
 
 /** Every file git would track or add (so ignored build output and .git stay
- *  out) — the list behind the editor's quick-open. */
+ *  out) — the list behind the editor's quick-open. A workdir that is not a
+ *  repository itself (an empty project's, holding the repositories cloned into
+ *  it) lists each repository's files the same way — up to three levels down,
+ *  each run behind a `\x01<dir>` marker — and every other file outside them,
+ *  but nothing under a node_modules (one per line there, so capped cheaply). */
 export async function fileIndex(projectId: string): Promise<{ files: string[]; truncated: boolean }> {
   const ref = refOf(projectId);
   const r = await driver.execCaptureBytes(ref,
-    `cd ${config.guestWorkdir} || exit 2; git ls-files -co --exclude-standard -z`);
+    `cd ${config.guestWorkdir} || exit 2; ` +
+    `if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git ls-files -co --exclude-standard -z; exit; fi; ` +
+    `for g in */.git */*/.git */*/*/.git; do [ -e "$g" ] || continue; d=\${g%/.git}; ` +
+    `printf '\\001%s/\\0' "$d"; git -C "$d" ls-files -co --exclude-standard -z; done; ` +
+    `printf '\\001\\0'; ` +
+    `find . -mindepth 1 \\( -type d \\( -name .git -o -name node_modules -o -exec test -e {}/.git \\; \\) \\) -prune -o -type f -print 2>/dev/null | head -n ${MAX_INDEX_FILES + 1} | tr '\\n' '\\0'`);
   if (r.exitCode !== 0) throw new FileError("could not index the workdir (is the VM running?)", 502);
-  const all = new TextDecoder().decode(r.stdout).split("\0").filter(Boolean);
+  let prefix = "";
+  const all = new TextDecoder().decode(r.stdout).split("\0").filter(Boolean).flatMap((f) => {
+    if (f.startsWith("\x01")) { prefix = f.slice(1); return []; }
+    return [prefix + (f.startsWith("./") ? f.slice(2) : f)];
+  });
   return { files: all.slice(0, MAX_INDEX_FILES), truncated: all.length > MAX_INDEX_FILES };
 }
 

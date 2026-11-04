@@ -102,6 +102,26 @@ case "$1" in
 esac
 `;
 
+// `git-credential-sadbox`: git's credential helper in every VM (system-wide).
+// For an https host it asks the proxy for the vault's proxy item bound to that
+// host and hands git its placeholder as the password — git sends it in Basic
+// auth and the proxy swaps in the real token. So `git clone https://github.com/…`
+// works with the vault's GITHUB_TOKEN, and the token never enters the VM. A
+// token given to the project itself (~/.git-credentials) is left to go first;
+// with nothing in the vault for the host, git carries on as it would without.
+const GIT_CREDENTIAL_SH = `#!/bin/sh
+[ "$1" = get ] || exit 0
+proto= host=
+while IFS= read -r l && [ -n "$l" ]; do
+  case "$l" in protocol=*) proto=\${l#protocol=} ;; host=*) host=\${l#host=} ;; esac
+done
+[ "$proto" = https ] && [ -n "$host" ] || exit 0
+grep -qsF "@$host" "$HOME/.git-credentials" && exit 0
+[ -f ${config.guestNetEnvFile} ] && . ${config.guestNetEnvFile}
+proxy="\${HTTP_PROXY:-http://127.0.0.1:${config.guestProxyPort}}"
+curl -sf --max-time 15 --proxy "$proxy" "http://vault.sadbox.internal/git/credential?host=$host" || exit 0
+`;
+
 const relayPath = `${config.guestToolsDir}/relay.js`;
 const connectPath = `${config.guestToolsDir}/connect.js`;
 
@@ -115,7 +135,9 @@ export async function ensureGuestTools(ref: string): Promise<void> {
     `cat > ${relayPath} <<'SADBOX_EOF'\n${RELAY_JS}SADBOX_EOF\n` +
     `cat > ${connectPath} <<'SADBOX_EOF'\n${CONNECT_JS}SADBOX_EOF\n` +
     `cat > /usr/local/bin/sadbox-vault <<'SADBOX_EOF'\n${VAULT_SH}SADBOX_EOF\n` +
-    `chmod 755 ${config.guestToolsDir} /usr/local/bin/sadbox-vault && chmod 644 ${relayPath} ${connectPath}`;
+    `cat > /usr/local/bin/git-credential-sadbox <<'SADBOX_EOF'\n${GIT_CREDENTIAL_SH}SADBOX_EOF\n` +
+    `chmod 755 ${config.guestToolsDir} /usr/local/bin/sadbox-vault /usr/local/bin/git-credential-sadbox && chmod 644 ${relayPath} ${connectPath} && ` +
+    `git config --system credential.helper sadbox`;
   const r = await driver.exec(ref, ["sh", "-c", script], { user: "root" });
   if (r.exitCode !== 0) throw new Error(`could not install guest tools: ${r.stderr.trim()}`);
   installed.add(ref);
