@@ -37,7 +37,7 @@ for what's next (Linux support first).
 ## Releases
 
 <!-- LATEST_RELEASE:START -->
-**Latest release: [v0.3.2](https://github.com/sgsaravana/sadbox/releases/tag/v0.3.2)** · published 2026-10-14 · [release notes →](https://github.com/sgsaravana/sadbox/releases/tag/v0.3.2)
+**Latest release: [v0.4.0](https://github.com/sgsaravana/sadbox/releases/tag/v0.4.0)** · published 2026-11-04 · [release notes →](https://github.com/sgsaravana/sadbox/releases/tag/v0.4.0)
 <!-- LATEST_RELEASE:END -->
 
 Every release ships prebuilt binaries for macOS/Linux (arm64/x64) plus
