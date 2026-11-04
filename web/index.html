@@ -109,7 +109,8 @@
               source (folder re-copied or git repo re-cloned) — vault access and network rules are kept,
               and it uses the latest base image, so newly-baked tools (e.g. opencode) show up.</li>
             <li>Set default VM CPU / memory / disk and global network rules in <a href="#settings">Settings</a>.</li>
-            <li>Add API keys, tokens and settings under <a href="#vaults">Vaults</a>, and tick the projects that may use each.</li>
+            <li>Add API keys, tokens and settings under <a href="#vaults">Vaults</a>, and tick the projects that may use each.
+              Inside a VM, <code>sadbox-vault list</code> shows them and <code>sadbox-vault get NAME</code> reads a fetch item.</li>
             <li>For Claude Code auth, create a <code>CLAUDE_CODE_OAUTH_TOKEN</code> (or <code>ANTHROPIC_API_KEY</code>) secret in a vault and give the project access.</li>
             <li>VMs have no network of their own: they cannot reach the internet, this machine, your LAN or each other except through the proxy's rules. Projects created before this show <b>not isolated</b> on their detail page until you Rebuild them.</li>
             <li>The web UI needs a password (<code>sadbox passwd</code> to change it) and listens on localhost only; put a TLS reverse proxy in front before reaching it from other machines.</li>

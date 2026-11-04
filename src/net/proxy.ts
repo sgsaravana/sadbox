@@ -21,7 +21,7 @@ import { mkdirSync, rmSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { config, runDir } from "../config";
-import { startGuestRelay } from "./guest";
+import { ensureGuestTools, startGuestRelay } from "./guest";
 import { db } from "../db";
 import { logEvent } from "../db";
 import { getDriver } from "../driver";
@@ -32,6 +32,7 @@ import { inSetup } from "./setup";
 import { recordRequest, startRequestLog, type RequestEntry } from "./events";
 import { bodyRedactor, redactResponse, substituteRequest, swapsBodies, textualType, type SwapBody, type SwapResult } from "./credentials";
 import { CUTOFF_MESSAGE, isCutOff } from "./cutoff";
+import { serveVault, VAULT_HOST } from "./vaultfetch";
 
 const driver = getDriver();
 // local copy of core/projects' refFor to avoid a proxy<->projects import cycle
@@ -192,6 +193,12 @@ function makeHandler(scheme: "http" | "https") {
     const started = Date.now();
 
     const projectId = ctx.projectId ?? (await projectForIp(ctx.clientIp))?.id ?? null;
+
+    // the vault, as a VM sees it: answered here, never forwarded anywhere
+    if (host.toLowerCase() === VAULT_HOST) {
+      req.resume();
+      return serveVault(projectId, scheme, method, path, res);
+    }
 
     // network cut off: nothing leaves, whatever the rules say — checked per request,
     // so a tunnel opened before the switch was flipped stops carrying anything too
@@ -510,6 +517,7 @@ export async function installGuestProxy(ref: string): Promise<void> {
   // A network-less VM reaches the proxy through the relay on its own loopback;
   // a legacy VM on a real network dials the host's address on that network.
   const info = await driver.inspect(ref);
+  await ensureGuestTools(ref); // the relay, and sadbox-vault — on a network or not
   let url: string, noProxy = "localhost,127.0.0.1,::1";
   if (info.isolated) {
     await startGuestRelay(ref);

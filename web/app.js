@@ -204,6 +204,16 @@ function projectChips(s) {
   return s.projectIds.map((id) => `<a class="pchip" href="#project/${id}">${escapeHtml(projectNames[id] || id)}</a>`).join("");
 }
 
+// projects that may fetch an item without being asked (an approval answered
+// with a window or "always"); ✕ takes that back
+function grantChips(s) {
+  if (s.mode !== "fetch" || !s.askOnFetch || !(s.fetchGrants || []).length) return "";
+  return `<div class="vrow"><span class="hint">fetches without asking:</span> ${s.fetchGrants.map((g) =>
+    `<span class="bchip">${escapeHtml(projectNames[g.projectId] || g.projectId)}
+      <span class="bnote">${g.expiresAt ? `until ${fmtClock(Date.parse(g.expiresAt))}` : "always"}</span><button type="button" class="link-del"
+      data-revoke="${s.id}" data-pid="${g.projectId}" title="Ask again next time">✕</button></span>`).join("")}</div>`;
+}
+
 async function loadProjectNames() {
   const list = await api("/api/projects").catch(() => []);
   projectNames = Object.fromEntries(list.map((p) => [p.id, p.name]));
@@ -234,6 +244,7 @@ function renderVaultList() {
         </div>
         <div class="vrow vvalue">${valueCell(s)}</div>
         <div class="vrow"><span class="hint">projects:</span> ${projectChips(s)}</div>
+        ${grantChips(s)}
         ${bindingChips(s)}
       </div>`).join("")
     : `<div class="empty">The vault is empty. Add a variable or a secret to get started.</div>`;
@@ -252,6 +263,9 @@ vaultList.addEventListener("click", async (e) => {
         setTimeout(() => { revealed.delete(id); renderVaultList(); }, 30_000);
       }
       renderVaultList();
+    } else if (b.dataset.revoke) {
+      await api(`/api/vault/${b.dataset.revoke}/grants/${b.dataset.pid}`, { method: "DELETE" });
+      await refreshVault();
     } else if (b.dataset.editItem) {
       openItemDialog(vaultCache.find((s) => s.id === b.dataset.editItem));
     } else if (b.dataset.delItem) {
@@ -1421,14 +1435,17 @@ function renderPending() {
   if (!el) return;
   if (!netModel.pending.length) { el.innerHTML = ""; return; }
   el.innerHTML = netModel.pending.map((p) => {
-    // a credential defaults to a short window: "forever" would bind the secret to this host for good
-    const dflt = p.credential ? "5m" : "forever";
+    // a credential defaults to a short window: "forever" would bind the secret to this host for good;
+    // a vault read defaults to this one time
+    const dflt = p.fetch ? "once" : p.credential ? "5m" : "forever";
     const opts = DUR_OPTS.map(([v, l]) => `<option value="${v}"${v === dflt ? " selected" : ""}>${l}</option>`).join("");
     // a credential ask: send this proxy secret to a host none of its bindings name?
-    const cred = p.credential
+    const cred = p.fetch
+      ? `<div class="approval-cred">🔒 wants to read <b>${escapeHtml(p.fetch.name)}</b> from the vault — the VM gets the real value</div>`
+      : p.credential
       ? `<div class="approval-cred">🔑 sends <b>${escapeHtml(p.credential.name)}</b> to this host — allowing binds the secret to it</div>`
       : "";
-    return `<div class="approval${p.credential ? " cred" : ""}" data-aid="${p.id}">${cred}
+    return `<div class="approval${p.credential || p.fetch ? " cred" : ""}" data-aid="${p.id}">${cred}
       <div class="approval-req">
         <span class="badge">${p.scheme}</span>
         <b>${escapeHtml(p.method)}</b>

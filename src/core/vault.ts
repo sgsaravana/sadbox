@@ -20,6 +20,7 @@ import { getDriver } from "../driver";
 import { getProject, refFor } from "./projects";
 import { dropItemPlaceholders, dropPlaceholders, existingPlaceholder, placeholderFor, prefixOf } from "./placeholders";
 import { normalizeHost } from "../net/rules";
+import { listFetchGrants, revokeFetchGrants } from "../net/fetchgrants";
 
 const driver = getDriver();
 
@@ -99,6 +100,7 @@ function view(r: ItemRow) {
     ...(r.kind === "variable" ? { value: decrypt(r.value_enc) } : {}),
     bindings: listBindings(r.id),
     projectIds: projectsOf(r.id),
+    fetchGrants: listFetchGrants(r.id), // projects that may fetch it without asking, now
     created_at: r.created_at,
     updated_at: r.updated_at,
   };
@@ -247,8 +249,9 @@ export async function setItemProjects(id: string, projectIds: string[]): Promise
   const before = projectsOf(id);
   db.transaction(() => {
     for (const pid of before.filter((p) => !next.includes(p))) {
-      // a placeholder must stop meaning anything for a project without access
+      // a placeholder or a standing answer must stop meaning anything for a project without access
       dropPlaceholders(pid, [id]);
+      revokeFetchGrants(pid, [id]);
       db.query("DELETE FROM project_secrets WHERE project_id = ? AND secret_id = ?").run(pid, id);
     }
     const grant = db.query("INSERT OR IGNORE INTO project_secrets (project_id, secret_id, status) VALUES (?, ?, 'pending')");
@@ -275,6 +278,7 @@ export function setProjectItems(projectId: string, itemIds: string[]) {
   ).all(projectId).map((r) => r.secret_id);
   db.transaction(() => {
     dropPlaceholders(projectId, before.filter((sid) => !next.includes(sid)));
+    revokeFetchGrants(projectId, before.filter((sid) => !next.includes(sid)));
     db.query("DELETE FROM project_secrets WHERE project_id = ?").run(projectId);
     const grant = db.query("INSERT INTO project_secrets (project_id, secret_id, status) VALUES (?, ?, 'pending')");
     for (const sid of next) grant.run(projectId, sid);
@@ -285,8 +289,18 @@ export function setProjectItems(projectId: string, itemIds: string[]) {
  *  The items stay in the vault. */
 export function purgeProjectVault(projectId: string) {
   dropPlaceholders(projectId);
+  revokeFetchGrants(projectId);
   const n = db.query("DELETE FROM project_secrets WHERE project_id = ? RETURNING secret_id").all(projectId).length;
   if (n) logEvent(projectId, "vault.purge", `access to ${n} item(s) removed`);
+}
+
+/** Take back a project's standing answer for fetching an item (it asks again). */
+export function revokeFetchGrant(id: string, projectId: string): ItemView {
+  const r = itemRow(id);
+  if (!r) throw new Error("vault item not found");
+  revokeFetchGrants(projectId, [id]);
+  logEvent(projectId, "vault.fetch.revoke", r.name);
+  return getItem(id);
 }
 
 /** The items a project may use, with what its VM holds for each. */

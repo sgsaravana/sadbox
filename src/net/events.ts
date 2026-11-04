@@ -35,6 +35,7 @@ export interface PendingView {
   id: string; projectId: string; host: string; method: string; scheme: string; path: string; ts: number;
   expiresAt: number; // when the held request is denied if nobody answers
   credential?: { name: string }; // set when the question is "send this secret to this host?"
+  fetch?: { name: string };      // set when the question is "may this VM read this vault item?"
 }
 
 type Listener = (ev: NetEvent) => void;

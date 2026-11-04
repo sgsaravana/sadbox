@@ -5,7 +5,7 @@ import { config } from "../config";
 import { staticRoutes, aceFiles } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
-import { addBinding, createItem, deleteBinding, deleteItem, getItem, injectVault, listItems, projectVaultView, revealItem, setItemProjects, setProjectItems, updateItem } from "../core/vault";
+import { addBinding, createItem, deleteBinding, deleteItem, getItem, injectVault, listItems, projectVaultView, revealItem, revokeFetchGrant, setItemProjects, setProjectItems, updateItem } from "../core/vault";
 import { connectSyncFolder, setGitRemote, createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject, setProjectMemory, startProject, stopProject } from "../core/projects";
 import { syncStatus, syncProject } from "../core/sync";
 import { pushProject } from "../core/push";
@@ -402,6 +402,9 @@ export function startServer() {
           const b = await req.json();
           return json(await setItemProjects(m[1], b.projectIds ?? []));
         }
+        // take back "fetch without asking" from a project
+        m = p.match(/^\/api\/vault\/([\w-]+)\/grants\/([\w-]+)$/);
+        if (m && req.method === "DELETE") return json(revokeFetchGrant(m[1], m[2]));
         // where a proxy item's real value may go
         m = p.match(/^\/api\/vault\/([\w-]+)\/bindings$/);
         if (m && req.method === "POST") {

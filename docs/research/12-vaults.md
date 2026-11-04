@@ -86,7 +86,7 @@ quietly.
   every change rewrites the env file of the running projects using the item.
 - Defaults for a new item: secret, string, fetch, not in the env file, asks
   on fetch (a variable does not ask).
-- Until step 4 a fetch item **not** marked "in env" reaches no VM at all.
+- Until step 4 a fetch item **not** marked "in env" reached no VM at all.
 - The old Secrets page kept working through legacy routes until step 2
   replaced it; they are gone.
 
@@ -151,6 +151,38 @@ The proxy side of V3, V4 and V8 (`src/net/credentials.ts`, `src/net/proxy.ts`):
 
 **Moved to step 6**: the proxy answering a VM's OAuth refresh (A7) needs the
 supervisor-owned login store that step 6 builds.
+
+## As built — step 4 (2026-11-04)
+
+Fetch at runtime (V5, V6) — `src/net/vaultfetch.ts`, `src/net/fetchgrants.ts`,
+the `fetch` kind in `src/net/approvals.ts`, `sadbox-vault` in `src/net/guest.ts`.
+
+- **`http://vault.sadbox.internal/v1/`** is answered by the proxy itself, before
+  any rule, DNS lookup or cut-off check — it never leaves the machine. The proxy
+  already knows the project from the socket the request came in on.
+  `GET /v1/` lists the project's items (name, kind, type, mode, whether a fetch
+  asks — no values); `GET /v1/NAME` returns a fetch item's value as the body
+  (`?format=json` → `{name, type, value}` with the value typed). A proxy item
+  is refused (403): its value must not enter the VM. Only `GET`.
+- **`sadbox-vault`** in every VM (`/usr/local/bin`, installed with the other
+  guest tools when the VM is connected to the proxy): `list`, `get NAME`,
+  `get --json NAME`. The value goes to stdout; errors go to stderr with a
+  non-zero exit, so `export DB_PASSWORD="$(sadbox-vault get DB_PASSWORD)"`
+  never captures an error message.
+- **Approvals**: an item that asks holds the request (up to the approval
+  timeout, 2 min) as a `fetch` approval in the project's network panel —
+  "wants to read NAME from the vault". The default answer is *once*; a window
+  or *forever* records a grant in `vault_fetch_grants`, shown on the item's
+  card as "fetches without asking", where ✕ takes it back
+  (`DELETE /api/vault/:id/grants/:projectId`). Losing access to the item, or
+  the project being destroyed, removes its grants.
+- **Read log**: every read is a row in the project's request log (host
+  `vault.sadbox.internal`, the item's name in `credentials`, no value, no
+  size) and a `vault.fetch` event (`served` / `denied` / `refused`).
+- Verified in a real VM (`spike-login`, isolated, through the running
+  supervisor): `list`, `get` of a variable into `$(…)`, `--json`, an unknown
+  name (stderr, exit 1), and a secret that asks — held and denied after the
+  2-minute timeout with nothing captured; every read in the request log.
 
 ## Not decided yet / open
 

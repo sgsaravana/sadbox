@@ -190,6 +190,18 @@ db.run(`
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
 db.run("CREATE INDEX IF NOT EXISTS secret_bindings_secret ON secret_bindings(secret_id)");
+// A project may fetch a vault item at runtime without being asked again
+// (docs/research/12, V6): made by an approval answered with a window or
+// "always". expires_at NULL = until revoked. No cascade from projects (rows
+// are soft-deleted): purgeProjectVault clears these.
+db.run(`
+  CREATE TABLE IF NOT EXISTS vault_fetch_grants (
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    secret_id TEXT NOT NULL REFERENCES secrets(id) ON DELETE CASCADE,
+    expires_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (project_id, secret_id)
+  )`);
 db.run(`
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
