@@ -3,6 +3,8 @@ import { config, VERSION } from "./config";
 import { buildBaseImage } from "./core/baseimage";
 import { startServer } from "./api/http";
 import { startProxy } from "./net/proxy";
+import { startLoginLoop } from "./core/logins";
+import { startClaudeRefresher } from "./net/claudeoauth";
 import { startForwards } from "./net/forwards";
 import { MIN_PASSWORD, authEnabled, ensurePassword, initialPasswordFile, setPassword } from "./core/auth";
 
@@ -122,6 +124,9 @@ export async function main(argv: string[]) {
       // filtered until it's available.
       startProxy().catch((e) => console.error(`⚠ proxy not started: ${e instanceof Error ? e.message : e}`));
       startForwards().catch((e) => console.error(`⚠ port forwards not started: ${e instanceof Error ? e.message : e}`));
+      // agent logins: capture from running VMs, and Claude's refresh, owned by sadbox
+      startLoginLoop();
+      startClaudeRefresher();
       break;
     case "setup": await setup(); break;
     case "doctor": await doctor(); break;

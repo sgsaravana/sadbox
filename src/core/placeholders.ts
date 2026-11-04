@@ -10,7 +10,7 @@ import { db } from "../db";
 
 const KNOWN_PREFIXES = [
   "github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_",
-  "sk-ant-oat01-", "sk-ant-api03-", "sk-ant-", "sk-proj-", "sk-",
+  "sk-ant-oat01-", "sk-ant-ort01-", "sk-ant-api03-", "sk-ant-", "sk-proj-", "sk-",
   "xoxb-", "xoxp-", "glpat-",
 ];
 

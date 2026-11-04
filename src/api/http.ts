@@ -6,13 +6,15 @@ import { staticRoutes, aceFiles } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
 import { addBinding, createItem, deleteBinding, deleteItem, getItem, injectVault, listItems, projectVaultView, revealItem, revokeFetchGrant, setItemProjects, setProjectItems, updateItem } from "../core/vault";
-import { connectSyncFolder, setGitRemote, createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject, setProjectMemory, startProject, stopProject } from "../core/projects";
+import { connectSyncFolder, listProjects, setGitRemote, createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject, setProjectMemory, startProject, stopProject } from "../core/projects";
 import { syncStatus, syncProject } from "../core/sync";
 import { pushProject } from "../core/push";
 import { terminalLinks } from "../core/links";
 import { getSettings, updateSettings } from "../core/settings";
 import { baseImageToolchain } from "../core/toolchain";
-import { listHistory } from "../core/history";
+import { deleteHistory, listHistory } from "../core/history";
+import { applyToRunning, forgetLogin, listLogins } from "../core/logins";
+import { claudeLogin, refreshClaude } from "../net/claudeoauth";
 import { createRule, deleteRule, listRules, moveRule, createHeaderRule, deleteHeaderRule, listHeaderRules } from "../net/rules";
 import { isCutOff, setCutoff } from "../net/cutoff";
 import { resolveApproval, listPending, pendingCounts } from "../net/approvals";
@@ -22,6 +24,7 @@ import { createForward, deleteForward, listForwards } from "../net/forwards";
 import { AuthError, authEnabled, clearCookie, crossOrigin, login, logout, safeNext, sessionCookie, signedIn, tokenFrom } from "../core/auth";
 import { FileError, commitStaged, deletePath, discardPaths, listStashes, stash, fileIndex, gitStatus, headFile, lastCommit, listBranches, listDir, makeDir, pushBranch, readFile, renamePath, stageFile, stagePaths, switchBranch, writeFile } from "../core/files";
 
+const liveProjectNames = () => listProjects().map((p) => p.name);
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
 
@@ -363,6 +366,26 @@ export function startServer() {
         // agent history kept per project name (core/history.ts): what a new
         // project of that name would get mounted
         if (p === "/api/history" && req.method === "GET") return json(listHistory());
+
+        // ---- agents: logins sadbox keeps, history per project name (Agents page)
+        if (p === "/api/agents" && req.method === "GET") {
+          return json({ logins: listLogins(), history: listHistory(), liveNames: liveProjectNames() });
+        }
+        if (p === "/api/agents/apply" && req.method === "POST") return json(await applyToRunning());
+        if (p === "/api/agents/claude/refresh" && req.method === "POST") {
+          if (!claudeLogin()) return json({ error: "sadbox holds no Claude login" }, 404);
+          return json({ ok: await refreshClaude("asked from the Agents page"), logins: listLogins() });
+        }
+        const lm = p.match(/^\/api\/agents\/logins\/([^/]+)\/([^/]+)$/);
+        if (lm && req.method === "DELETE") {
+          if (!forgetLogin(decodeURIComponent(lm[1]), decodeURIComponent(lm[2]))) return json({ error: "no such login" }, 404);
+          return json({ ok: true });
+        }
+        const hm = p.match(/^\/api\/agents\/history\/([^/]+)$/);
+        if (hm && req.method === "DELETE") {
+          try { deleteHistory(decodeURIComponent(hm[1]), liveProjectNames()); } catch (e) { return json({ error: e instanceof Error ? e.message : String(e) }, 400); }
+          return json({ ok: true });
+        }
 
         // toolchain baked into the image new projects boot from (name + version)
         if (p === "/api/toolchain" && req.method === "GET") {

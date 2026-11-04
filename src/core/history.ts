@@ -241,3 +241,12 @@ export function historyOf(name: string): HistoryView | null {
 function q(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
+
+/** Delete a project name's stored history — not while a project of that name
+ *  exists: its VM has the store mounted. */
+export function deleteHistory(name: string, liveNames: string[]): void {
+  const root = storeDir(name);
+  if (liveNames.includes(name)) throw new Error(`"${name}" is a live project with this history mounted — destroy it first`);
+  if (!isDir(root)) throw new Error(`no agent history kept for ${name}`);
+  rmSync(root, { recursive: true, force: true }); // does not follow links
+}

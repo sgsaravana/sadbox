@@ -22,6 +22,9 @@
         <a href="#vaults" class="nav-item" data-view="vaults">
           <span class="nav-ico">⚿</span> Vaults
         </a>
+        <a href="#agents" class="nav-item" data-view="agents">
+          <span class="nav-ico">✦</span> Agents
+        </a>
         <a href="#settings" class="nav-item nav-bottom" data-view="settings">
           <span class="nav-ico">⚙</span> Settings
         </a>
@@ -244,6 +247,24 @@
           <b>via proxy</b> — the VM gets a placeholder and the proxy swaps in the value on requests to the item's hosts;
           <b>fetch at runtime</b> — the app asks for it when it needs it.</p>
         <div id="vault-list" class="vault-list"></div>
+      </section>
+
+      <section id="view-agents" class="view" hidden>
+        <div class="section-head">
+          <h1>Agents</h1>
+          <button id="agents-apply" title="Copy the logins below into every running VM now">Apply to running VMs</button>
+        </div>
+        <p class="hint vault-intro">Log in to claude, omp or opencode in any VM and sadbox keeps the login, so new, rebuilt and
+          restarted VMs are logged in already. <b>Claude</b>'s login stays with sadbox: VMs get placeholders, the proxy swaps in
+          the real token and sadbox alone refreshes it. <b>API keys</b> (omp, opencode) are copied into VMs, where they are readable.
+          OAuth logins of omp and opencode are not shared — log in to those in each VM.</p>
+        <h2 class="agents-h">Logins</h2>
+        <div id="agents-logins" class="vault-list"></div>
+        <p id="agents-status" class="hint"></p>
+        <h2 class="agents-h">Conversation history</h2>
+        <p class="hint vault-intro">Kept per project name and mounted into its VM; a project created again under the same name
+          gets it back. Deleting a project keeps it — delete it here.</p>
+        <div id="agents-history" class="vault-list"></div>
       </section>
     </main>
   </div>

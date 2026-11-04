@@ -155,6 +155,10 @@ dialog#picker::backdrop, dialog#psec::backdrop, dialog#gitremote::backdrop, dial
 .dbadge.fetch { background: #15213a; color: var(--accent); }
 .dbadge.ask { background: #221a0c; color: var(--warn); }
 
+/* agents */
+.agents-h { font-size: 14px; margin: 22px 0 8px; color: var(--text); }
+.login-bad { color: var(--warn); font-size: 12px; }
+
 /* vaults */
 .vault-intro { max-width: 780px; line-height: 1.55; }
 .vault-list { display: flex; flex-direction: column; gap: 10px; max-width: 880px; }

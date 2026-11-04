@@ -1,7 +1,8 @@
 # Agent sessions — logins and conversation history kept by the supervisor
 
-> **Status: step 5 built 2026-11-04** (history store and mounts — see "As
-> built — step 5"); step 6 (logins) not yet. Planned 2026-11-03. Step 0
+> **Status: steps 5 and 6 built 2026-11-04** (history store and mounts;
+> logins and the Agents page — see "As built"); step 7 (docs) next.
+> Planned 2026-11-03. Step 0
 > (Spike F, `spikes/f-agent-sessions/`) ran the same day: history mounts hold;
 > **copying OAuth logins does not** (F.3) — replaced for OAuth by A7, which
 > Spike F.5 confirmed end to end (2026-11-04). See "After Spike F". Goes with [12-vaults.md](12-vaults.md).
@@ -142,6 +143,83 @@ files, Claude / omp / opencode; no links, no login files).
 **Not yet**: deleting a store, and seeing them all, is the Agents page (step 6).
 Claude still deletes its own transcripts older than `cleanupPeriodDays` (30 by
 default) — the mount does not change that.
+
+## As built — step 6 (2026-11-04)
+
+`src/core/logins.ts` (capture, copy-in, Agents views), `src/net/claudeoauth.ts`
+(A7), the proxy hook in `src/net/proxy.ts`, the Agents page.
+
+**Store**: table `agent_logins`, one row per tool and provider, the login
+**encrypted** like vault items — not files under `~/.sadbox/agents/logins/`
+as A1 said: a plain file would be the one place a real token sat unencrypted.
+`login_placeholders` holds each project's Claude placeholders (stable across
+refreshes and new logins); `login_seen` what sadbox last saw or put in each VM.
+
+| Tool | Shared | How |
+|---|---|---|
+| Claude (claude.ai OAuth) | **kept by sadbox** (A7) | VM's `~/.claude/.credentials.json` gets its own placeholders, expiry ten years out; the rest of the file is kept |
+| omp, API keys (`auth_credentials` api_key rows) | copied (A4) | read with bun:sqlite; written through **omp's own** `SqliteAuthCredentialStore` (it owns the schema and creates `agent.db` in a fresh VM) |
+| opencode, API keys (`auth.json` `api` entries) | copied (A4) | merged into the VM's `auth.json` (0600, atomic) |
+| omp / opencode OAuth logins | **not shared** | a copy dies on the first refresh elsewhere (F.3); a VM's own OAuth login for a provider is never overwritten |
+
+**Capture** (every 30 s, running VMs; one bun script fed on stdin, so no
+secret is on a command line in the VM): an API-key login that differs from
+what sadbox last saw in *that* VM is a new login there and becomes the one
+kept — so the newest wins, and a VM still holding the old key does not bring
+it back. A real Claude login found in a VM (one from before) is taken over if
+sadbox has no working one, otherwise replaced; either way the VM gets
+placeholders at once. Stale placeholders (shaped `prefix + sbx`) are never
+mistaken for a login. A login file Claude emptied gets placeholders again as
+soon as sadbox has a working login.
+
+**Copy-in**: at create / rebuild (before tmux starts), at start, and on
+"Apply to running VMs". A4 as decided: API keys are not pushed into running
+VMs on their own.
+
+**Claude (A7)**:
+- The proxy swaps a project's access placeholder for the real token **only
+  in the `Authorization` header, only to `api.anthropic.com`**; anywhere else
+  it goes as it is and nobody is asked. The refresh placeholder is never
+  swapped. Both real tokens are redacted from responses (headers and bodies).
+- `POST https://platform.claude.com/v1/oauth/token` (and `console.anthropic.com`)
+  is answered by sadbox before any rule runs:
+  - a refresh with this VM's placeholder → sadbox refreshes for real (at most
+    once a minute — the VM only asks after a 401) and answers with the
+    placeholders;
+  - a refresh with another VM's placeholder → 400, nothing sent;
+  - anything else — the code exchange of a `/login` in the VM, or a refresh
+    with a VM's own real token — is sent on **by sadbox**; the tokens that come
+    back become the login kept, and the VM gets placeholders. Real tokens
+    never reach a VM.
+- sadbox refreshes 15 min ahead of expiry, one refresh at a time. A refusal
+  (`invalid_grant`) is shown on the login and not retried until a new login;
+  a VM's refresh is then answered with 400 and Claude empties its file (as
+  seen in F.5), so the VM shows as logged out.
+- Which VMs: every project, one login per person (A1).
+
+**Agents page** (`#agents`; `GET /api/agents`, `POST /api/agents/apply`,
+`POST /api/agents/claude/refresh`, `DELETE /api/agents/logins/:tool/:provider`,
+`DELETE /api/agents/history/:name`): each login — how VMs get it, where and
+when it was captured, Claude's expiry and refresh state; Forget (a copied key
+stays in the VMs that have it; Claude's placeholders stop working
+everywhere). History per project name with size; Delete, refused while a
+project of that name exists (its VM has it mounted).
+
+**Tested for real** (2026-11-04, a throwaway supervisor and two VMs, fake
+credentials): keys made in one VM (omp through its real store, opencode's
+file) captured within one pass and copied into a fresh VM, where omp's store
+reads its key back; Claude placeholders written, swapped on every call to
+`api.anthropic.com` (Anthropic answered 401 to the fake token), the VM's
+refresh answered by sadbox, which refreshed for real and was refused
+(`invalid_grant`, shown on the login); placeholders put back into the emptied
+file once the login was marked working; copy-in on stop / start; the Agents
+page in Chrome (Apply, Forget). The supervisor on :7070 picked up the code
+live and captured two API keys from running VMs (omp/deepseek from
+cash-compass, opencode/minimax from spike-login).
+
+**Not tested live**: a real `claude /login` in a VM through the proxy, and
+sadbox refreshing a real Claude login (both covered by unit tests against a
+stand-in token server; F.5 did the refresh by hand).
 
 ## Build steps (agent sessions)
 

@@ -33,6 +33,7 @@ import { recordRequest, startRequestLog, type RequestEntry } from "./events";
 import { bodyRedactor, redactResponse, substituteRequest, swapsBodies, textualType, type SwapBody, type SwapResult } from "./credentials";
 import { CUTOFF_MESSAGE, isCutOff } from "./cutoff";
 import { serveVault, VAULT_HOST } from "./vaultfetch";
+import { answerTokenRequest, CLAUDE_LOGIN_NAME, isClaudeTokenRequest } from "./claudeoauth";
 
 const driver = getDriver();
 // local copy of core/projects' refFor to avoid a proxy<->projects import cycle
@@ -206,6 +207,20 @@ function makeHandler(scheme: "http" | "https") {
       req.resume();
       try { res.writeHead(403, { "content-type": "text/plain" }); res.end(`sadbox: ${CUTOFF_MESSAGE}\n`); } catch {}
       log(projectId, { id: rid(), ts: started, method, scheme, host, path, status: 403, decision: "blocked", reqBytes: 0, respBytes: 0, durationMs: Date.now() - started, error: CUTOFF_MESSAGE });
+      return;
+    }
+
+    // Claude's token endpoint: answered by sadbox, which owns the login (A7) —
+    // a VM never gets, or spends, a real token
+    if (projectId && isClaudeTokenRequest(scheme, host, method, path)) {
+      const { chunks } = await readBody(req, BODY_CAP);
+      const name = db.query<{ name: string }, [string]>("SELECT name FROM projects WHERE id = ?").get(projectId)?.name ?? projectId;
+      const r = await answerTokenRequest(projectId, name, host, Buffer.concat(chunks).toString("utf8"), String(req.headers["content-type"] || ""), res);
+      log(projectId, {
+        id: rid(), ts: started, method, scheme, host, path, status: r.status, decision: "allowed",
+        reqBytes: 0, respBytes: 0, durationMs: Date.now() - started, credentials: [CLAUDE_LOGIN_NAME],
+        ...(r.status >= 400 ? { error: r.note } : {}),
+      });
       return;
     }
 

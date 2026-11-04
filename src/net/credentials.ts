@@ -15,6 +15,7 @@
 import { db } from "../db";
 import { decrypt } from "../crypto";
 import { hostMatch, pathMatch } from "./rules";
+import { loginCredentials } from "./claudeoauth";
 
 interface Credential {
   secretId: string;
@@ -24,6 +25,10 @@ interface Credential {
   valueType: "string" | "number" | "json";
   swapUrl: number;
   swapBody: number;
+  /** An agent login sadbox owns (claudeoauth.ts): its real value as is, and
+   *  the only hosts it goes to — in the Authorization header, and nowhere
+   *  else; null: never sent. Nobody is asked about it. */
+  login?: { real: string; hosts: string[] | null };
 }
 
 interface BindingRow {
@@ -58,9 +63,18 @@ export interface SwapBody {
 
 type Headers = Record<string, unknown>;
 
-/** The proxy items this project holds a placeholder for and may use. A
- *  placeholder left over from an item it lost access to doesn't count. */
+/** The proxy items this project holds a placeholder for and may use, and the
+ *  agent logins it was given. A placeholder left over from an item it lost
+ *  access to doesn't count. */
 function projectCredentials(projectId: string): Credential[] {
+  const logins: Credential[] = loginCredentials(projectId).map((l, i) => ({
+    secretId: `login:${i}`, name: l.name, placeholder: l.placeholder, valueEnc: "", valueType: "string",
+    swapUrl: 0, swapBody: 0, login: { real: l.real, hosts: l.hosts },
+  }));
+  return [...vaultCredentials(projectId), ...logins];
+}
+
+function vaultCredentials(projectId: string): Credential[] {
   return db.query<Credential, [string, string]>(
     `SELECT s.id AS secretId, s.name AS name, sp.placeholder AS placeholder, s.value_enc AS valueEnc,
             s.value_type AS valueType, s.swap_url AS swapUrl, s.swap_body AS swapBody
@@ -108,6 +122,15 @@ export function substituteRequest(
     if (!keys.length && !url && !inBody) continue;
     if (req.scheme !== "https") { out.plainHttp.push(c.name); continue; }
 
+    if (c.login) {
+      // only as a bearer token to the login's own hosts; anywhere else the placeholder goes as it is
+      const to = c.login.hosts;
+      if (!to || !keys.length || !keys.every((k) => k.toLowerCase() === "authorization") || !to.some((h) => hostMatch(h, req.host))) continue;
+      for (const k of keys) headers[k] = mapValue(headers[k], (v) => swap(v, ph, c.login!.real));
+      out.injected.push(c.name);
+      continue;
+    }
+
     const bindings = alsoAllow.has(c.secretId) ? null : db.query<BindingRow, [string]>(
       "SELECT host, path, method, header, expires_at FROM secret_bindings WHERE secret_id = ?",
     ).all(c.secretId);
@@ -149,7 +172,7 @@ const MIN_REDACT = 8;
 function redactable(projectId: string): { name: string; real: string; placeholder: string }[] {
   return projectCredentials(projectId)
     .filter((c) => c.valueType === "string")
-    .map((c) => ({ name: c.name, real: decrypt(c.valueEnc), placeholder: c.placeholder }))
+    .map((c) => ({ name: c.name, real: c.login?.real ?? decrypt(c.valueEnc), placeholder: c.placeholder }))
     .filter((c) => c.real.length >= MIN_REDACT);
 }
 

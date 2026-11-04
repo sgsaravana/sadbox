@@ -19,6 +19,7 @@ import { type ToolInfo } from "./toolchain";
 import { ensureBaseImage } from "./baseimage";
 import { isEnvFile } from "./envfiles";
 import { copyOutHistory, historyOf, linkHistory, prepareHistory } from "./history";
+import { applyLoginsQuietly, purgeProjectLogins } from "./logins";
 import { forgetVitals, liveStats, liveToolchain, QUERY_TIMEOUT_MS } from "./vitals";
 
 const driver = getDriver();
@@ -338,6 +339,8 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   // assign (create only) then (re)write the env file from whatever's assigned
   if (opts.assignSecretIds?.length) setProjectItems(p.id, opts.assignSecretIds);
   await injectVault(p.id);
+  // the agents' logins sadbox keeps (Claude's as placeholders)
+  await applyLoginsQuietly(p);
 
   // tmux starts last so its shells are born with the secrets + proxy env in place
   const tmux = await driver.exec(ref, ["tmux", "new-session", "-d",
@@ -602,6 +605,7 @@ export async function destroyProject(id: string): Promise<void> {
   await rescueHistory(p).catch(() => {});
   await driver.destroy(refFor(p.name));
   purgeProjectVault(id);   // its vault access and placeholders go; the items stay
+  purgeProjectLogins(id);  // …and its login placeholders; the logins stay
   purgeProjectNet(id);     // per-project net rules die with the VM too
   purgeProjectForwards(id); // …and so do its port forwards (frees the host ports)
   await rm(join(config.dataDir, "sync", `${id}.git`), { recursive: true, force: true });
@@ -734,6 +738,7 @@ export async function startProject(id: string): Promise<ProjectRow> {
       redialProjectSocket(id); // carriers dialed before the shutdown are dead
     }
     await injectVault(id).catch((e) => logEvent(id, "vault.inject.error", String(e)));
+    await applyLoginsQuietly(p);
     const tmux = await driver.exec(ref, ["sh", "-c",
       `tmux has-session -t ${config.tmuxSession} 2>/dev/null || ` +
       `tmux new-session -d -s ${config.tmuxSession} -c ${config.guestWorkdir}`]);

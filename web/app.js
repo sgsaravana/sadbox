@@ -32,20 +32,23 @@ function route() {
   const isProjects = head === "projects";
   const isVaults = head === "vaults";
   const isSettings = head === "settings";
-  const isHome = !detail && !isProjects && !isVaults && !isSettings; // default / #home / unknown
+  const isAgents = head === "agents";
+  const isHome = !detail && !isProjects && !isVaults && !isSettings && !isAgents; // default / #home / unknown
 
   $("#view-home").hidden = !isHome;
   $("#view-projects").hidden = !isProjects;
   $("#view-vaults").hidden = !isVaults;
   $("#view-settings").hidden = !isSettings;
+  $("#view-agents").hidden = !isAgents;
   $("#view-detail").hidden = !detail;
 
-  const activeNav = isVaults ? "vaults" : isSettings ? "settings"
+  const activeNav = isVaults ? "vaults" : isSettings ? "settings" : isAgents ? "agents"
     : (isProjects || detail) ? "projects" : "home";
   document.querySelectorAll(".nav-item").forEach((a) =>
     a.classList.toggle("active", a.dataset.view === activeNav));
 
   if (isVaults) refreshVault();
+  else if (isAgents) refreshAgents();
   else if (isSettings) loadSettings();
   else if (detail) openDetail(arg);
   else if (isProjects) {
@@ -57,6 +60,90 @@ function route() {
 }
 addEventListener("hashchange", route);
 const showView = (v) => { location.hash = v; };
+
+// ---- agents: logins sadbox keeps, history per project name ----
+const TOOL_NAMES = { claude: "Claude Code", omp: "omp", opencode: "opencode" };
+const agentWhen = (v) => {
+  if (v == null) return "—";
+  const d = typeof v === "number" ? new Date(v) : new Date(String(v).includes("T") ? v : v.replace(" ", "T") + "Z");
+  return d.toLocaleString();
+};
+const inHours = (ms) => {
+  const h = (ms - Date.now()) / 36e5;
+  return h < 0 ? "expired" : h < 1 ? `${Math.round(h * 60)} min` : `${h.toFixed(1)} h`;
+};
+async function refreshAgents() {
+  let a;
+  try { a = await api("/api/agents"); } catch (e) {
+    $("#agents-logins").innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return;
+  }
+  $("#agents-logins").innerHTML = a.logins.length ? a.logins.map((l) => `
+    <div class="vitem-card">
+      <div class="vrow">
+        <span class="sec-name">${escapeHtml(TOOL_NAMES[l.tool] || l.tool)}</span>
+        <span class="tbadge">${escapeHtml(l.provider)}</span>
+        <span class="dbadge ${l.shared === "placeholders" ? "proxy" : "fetch"}">${l.shared === "placeholders" ? "kept by sadbox · placeholders in VMs" : "API key · copied into VMs"}</span>
+        <span class="vactions">
+          ${l.kind === "oauth" ? `<button type="button" class="mini" data-refresh-login>Refresh now</button>` : ""}
+          <button type="button" class="mini danger" data-forget="${escapeHtml(l.tool)}/${escapeHtml(l.provider)}">Forget</button>
+        </span>
+      </div>
+      <div class="vrow hint">
+        from ${l.fromProject ? `<a class="pchip" href="#projects">${escapeHtml(l.fromProject)}</a>` : "—"} · ${escapeHtml(agentWhen(l.capturedAt))}
+        ${l.kind === "oauth" && l.expiresAt ? ` · access token valid for ${inHours(l.expiresAt)}, refreshed by sadbox ahead of time${l.refreshedAt ? ` (last ${escapeHtml(agentWhen(l.refreshedAt))})` : ""}` : ""}
+      </div>
+      ${l.status ? `<div class="vrow login-bad">⚠ ${escapeHtml(l.status)}</div>` : ""}
+    </div>`).join("")
+    : `<div class="empty">No logins yet — log in to an agent in any VM and it shows up here within half a minute.</div>`;
+  $("#agents-history").innerHTML = a.history.length ? a.history.map((h) => {
+    const live = a.liveNames.includes(h.name);
+    return `
+    <div class="vitem-card">
+      <div class="vrow">
+        <span class="sec-name">${escapeHtml(h.name)}</span>
+        ${live ? `<span class="dbadge fetch">mounted</span>` : `<span class="tbadge">no project</span>`}
+        <span class="hint">${h.tools.map((t) => `${escapeHtml(TOOL_NAMES[t.tool] || t.tool)} ${fmtBytes(t.bytes)}`).join(" · ")}</span>
+        <span class="vactions">
+          <button type="button" class="mini danger" data-del-history="${escapeHtml(h.name)}" ${live ? `disabled title="Destroy the project first — its VM has this mounted"` : ""}>Delete</button>
+        </span>
+      </div>
+      <div class="vrow hint">${fmtBytes(h.bytes)} · last changed ${escapeHtml(agentWhen(h.updatedAt))}</div>
+    </div>`;
+  }).join("") : `<div class="empty">None kept yet.</div>`;
+}
+$("#view-agents").addEventListener("click", async (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  const status = $("#agents-status");
+  try {
+    if (b.dataset.forget) {
+      const [tool, provider] = b.dataset.forget.split("/");
+      const what = tool === "claude"
+        ? "Every VM's Claude placeholders stop working; log in again in any VM to give sadbox a new login."
+        : "VMs that already have this key keep it; new VMs won't get it.";
+      if (!confirm(`Forget the ${TOOL_NAMES[tool] || tool} login (${provider})? ${what}`)) return;
+      await api(`/api/agents/logins/${encodeURIComponent(tool)}/${encodeURIComponent(provider)}`, { method: "DELETE" });
+    } else if (b.dataset.delHistory) {
+      if (!confirm(`Delete the agents' conversation history kept for "${b.dataset.delHistory}"? This cannot be undone.`)) return;
+      await api(`/api/agents/history/${encodeURIComponent(b.dataset.delHistory)}`, { method: "DELETE" });
+    } else if (b.hasAttribute("data-refresh-login")) {
+      status.textContent = "Refreshing…";
+      const r = await api("/api/agents/claude/refresh", { method: "POST" });
+      status.textContent = r.ok ? "Claude login refreshed." : "The refresh did not work — see the login above.";
+    }
+    await refreshAgents();
+  } catch (err) { status.textContent = err.message; }
+});
+$("#agents-apply").onclick = async () => {
+  const status = $("#agents-status");
+  status.textContent = "Copying into running VMs…";
+  try {
+    const r = await api("/api/agents/apply", { method: "POST" });
+    status.textContent = r.length
+      ? r.map((x) => `${x.project}: ${x.error ? `failed (${x.error})` : x.wrote.length ? x.wrote.join(", ") : "already current"}`).join(" · ")
+      : "No VM is running.";
+  } catch (e) { status.textContent = e.message; }
+};
 
 // ---- container service status (home page) ----
 // Every VM operation goes through the backend's service; when it is down,

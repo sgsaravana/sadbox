@@ -304,6 +304,44 @@ db.run(`
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
 
+// Agent logins kept by the supervisor (core/logins.ts, research/13 A4 / A7):
+// one per tool and provider, for every project. 'api' logins (an API key) are
+// copied into VMs; an 'oauth' login (Claude) never is — sadbox holds the real
+// tokens and refreshes them, VMs hold placeholders the proxy swaps.
+db.run(`
+  CREATE TABLE IF NOT EXISTS agent_logins (
+    tool TEXT NOT NULL,                        -- claude | omp | opencode
+    provider TEXT NOT NULL,                    -- the tool's name for whose login it is (deepseek, claude.ai, …)
+    kind TEXT NOT NULL,                        -- api | oauth
+    data_enc TEXT NOT NULL,                    -- the login itself (JSON), encrypted
+    from_project TEXT,                         -- name of the project it was captured from
+    captured_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at INTEGER,                        -- oauth: when the access token runs out (ms)
+    refreshed_at INTEGER,                      -- oauth: last refresh by sadbox (ms)
+    status TEXT,                               -- null = usable; otherwise why not
+    PRIMARY KEY (tool, provider)
+  )`);
+// A project's placeholders for an oauth login (stable across refreshes).
+db.run(`
+  CREATE TABLE IF NOT EXISTS login_placeholders (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    tool TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    field TEXT NOT NULL,                       -- access | refresh
+    placeholder TEXT NOT NULL UNIQUE,
+    PRIMARY KEY (project_id, tool, provider, field)
+  )`);
+// What sadbox last saw (or put) in a VM for an api login: a VM whose login
+// differs from this has logged in anew, and its login becomes the one kept.
+db.run(`
+  CREATE TABLE IF NOT EXISTS login_seen (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    tool TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    PRIMARY KEY (project_id, tool, provider)
+  )`);
+
 // Browser sessions (see core/auth.ts). Only a hash of each token is stored.
 db.run(`
   CREATE TABLE IF NOT EXISTS sessions (
