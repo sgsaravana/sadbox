@@ -55,7 +55,15 @@ for (const [col, ddl] of [["git_remote", "git_remote TEXT"], ["git_token_enc", "
   // recorded — those VMs were created with whatever the default was then)
   ["memory_mb", "memory_mb INTEGER"],
   // branch: the branch the VM had checked out when last seen (NULL: never asked)
-  ["branch", "branch TEXT"]]) {
+  ["branch", "branch TEXT"],
+  // net_cutoff: 1 = the proxy refuses every request from this VM (one-click "internet off")
+  ["net_cutoff", "net_cutoff INTEGER NOT NULL DEFAULT 0"],
+  // history_mounted: 1 = the VM was created with the project's agent history
+  // mounted (research/13, A2); 0 = an older VM that keeps it on its own disk
+  ["history_mounted", "history_mounted INTEGER NOT NULL DEFAULT 0"],
+  // empty: 1 = created with neither a folder nor a git remote — the VM starts
+  // with an empty workdir and repositories are cloned into it from the terminal
+  ["empty", "empty INTEGER NOT NULL DEFAULT 0"]]) {
   const has = db.query<{ name: string }, []>("PRAGMA table_info(projects)").all().some((c) => c.name === col);
   if (!has) db.run(`ALTER TABLE projects ADD COLUMN ${ddl}`);
 }
@@ -97,9 +105,10 @@ if (refsOldTable("secrets") || refsOldTable("project_secrets")) {
   db.run("PRAGMA foreign_keys = ON");
 }
 
-// secrets.project_id: NULL = global (assignable to many projects via
-// project_secrets); set = project-specific (owned by that project, deleted
-// when the project is destroyed)
+// secrets: the vault's items (docs/research/12). The table keeps its old name
+// so placeholders, bindings and header rules keep pointing at it. Which
+// projects may use an item is project_secrets. secrets.project_id is from
+// before the vault (a project-specific secret) — migrateToVault() empties it.
 db.run(`
   CREATE TABLE IF NOT EXISTS secrets (
     id TEXT PRIMARY KEY,
@@ -108,15 +117,95 @@ db.run(`
     value_enc TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
-db.run(`CREATE UNIQUE INDEX IF NOT EXISTS secrets_global_name
-        ON secrets(name) WHERE project_id IS NULL`);
-db.run(`CREATE UNIQUE INDEX IF NOT EXISTS secrets_project_name
-        ON secrets(project_id, name) WHERE project_id IS NOT NULL`);
 db.run(`
   CREATE TABLE IF NOT EXISTS project_secrets (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     secret_id TEXT NOT NULL REFERENCES secrets(id) ON DELETE CASCADE,
     status TEXT NOT NULL DEFAULT 'pending',   -- pending|injected|stale
+    PRIMARY KEY (project_id, secret_id)
+  )`);
+// delivery: how an item reaches a VM (docs/research/11, 12).
+//   proxy  the VM gets a placeholder; the egress proxy swaps in the real value
+//          on requests to the item's bindings, so it never enters the VM
+//   fetch  nothing in the VM; fetched at runtime (`in_env`: also written to
+//          the env file, as every secret was before the vault)
+//   env    before the vault: the real value in the env file → fetch + in_env
+// kind: variable (value shown in the UI) | secret (hidden until revealed)
+// value_type: string | number | json
+// ask_on_fetch: a fetch waits for the owner's approval
+// swap_url / swap_body: a proxy item is swapped in the URL / the request body
+//   too, not only in headers (docs/research/12, V3–V4)
+for (const [col, ddl] of [
+  ["delivery", "delivery TEXT NOT NULL DEFAULT 'env'"],
+  ["kind", "kind TEXT NOT NULL DEFAULT 'secret'"],
+  ["value_type", "value_type TEXT NOT NULL DEFAULT 'string'"],
+  ["in_env", "in_env INTEGER NOT NULL DEFAULT 0"],
+  ["ask_on_fetch", "ask_on_fetch INTEGER NOT NULL DEFAULT 1"],
+  ["updated_at", "updated_at TEXT"],
+  ["swap_url", "swap_url INTEGER NOT NULL DEFAULT 0"],
+  ["swap_body", "swap_body INTEGER NOT NULL DEFAULT 0"],
+]) {
+  const has = db.query<{ name: string }, []>("PRAGMA table_info(secrets)").all().some((c) => c.name === col);
+  if (!has) db.run(`ALTER TABLE secrets ADD COLUMN ${ddl}`);
+}
+
+/** Secrets → vault items (docs/research/12, V9). Idempotent, run at every start.
+ *  An env secret becomes a fetch item still written to the env file, with no
+ *  approval, so nothing using it breaks. A project-specific secret becomes an
+ *  item its project has access to — and, as before, wins over an assigned
+ *  global of the same name, which that project loses access to. Names are
+ *  unique per project now, not across the vault. */
+export function migrateToVault(): void {
+  db.transaction(() => {
+    db.run("DROP INDEX IF EXISTS secrets_global_name");
+    db.run("DROP INDEX IF EXISTS secrets_project_name");
+    db.run("UPDATE secrets SET delivery = 'fetch', in_env = 1, ask_on_fetch = 0 WHERE delivery = 'env'");
+    db.run(`DELETE FROM project_secrets WHERE EXISTS (
+              SELECT 1 FROM secrets g JOIN secrets own ON own.name = g.name AND own.id != g.id
+              WHERE g.id = project_secrets.secret_id AND own.project_id = project_secrets.project_id)`);
+    db.run(`INSERT OR IGNORE INTO project_secrets (project_id, secret_id, status)
+            SELECT project_id, id, 'injected' FROM secrets WHERE project_id IS NOT NULL`);
+    db.run("UPDATE secrets SET project_id = NULL WHERE project_id IS NOT NULL");
+  })();
+}
+migrateToVault();
+// One placeholder per (project, proxy secret), stable across restarts and
+// rebuilds, different in every VM — a placeholder copied out of one VM is
+// worthless from another. No cascade from projects: project rows are soft-
+// deleted, so purgeProjectVault clears these explicitly.
+db.run(`
+  CREATE TABLE IF NOT EXISTS secret_placeholders (
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    secret_id TEXT NOT NULL REFERENCES secrets(id) ON DELETE CASCADE,
+    placeholder TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (project_id, secret_id)
+  )`);
+// Where a proxy secret's real value may be sent. Matched like net_rules:
+// host exact or *.suffix (never a bare *), optional path (exact | prefix*),
+// method and header name. expires_at drives time-boxed approvals.
+db.run(`
+  CREATE TABLE IF NOT EXISTS secret_bindings (
+    id TEXT PRIMARY KEY,
+    secret_id TEXT NOT NULL REFERENCES secrets(id) ON DELETE CASCADE,
+    host TEXT NOT NULL,
+    path TEXT,                                 -- exact | prefix* | NULL = any
+    method TEXT,                               -- GET/POST/... | NULL = any
+    header TEXT,                               -- lowercased | NULL = any header
+    expires_at TEXT,                           -- ISO 8601 | NULL = permanent
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+db.run("CREATE INDEX IF NOT EXISTS secret_bindings_secret ON secret_bindings(secret_id)");
+// A project may fetch a vault item at runtime without being asked again
+// (docs/research/12, V6): made by an approval answered with a window or
+// "always". expires_at NULL = until revoked. No cascade from projects (rows
+// are soft-deleted): purgeProjectVault clears these.
+db.run(`
+  CREATE TABLE IF NOT EXISTS vault_fetch_grants (
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    secret_id TEXT NOT NULL REFERENCES secrets(id) ON DELETE CASCADE,
+    expires_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (project_id, secret_id)
   )`);
 db.run(`
@@ -179,6 +268,33 @@ db.run("CREATE INDEX IF NOT EXISTS net_header_rules_lookup ON net_header_rules(s
   if (!has) db.run("ALTER TABLE net_header_rules ADD COLUMN value_secret_id TEXT");
 }
 
+// Every request a VM made through the proxy (what the Network panel's Activity
+// shows), kept for config.netLogDays and pruned hourly (net/events.ts). Names
+// of secrets only — never values; paths can hold a placeholder, never a real one.
+db.run(`
+  CREATE TABLE IF NOT EXISTS net_requests (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    rid TEXT NOT NULL,                         -- the live feed's id for the row
+    project_id TEXT NOT NULL,
+    ts INTEGER NOT NULL,                       -- ms since epoch, when the request arrived
+    method TEXT NOT NULL,
+    scheme TEXT NOT NULL,
+    host TEXT NOT NULL,
+    path TEXT NOT NULL,
+    status INTEGER,
+    decision TEXT NOT NULL,                    -- allowed | blocked
+    rule_id TEXT,
+    req_bytes INTEGER NOT NULL DEFAULT 0,
+    resp_bytes INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    credentials TEXT,                          -- JSON array of secret names swapped in
+    redacted TEXT,                             -- JSON array of secret names scrubbed from the response
+    credential_in_url TEXT                     -- JSON array of secret names whose placeholder was in the URL
+  )`);
+db.run("CREATE INDEX IF NOT EXISTS net_requests_project_ts ON net_requests(project_id, ts)");
+db.run("CREATE INDEX IF NOT EXISTS net_requests_ts ON net_requests(ts)");
+
 // Inbound port forwards: a listener on the supervisor host (host_port) piped to
 // a port inside one project's VM (guest_port). host_port is unique across all
 // projects — it is a real socket on this machine.
@@ -189,6 +305,44 @@ db.run(`
     host_port INTEGER NOT NULL UNIQUE,
     guest_port INTEGER NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+// Agent logins kept by the supervisor (core/logins.ts, research/13 A4 / A7):
+// one per tool and provider, for every project. 'api' logins (an API key) are
+// copied into VMs; an 'oauth' login (Claude) never is — sadbox holds the real
+// tokens and refreshes them, VMs hold placeholders the proxy swaps.
+db.run(`
+  CREATE TABLE IF NOT EXISTS agent_logins (
+    tool TEXT NOT NULL,                        -- claude | omp | opencode
+    provider TEXT NOT NULL,                    -- the tool's name for whose login it is (deepseek, claude.ai, …)
+    kind TEXT NOT NULL,                        -- api | oauth
+    data_enc TEXT NOT NULL,                    -- the login itself (JSON), encrypted
+    from_project TEXT,                         -- name of the project it was captured from
+    captured_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at INTEGER,                        -- oauth: when the access token runs out (ms)
+    refreshed_at INTEGER,                      -- oauth: last refresh by sadbox (ms)
+    status TEXT,                               -- null = usable; otherwise why not
+    PRIMARY KEY (tool, provider)
+  )`);
+// A project's placeholders for an oauth login (stable across refreshes).
+db.run(`
+  CREATE TABLE IF NOT EXISTS login_placeholders (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    tool TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    field TEXT NOT NULL,                       -- access | refresh
+    placeholder TEXT NOT NULL UNIQUE,
+    PRIMARY KEY (project_id, tool, provider, field)
+  )`);
+// What sadbox last saw (or put) in a VM for an api login: a VM whose login
+// differs from this has logged in anew, and its login becomes the one kept.
+db.run(`
+  CREATE TABLE IF NOT EXISTS login_seen (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    tool TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    PRIMARY KEY (project_id, tool, provider)
   )`);
 
 // Project links (see net/links.ts): from_project may reach `port` inside

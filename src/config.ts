@@ -40,6 +40,9 @@ export const config = {
   forwardHost: process.env.SADBOX_FORWARD_HOST ?? "0.0.0.0",
   // how long a blocked request is held awaiting an approve/deny decision
   approvalTimeoutMs: Number(process.env.SADBOX_APPROVAL_TIMEOUT_MS ?? 120_000),
+  // how long each VM's network request log is kept in the database, in days
+  // (SADBOX_NET_LOG_DAYS; never less than 7)
+  netLogDays: Math.max(7, Number(process.env.SADBOX_NET_LOG_DAYS) || 7),
   // per-user state dir — works the same for a repo checkout or an installed binary
   dataDir: process.env.SADBOX_DATA ?? join(homedir(), ".sadbox"),
   // base image every project VM boots from; built by `sadbox setup`.

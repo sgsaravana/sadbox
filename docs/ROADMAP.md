@@ -1,7 +1,7 @@
 # sadbox — Roadmap
 
 > What has shipped, what is next, and the plan for Linux support.
-> Last updated 2026-10-14. Design background lives in [`research/`](research/README.md).
+> Last updated 2026-11-04. Design background lives in [`research/`](research/README.md).
 
 ## Shipped (v0, macOS)
 
@@ -12,7 +12,7 @@ All on Apple silicon + macOS 26, through the Apple `container` driver
 |---|---|
 | De-risk spikes | A (terminal), B (image/workdir), C (sync): all passed 2026-09-15 (`spikes/`) |
 | Supervisor | Bun + TypeScript single binary, SQLite, REST + WS API, `ProjectDriver` boundary |
-| Guest image | One Dockerfile (Debian trixie), toolchain baked in (Bun, Claude Code, opencode, tmux), toolchain shown on the detail page |
+| Guest image | One Dockerfile (Debian trixie), toolchain baked in (Bun, node + npm via nvm, Claude Code, omp, opencode, tmux), toolchain shown on the detail page; rebuilt automatically when its recipe changes |
 | Projects | Create from a local git folder or a git URL; rebuild; stop/start; idle timeouts; per-VM memory change; default CPU/memory/disk in Settings |
 | Terminal | xterm.js ⇄ WS ⇄ PTY ⇄ `container exec` ⇄ tmux, one browser tab per project |
 | Secrets | Encrypted at rest (AES-256-GCM, data-dir keyfile), assigned per project, delivered as env files |
@@ -24,7 +24,58 @@ All on Apple silicon + macOS 26, through the Apple `container` driver
 | Auth | Password sign-in with session cookie |
 | Distribution | Release workflow (darwin + linux binaries), `install.sh`, Homebrew formula, version workflow, Caddy LAN deployment guide |
 
-## Next major feature: Linux support
+## Current: credential proxy + network controls — built on `feature/proxy-credentials`, not merged
+
+Remaining before merge: Spike D **round 2** with real, short-lived tokens
+(create them as *proxy* vault items in the UI; see the spike README), and a
+real Claude `/login` + refresh through the proxy (Agent logins, below).
+Merge `feature/proxy` into `main` first, then this branch. In `acceptClient`,
+the cutoff check must stay before link handling.
+
+**Goal:** a secret can be delivered *via the proxy*. The VM only holds a
+placeholder (in its env / `.env`); the supervisor's MITM proxy swaps the
+placeholder for the real token on requests to the hosts that secret is bound to
+(exact or pattern match), and swaps real values back to the placeholder in
+response headers. Real secrets never enter the VM.
+
+Design: [`research/11-credential-proxy.md`](research/11-credential-proxy.md).
+
+| Phase | Scope |
+|---|---|
+| Spike D ✓ | **Passed round 1 (2026-10-14)**; real-token round 2 pending. Placeholder-only env with real clients (git, gh, Claude Code, SDKs) through a hacked proxy: client acceptance, header encodings (incl. git's `Basic`), response redaction, overhead (`spikes/d-credential-proxy/`) |
+| C1 ✓ | Schema: `secrets.delivery`, per-project `secret_placeholders`, `secret_bindings` (detailed tasks in `research/11` § Build plan) |
+| C2 ✓ | Proxy: substitution (incl. Basic), unbound placeholder → approval prompt, response-header redaction, 🔑 in the request log |
+| C3 ½ | Env file writes placeholders ✓ (done in C1). Not built, moved to the backlog: switching an existing secret between env ⇄ proxy, and a workdir `.env` writer |
+| C4 ✓ | UI: delivery toggle, bindings editor with presets, placeholder display |
+| C5 ✓ | README (Secrets, API, Known limitations), `research/05` §(e) marked built, spike harness retired |
+
+### Also on this branch: network panel and controls
+
+| Item | What it does |
+|---|---|
+| Network panel redesign ✓ | Project details → Network has three tabs: **Activity** (by host or all requests, filter, blocked-only), **Rules** (this project / all projects, expired hidden by default) and **Header rules**. Counts sit on the tabs, and the tab and view choices are remembered |
+| Rule actions from activity ✓ | Allow / block / unblock a host from the activity list, for this project or all projects |
+| Move rules between scopes ✓ | Move a rule between *this project* and *all projects* (`PATCH /api/projects/:id/net/rules/:rid`). If the target scope already has the same rule, the moved copy is dropped instead of duplicated |
+| Internet cutoff ✓ | One-click switch on the project page that blocks all egress for the VM: CONNECT and HTTP are refused before rules are checked, and pending approvals are denied. Persisted (`projects.net_cutoff`), shown as "internet off" on the status card (`PUT /api/projects/:id/network`) |
+| Persistent request log ✓ | Requests are stored in SQLite `net_requests` (metadata and secret names only, never headers, bodies or values), batched every second and flushed on shutdown. Kept for **≥ 7 days** (`SADBOX_NET_LOG_DAYS`), pruned hourly. Activity can show the last 24 hours or 7 days by host, and "Load older requests" pages back through history. The log survives restarts and rebuilds |
+
+### Also on this branch: Vaults and agent sessions (built 2026-11-04)
+
+Design: [`research/12-vaults.md`](research/12-vaults.md),
+[`research/13-agent-sessions.md`](research/13-agent-sessions.md).
+
+| Item | What it does |
+|---|---|
+| Vaults ✓ | Secrets replaced by one list of **variables** and **secrets**, typed string / number / json, per-item project access, eye-icon reveal (logged), editable |
+| Proxy mode ✓ | Placeholder in the VM; swap in headers, and opt-in URL and body (typed in JSON); response headers **and bodies** redacted; the VM can never reach sadbox's own API |
+| Fetch at runtime ✓ | `sadbox-vault get NAME` / `http://vault.sadbox.internal/v1/NAME`, answered by the proxy; a secret's first fetch asks; every read logged |
+| Agent history ✓ | Claude / omp / opencode history kept under `~/.sadbox/agents/history/<name>`, mounted into the VM, kept across rebuild and destroy, back for a new project of the same name |
+| Agent logins ✓ | Claude's login owned and refreshed by sadbox, VMs hold placeholders; omp / opencode API keys captured and copied in; **Agents** page |
+| Env files ✓ | `.env` / `.env.*` never copied into a VM (create, rebuild, push) |
+| Push to VM ✓ | Copy the folder's changed files into a running VM |
+| Service status ✓ | Home page shows whether Apple's container service is up, and why not |
+
+## Then: Linux support
 
 **Goal:** the same supervisor runs on a Linux host with `/dev/kvm` (bare metal,
 a home server, or EC2), natively or under docker-compose, and every feature
@@ -42,7 +93,7 @@ compose is just Linux packaging).
 
 ### Phases
 
-**L0 — Spike D: CH + guest agent (de-risk)**
+**L0 — Spike E: CH + guest agent (de-risk)**
 - Boot the sadbox image under Cloud Hypervisor on an x86_64 and an arm64 KVM host.
 - Pick the guest agent:
   1. Run Apple's `vminitd` under CH (one protocol on both platforms; open question #2 in `research/README`), or
@@ -105,9 +156,9 @@ Ordered roughly by priority. Each item is independent of Linux unless noted.
 |---|---|---|
 | 1 | **Forwarded ports behind sign-in** | Today they are raw TCP open to anyone who reaches the host. Route through the authenticated HTTP server (or bind to loopback + Caddy). Security gap. |
 | 2 | **Outbound WebSockets through the proxy** | Upgrade passthrough in `src/net/proxy.ts`, subject to the same rules/approvals. |
-| 3 | **Secrets KEK in Keychain** | Replace the data-dir keyfile on macOS (`research/05`); pairs with L4 on Linux. |
+| 3 | **Vault KEK in Keychain** | Replace the data-dir keyfile on macOS (`research/05`); it now also protects the agent logins. Pairs with L4 on Linux. |
 | 4 | **Non-git local folders** | tar-in copy + tar-out sync-back with `git diff --no-index` preview and backed-up apply (`research/06`). |
-| 5 | **Live secret / proxy-env rotation** | Today only new shells pick changes up. |
-| 6 | **Egress credential injection** | `delivery='proxy'`: the proxy adds API keys to outbound requests so the agent never sees them (`research/05`). |
+| 5 | **Live env-file / proxy-env rotation** | Items still written to the env file, and the proxy env, reach new shells only. |
+| 6 | **Workdir `.env` writer** | Write a project's placeholder lines into `~/workdir/.env` for apps that read `.env` directly (sadbox-managed keys only). |
 | 7 | **DB backup** | Litestream (or periodic snapshot) of the SQLite file (`research/07`). |
 | 8 | **Scale measurements** | RAM/balloon behavior with 10+ idle VMs; workdir copy-in throughput for 1–2 GB repos (open questions #4, #5). |

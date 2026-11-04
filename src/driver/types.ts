@@ -31,6 +31,18 @@ export interface ProjectStats {
   blockWriteBytes?: number;
 }
 
+/** The backend's own service — every VM operation goes through it. */
+export interface ServiceStatus {
+  running: boolean;
+  version?: string;
+  containersRunning?: number;
+  containersTotal?: number;
+  /** Why it is not usable, as the backend reported it. */
+  error?: string;
+  /** The command that brings it back, when there is one. */
+  fix?: string;
+}
+
 /** Timeout for guest work that legitimately takes minutes (cloning, copying a
  *  repository in, installing packages, bundling history) — still not forever. */
 export const LONG_TASK_MS = 15 * 60_000;
@@ -63,13 +75,19 @@ export interface ProjectDriver {
   readonly name: string;
   readonly capabilities: DriverCapabilities;
 
+  /** Whether the backend's service is up. Never throws. */
+  serviceStatus(): Promise<ServiceStatus>;
+
   /** `network: "none"` boots the guest with no network interface. `socket`
    *  publishes a unix socket that a process in the guest listens on (`guest`)
    *  as a socket on the host (`host`) — the host dials in; it is the one
-   *  channel a network-less guest has. */
+   *  channel a network-less guest has. `mounts` shares host folders (or single
+   *  files) into the guest, read-write, for the VM's whole life — a guest cannot
+   *  add one later. */
   create(ref: string, image: string, opts?: {
     cpus?: number; memoryMB?: number; diskGB?: number; network?: string;
     socket?: { host: string; guest: string };
+    mounts?: { host: string; guest: string }[];
   }): Promise<void>;
   destroy(ref: string): Promise<void>;
   /** Boot a stopped VM again; its disk is as it was left. */

@@ -14,13 +14,15 @@ const api = async (path, opts = {}) => {
   return data;
 };
 
-let secretsCache = [];
+let vaultCache = [];    // every vault item (a variable with its value, a secret without)
+let projectNames = {};  // id → name, for showing which projects use an item
 
 // ---- side nav routing ----
-// hashes: #projects (list) · #secrets · #project/<id> (detail)
+// hashes: #projects (list) · #vaults · #project/<id> (detail)
 let detailTimer = null;
 let openCreateNext = false; // set by the Home CTA so #projects opens the create form
 function route() {
+  if (location.hash === "#secrets") { location.replace("#vaults"); return; } // the page's old name
   const hash = location.hash.slice(1);
   const [head, arg] = hash.split("/");
   clearInterval(detailTimer); detailTimer = null;
@@ -28,33 +30,145 @@ function route() {
 
   const detail = head === "project" && arg;
   const isProjects = head === "projects";
-  const isSecrets = head === "secrets";
+  const isVaults = head === "vaults";
   const isSettings = head === "settings";
-  const isHome = !detail && !isProjects && !isSecrets && !isSettings; // default / #home / unknown
+  const isAgents = head === "agents";
+  const isHome = !detail && !isProjects && !isVaults && !isSettings && !isAgents; // default / #home / unknown
 
   $("#view-home").hidden = !isHome;
   $("#view-projects").hidden = !isProjects;
-  $("#view-secrets").hidden = !isSecrets;
+  $("#view-vaults").hidden = !isVaults;
   $("#view-settings").hidden = !isSettings;
+  $("#view-agents").hidden = !isAgents;
   $("#view-detail").hidden = !detail;
 
-  const activeNav = isSecrets ? "secrets" : isSettings ? "settings"
+  const activeNav = isVaults ? "vaults" : isSettings ? "settings" : isAgents ? "agents"
     : (isProjects || detail) ? "projects" : "home";
   document.querySelectorAll(".nav-item").forEach((a) =>
     a.classList.toggle("active", a.dataset.view === activeNav));
 
-  if (isSecrets) refreshSecrets();
+  if (isVaults) refreshVault();
+  else if (isAgents) refreshAgents();
   else if (isSettings) loadSettings();
   else if (detail) openDetail(arg);
   else if (isProjects) {
     refreshProjects();
     if (openCreateNext) { openCreateNext = false; openCreateForm(); } else closeCreateForm();
   }
-  // isHome: static overview, nothing to load
+  else if (isHome) refreshServiceStatus();
   refreshNavTree();
 }
 addEventListener("hashchange", route);
 const showView = (v) => { location.hash = v; };
+
+// ---- agents: logins sadbox keeps, history per project name ----
+const TOOL_NAMES = { claude: "Claude Code", omp: "omp", opencode: "opencode" };
+const agentWhen = (v) => {
+  if (v == null) return "—";
+  const d = typeof v === "number" ? new Date(v) : new Date(String(v).includes("T") ? v : v.replace(" ", "T") + "Z");
+  return d.toLocaleString();
+};
+const inHours = (ms) => {
+  const h = (ms - Date.now()) / 36e5;
+  return h < 0 ? "expired" : h < 1 ? `${Math.round(h * 60)} min` : `${h.toFixed(1)} h`;
+};
+async function refreshAgents() {
+  let a;
+  try { a = await api("/api/agents"); } catch (e) {
+    $("#agents-logins").innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return;
+  }
+  $("#agents-logins").innerHTML = a.logins.length ? a.logins.map((l) => `
+    <div class="vitem-card">
+      <div class="vrow">
+        <span class="sec-name">${escapeHtml(TOOL_NAMES[l.tool] || l.tool)}</span>
+        <span class="tbadge">${escapeHtml(l.provider)}</span>
+        <span class="dbadge ${l.shared === "placeholders" ? "proxy" : "fetch"}">${l.shared === "placeholders" ? "kept by sadbox · placeholders in VMs" : "API key · copied into VMs"}</span>
+        <span class="vactions">
+          ${l.kind === "oauth" ? `<button type="button" class="mini" data-refresh-login>Refresh now</button>` : ""}
+          <button type="button" class="mini danger" data-forget="${escapeHtml(l.tool)}/${escapeHtml(l.provider)}">Forget</button>
+        </span>
+      </div>
+      <div class="vrow hint">
+        from ${l.fromProject ? `<a class="pchip" href="#projects">${escapeHtml(l.fromProject)}</a>` : "—"} · ${escapeHtml(agentWhen(l.capturedAt))}
+        ${l.kind === "oauth" && l.expiresAt ? ` · access token valid for ${inHours(l.expiresAt)}, refreshed by sadbox ahead of time${l.refreshedAt ? ` (last ${escapeHtml(agentWhen(l.refreshedAt))})` : ""}` : ""}
+      </div>
+      ${l.status ? `<div class="vrow login-bad">⚠ ${escapeHtml(l.status)}</div>` : ""}
+    </div>`).join("")
+    : `<div class="empty">No logins yet — log in to an agent in any VM and it shows up here within half a minute.</div>`;
+  $("#agents-history").innerHTML = a.history.length ? a.history.map((h) => {
+    const live = a.liveNames.includes(h.name);
+    return `
+    <div class="vitem-card">
+      <div class="vrow">
+        <span class="sec-name">${escapeHtml(h.name)}</span>
+        ${live ? `<span class="dbadge fetch">mounted</span>` : `<span class="tbadge">no project</span>`}
+        <span class="hint">${h.tools.map((t) => `${escapeHtml(TOOL_NAMES[t.tool] || t.tool)} ${fmtBytes(t.bytes)}`).join(" · ")}</span>
+        <span class="vactions">
+          <button type="button" class="mini danger" data-del-history="${escapeHtml(h.name)}" ${live ? `disabled title="Destroy the project first — its VM has this mounted"` : ""}>Delete</button>
+        </span>
+      </div>
+      <div class="vrow hint">${fmtBytes(h.bytes)} · last changed ${escapeHtml(agentWhen(h.updatedAt))}</div>
+    </div>`;
+  }).join("") : `<div class="empty">None kept yet.</div>`;
+}
+$("#view-agents").addEventListener("click", async (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  const status = $("#agents-status");
+  try {
+    if (b.dataset.forget) {
+      const [tool, provider] = b.dataset.forget.split("/");
+      const what = tool === "claude"
+        ? "Every VM's Claude placeholders stop working; log in again in any VM to give sadbox a new login."
+        : "VMs that already have this key keep it; new VMs won't get it.";
+      if (!confirm(`Forget the ${TOOL_NAMES[tool] || tool} login (${provider})? ${what}`)) return;
+      await api(`/api/agents/logins/${encodeURIComponent(tool)}/${encodeURIComponent(provider)}`, { method: "DELETE" });
+    } else if (b.dataset.delHistory) {
+      if (!confirm(`Delete the agents' conversation history kept for "${b.dataset.delHistory}"? This cannot be undone.`)) return;
+      await api(`/api/agents/history/${encodeURIComponent(b.dataset.delHistory)}`, { method: "DELETE" });
+    } else if (b.hasAttribute("data-refresh-login")) {
+      status.textContent = "Refreshing…";
+      const r = await api("/api/agents/claude/refresh", { method: "POST" });
+      status.textContent = r.ok ? "Claude login refreshed." : "The refresh did not work — see the login above.";
+    }
+    await refreshAgents();
+  } catch (err) { status.textContent = err.message; }
+});
+$("#agents-apply").onclick = async () => {
+  const status = $("#agents-status");
+  status.textContent = "Copying into running VMs…";
+  try {
+    const r = await api("/api/agents/apply", { method: "POST" });
+    status.textContent = r.length
+      ? r.map((x) => `${x.project}: ${x.error ? `failed (${x.error})` : x.wrote.length ? x.wrote.join(", ") : "already current"}`).join(" · ")
+      : "No VM is running.";
+  } catch (e) { status.textContent = e.message; }
+};
+
+// ---- container service status (home page) ----
+// Every VM operation goes through the backend's service; when it is down,
+// start / rebuild / destroy all fail, so say so up front and how to fix it.
+async function refreshServiceStatus() {
+  const el = $("#svc-status");
+  let s;
+  try {
+    s = await api("/api/system/status");
+  } catch (e) {
+    s = { running: false, error: `could not ask sadbox: ${e.message}` };
+  }
+  el.hidden = false;
+  el.classList.toggle("down", !s.running);
+  if (s.running) {
+    const vms = s.containersTotal != null ? ` · ${s.containersRunning ?? 0} of ${s.containersTotal} VMs running` : "";
+    el.innerHTML = `<span class="dot running"></span><b>Container service running</b>
+      <span class="svc-meta">${s.version ? `v${escapeHtml(s.version)}` : ""}${vms}</span>`;
+    return;
+  }
+  el.innerHTML = `<h3><span class="dot down"></span>Container service is not running</h3>
+    <p>${escapeHtml(s.error || "unknown error")}</p>
+    ${s.fix ? `<p>Start it from a terminal on this machine: <code>${escapeHtml(s.fix)}</code></p>` : ""}
+    <p class="svc-meta">Until it is back, projects cannot be started, stopped, rebuilt or destroyed.</p>`;
+}
 
 // ---- nested project list in the sidebar ----
 async function refreshNavTree() {
@@ -73,19 +187,290 @@ async function refreshNavTree() {
   }).join("");
 }
 
-// ---- secrets (global) ----
-async function refreshSecrets() {
-  secretsCache = await api("/api/secrets");
-  $("#secrets").innerHTML = secretsCache.length
-    ? secretsCache.map((s) =>
-        `<li><span>${s.name}</span>
-         <button class="danger" data-del-secret="${s.id}">delete</button></li>`).join("")
-    : `<li class="empty">No secrets yet.</li>`;
-  $("#create-secrets").innerHTML = secretsCache.length
-    ? secretsCache.map((s) =>
-        `<label><input type="checkbox" name="secret" value="${s.id}">${s.name}</label>`).join("")
-    : `<span class="empty">none defined</span>`;
+// ---- vault (docs/research/12) ----
+// An item is a variable (value shown) or a secret (hidden until the eye icon
+// asks for it), typed string / number / json, and used by a VM either via the
+// proxy (the VM holds a placeholder; the proxy swaps in the value on requests
+// to the item's hosts) or fetched at runtime. Hosts are shown as chips;
+// ✕ removes one, "+ host" adds one.
+const SECRET_PRESETS = {
+  github: { name: "GITHUB_TOKEN", hosts: ["api.github.com", "github.com", "uploads.github.com"] },
+  anthropic: { name: "ANTHROPIC_API_KEY", hosts: ["api.anthropic.com"] },
+  openai: { name: "OPENAI_API_KEY", hosts: ["api.openai.com"] },
+};
+
+function modeBadges(s) {
+  const mode = s.mode === "proxy"
+    ? `<span class="dbadge proxy" title="The VM holds a placeholder; the proxy swaps in the real value">via proxy</span>`
+    : `<span class="dbadge fetch" title="Nothing in the VM; the app fetches it at runtime">fetch at runtime</span>`;
+  const env = s.inEnv ? `<span class="dbadge env" title="Also written into the VM's env file — readable inside the VM">+ env file</span>` : "";
+  const ask = s.mode === "fetch" && s.askOnFetch ? `<span class="dbadge ask" title="Each fetch waits for your approval">asks first</span>` : "";
+  const where = s.mode === "proxy"
+    ? (s.swapUrl ? `<span class="dbadge env" title="Also swapped in the URL">+ url</span>` : "")
+      + (s.swapBody ? `<span class="dbadge env" title="Also swapped in request bodies">+ body</span>` : "")
+    : "";
+  return mode + where + env + ask;
 }
+const kindBadge = (s) => `<span class="kbadge ${s.kind}">${s.kind}</span><span class="tbadge">${s.type}</span>`;
+
+function bindingChips(s) {
+  if (s.mode !== "proxy" && !(s.bindings || []).length) return "";
+  const now = Date.now();
+  const chips = (s.bindings || []).map((b) => {
+    const expired = b.expires_at && Date.parse(b.expires_at) <= now;
+    const spec = `${b.method ? `${escapeHtml(b.method)} ` : ""}${escapeHtml(b.host)}${b.path ? escapeHtml(b.path) : ""}`
+      + (b.header ? ` <span class="bnote">${escapeHtml(b.header)}</span>` : "")
+      + (b.expires_at ? ` <span class="bnote">${expired ? "expired" : `until ${fmtClock(Date.parse(b.expires_at))}`}</span>` : "");
+    return `<span class="bchip${expired ? " expired" : ""}">${spec}<button type="button" class="link-del"
+      data-unbind="${s.id}" data-bid="${b.id}" title="Stop sending ${escapeHtml(s.name)} to ${escapeHtml(b.host)}">✕</button></span>`;
+  }).join("");
+  const none = (s.bindings || []).length ? "" : `<span class="bnote">no hosts — every use asks first</span>`;
+  return `<div class="bindings">${chips}${none}
+    <button type="button" class="link-add" data-bind-open="${s.id}">+ host</button>
+    <form class="bind-add" data-bind="${s.id}" hidden>
+      <select name="method"><option value="">any</option><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option></select>
+      <input name="host" required placeholder="api.example.com or *.example.com/v1/*">
+      <button type="submit">add</button>
+    </form>
+  </div>`;
+}
+
+/** "api.github.com/repos/*" → { host: "api.github.com", path: "/repos/*" } */
+function parseBinding(spec) {
+  const t = spec.trim().replace(/^https?:\/\//, "");
+  const i = t.indexOf("/");
+  return i < 0 ? { host: t } : { host: t.slice(0, i), path: t.slice(i) };
+}
+const parseHosts = (text) => String(text || "").split(/[\s,]+/).filter(Boolean).map(parseBinding);
+
+/** Clicks on host chips / "+ host" forms inside `root`; `after` re-renders. */
+function wireBindings(root, after) {
+  root.addEventListener("click", async (e) => {
+    const open = e.target.closest("[data-bind-open]");
+    if (open) {
+      const f = open.parentElement.querySelector("form.bind-add");
+      f.hidden = !f.hidden;
+      if (!f.hidden) f.elements["host"].focus();
+      return;
+    }
+    const del = e.target.closest("[data-unbind]");
+    if (!del) return;
+    e.stopPropagation();
+    try {
+      await api(`/api/vault/${del.dataset.unbind}/bindings/${del.dataset.bid}`, { method: "DELETE" });
+      await after();
+    } catch (err) { alert(err.message); }
+  });
+  root.addEventListener("submit", async (e) => {
+    const f = e.target.closest("form.bind-add");
+    if (!f) return;
+    e.preventDefault();
+    try {
+      await api(`/api/vault/${f.dataset.bind}/bindings`, {
+        // (f.method is the form's own method; the select is f.elements)
+        method: "POST", body: { ...parseBinding(f.elements["host"].value), method: f.elements["method"].value || undefined },
+      });
+      await after();
+    } catch (err) { alert(err.message); }
+  });
+}
+
+// a secret's value, once revealed, until hidden again (or 30 s pass)
+const revealed = new Map(); // id → value
+const MASK = "••••••••";
+
+function valueCell(s) {
+  if (s.kind === "variable") return `<code class="vval">${escapeHtml(s.value ?? "")}</code>`;
+  const shown = revealed.has(s.id);
+  return `<code class="vval${shown ? "" : " masked"}">${shown ? escapeHtml(revealed.get(s.id)) : MASK}</code>
+    <button type="button" class="mini eye" data-reveal="${s.id}" title="${shown ? "Hide" : "Reveal (logged)"}">${shown ? "🙈" : "👁"}</button>`;
+}
+
+function projectChips(s) {
+  if (!s.projectIds.length) return `<span class="bnote">no project can use it</span>`;
+  return s.projectIds.map((id) => `<a class="pchip" href="#project/${id}">${escapeHtml(projectNames[id] || id)}</a>`).join("");
+}
+
+// projects that may fetch an item without being asked (an approval answered
+// with a window or "always"); ✕ takes that back
+function grantChips(s) {
+  if (s.mode !== "fetch" || !s.askOnFetch || !(s.fetchGrants || []).length) return "";
+  return `<div class="vrow"><span class="hint">fetches without asking:</span> ${s.fetchGrants.map((g) =>
+    `<span class="bchip">${escapeHtml(projectNames[g.projectId] || g.projectId)}
+      <span class="bnote">${g.expiresAt ? `until ${fmtClock(Date.parse(g.expiresAt))}` : "always"}</span><button type="button" class="link-del"
+      data-revoke="${s.id}" data-pid="${g.projectId}" title="Ask again next time">✕</button></span>`).join("")}</div>`;
+}
+
+async function loadProjectNames() {
+  const list = await api("/api/projects").catch(() => []);
+  projectNames = Object.fromEntries(list.map((p) => [p.id, p.name]));
+  return list;
+}
+
+async function refreshVault() {
+  [vaultCache] = await Promise.all([api("/api/vault"), loadProjectNames()]);
+  renderVaultList();
+  $("#create-secrets").innerHTML = vaultCache.length
+    ? vaultCache.map((s) =>
+        `<label><input type="checkbox" name="secret" value="${s.id}">${escapeHtml(s.name)} <span class="hint">· ${s.kind}${s.mode === "proxy" ? ", via proxy" : ""}</span></label>`).join("")
+    : `<span class="empty">none in the vault yet</span>`;
+}
+
+function renderVaultList() {
+  const el = $("#vault-list");
+  if (!el) return;
+  el.innerHTML = vaultCache.length
+    ? vaultCache.map((s) => `
+      <div class="vitem-card" data-item="${s.id}">
+        <div class="vrow">
+          <span class="sec-name">${escapeHtml(s.name)}</span>${kindBadge(s)}${modeBadges(s)}
+          <span class="vactions">
+            <button type="button" class="mini" data-edit-item="${s.id}">Edit</button>
+            <button type="button" class="mini danger" data-del-item="${s.id}" data-name="${escapeHtml(s.name)}">Delete</button>
+          </span>
+        </div>
+        <div class="vrow vvalue">${valueCell(s)}</div>
+        <div class="vrow"><span class="hint">projects:</span> ${projectChips(s)}</div>
+        ${grantChips(s)}
+        ${bindingChips(s)}
+      </div>`).join("")
+    : `<div class="empty">The vault is empty. Add a variable or a secret to get started.</div>`;
+}
+
+const vaultList = $("#vault-list");
+vaultList.addEventListener("click", async (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  try {
+    if (b.dataset.reveal) {
+      const id = b.dataset.reveal;
+      if (revealed.has(id)) revealed.delete(id);
+      else {
+        revealed.set(id, (await api(`/api/vault/${id}/value`)).value);
+        setTimeout(() => { revealed.delete(id); renderVaultList(); }, 30_000);
+      }
+      renderVaultList();
+    } else if (b.dataset.revoke) {
+      await api(`/api/vault/${b.dataset.revoke}/grants/${b.dataset.pid}`, { method: "DELETE" });
+      await refreshVault();
+    } else if (b.dataset.editItem) {
+      openItemDialog(vaultCache.find((s) => s.id === b.dataset.editItem));
+    } else if (b.dataset.delItem) {
+      if (!confirm(`Delete ${b.dataset.name} from the vault? Every project using it loses it.`)) return;
+      await api(`/api/vault/${b.dataset.delItem}`, { method: "DELETE" });
+      revealed.delete(b.dataset.delItem);
+      await refreshVault();
+    }
+  } catch (err) { alert(err.message); }
+});
+wireBindings(vaultList, refreshVault);
+$("#vault-new").onclick = () => openItemDialog(null);
+
+// ---- the item dialog: create or edit ----
+const vitem = $("#vitem");
+const vform = $("#vitem-form");
+let vitemEditing = null;      // the item being edited, or null for a new one
+let vitemAfter = null;        // what else to re-render after a save (a project's dialog)
+
+function syncItemForm() {
+  const json = vform.type.value === "json";
+  const secret = vform.kind.value === "secret";
+  vform.value.hidden = json;
+  vform.valueJson.hidden = !json;
+  $("#vitem-eye").hidden = json || !secret;
+  if (!json) vform.value.type = secret && !vform.value.dataset.shown ? "password" : "text";
+  vform.value.inputMode = vform.type.value === "number" ? "decimal" : "text";
+  const proxy = vform.mode.value === "proxy";
+  vform.querySelector(".vitem-proxy").hidden = !proxy;
+  vform.querySelector(".vitem-fetch").hidden = proxy;
+}
+
+async function openItemDialog(item, opts = {}) {
+  vitemEditing = item;
+  vitemAfter = opts.after || null;
+  vform.reset();
+  delete vform.value.dataset.shown;
+  const editing = !!item;
+  $("#vitem-title").textContent = editing ? `Edit ${item.name}` : "New vault item";
+  $("#vitem-save").textContent = editing ? "Save" : "Create";
+  $("#vitem-status").textContent = "";
+  vform.elements["name"].value = item?.name ?? "";
+  vform.kind.value = item?.kind ?? "secret";
+  vform.type.value = item?.type ?? "string";
+  vform.mode.value = item?.mode ?? "fetch";
+  vform.askOnFetch.checked = item ? item.askOnFetch : true;
+  vform.inEnv.checked = item?.inEnv ?? false;
+  vform.swapUrl.checked = item?.swapUrl ?? false;
+  vform.swapBody.checked = item?.swapBody ?? false;
+  // a variable's value is known; a secret's is only replaced if a new one is typed
+  const known = item?.kind === "variable" ? item.value ?? "" : "";
+  vform.value.value = known; vform.valueJson.value = known;
+  $("#vitem-keep").hidden = !(editing && item.kind === "secret");
+  $("#vitem-hosts-now").textContent = editing && item.bindings.length
+    ? `already: ${item.bindings.map((b) => b.host + (b.path || "")).join(", ")} — remove them on the vault page` : "";
+  const projects = await loadProjectNames();
+  const have = new Set(item?.projectIds ?? opts.projectIds ?? []);
+  $("#vitem-projects").innerHTML = projects.length
+    ? projects.map((p) => `<label><input type="checkbox" name="project" value="${p.id}" ${have.has(p.id) ? "checked" : ""}>${escapeHtml(p.name)}</label>`).join("")
+    : `<span class="empty">no projects yet</span>`;
+  syncItemForm();
+  vitem.showModal();
+}
+
+vform.addEventListener("change", (e) => {
+  // a new secret asks before each fetch by default, a new variable does not
+  if (e.target.name === "kind" && !vitemEditing) vform.askOnFetch.checked = vform.kind.value === "secret";
+  if (e.target.name === "type") {
+    if (vform.type.value === "json") vform.valueJson.value = vform.value.value;
+    else vform.value.value = vform.valueJson.value.trim() || vform.value.value;
+  }
+  syncItemForm();
+});
+$("#vitem-eye").onclick = () => {
+  if (vform.value.dataset.shown) delete vform.value.dataset.shown; else vform.value.dataset.shown = "1";
+  syncItemForm();
+};
+vform.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-preset]");
+  if (!b) return;
+  const p = SECRET_PRESETS[b.dataset.preset];
+  vform.hosts.value = p.hosts.join(", ");
+  if (!vform.elements["name"].value) vform.elements["name"].value = p.name;
+});
+$("#vitem-close").onclick = () => vitem.close();
+
+vform.onsubmit = async (e) => {
+  e.preventDefault();
+  const status = $("#vitem-status");
+  const value = vform.type.value === "json" ? vform.valueJson.value : vform.value.value;
+  const fields = {
+    name: vform.elements["name"].value.trim(), kind: vform.kind.value, type: vform.type.value, mode: vform.mode.value,
+    inEnv: vform.mode.value === "fetch" && vform.inEnv.checked, askOnFetch: vform.askOnFetch.checked,
+    swapUrl: vform.swapUrl.checked, swapBody: vform.swapBody.checked,
+  };
+  const projectIds = [...vform.querySelectorAll("input[name=project]:checked")].map((c) => c.value);
+  const hosts = fields.mode === "proxy" ? parseHosts(vform.hosts.value) : [];
+  // an empty value is only "keep it" for a secret being edited
+  const keep = vitemEditing?.kind === "secret" && value === "";
+  if (!keep && value === "" && fields.type !== "string") { status.textContent = "a value is needed"; return; }
+  if (!vitemEditing && value === "") { status.textContent = "a value is needed"; return; }
+  status.textContent = "Saving…";
+  try {
+    if (!vitemEditing) {
+      await api("/api/vault", { method: "POST", body: { ...fields, value, projectIds, bindings: hosts } });
+    } else {
+      const id = vitemEditing.id;
+      // hosts first: switching to proxy needs one
+      for (const b of hosts) await api(`/api/vault/${id}/bindings`, { method: "POST", body: b });
+      await api(`/api/vault/${id}`, { method: "PATCH", body: { ...fields, ...(keep ? {} : { value }) } });
+      await api(`/api/vault/${id}/projects`, { method: "PUT", body: { projectIds } });
+      revealed.delete(id);
+    }
+    vitem.close();
+    await refreshVault();
+    if (vitemAfter) await vitemAfter();
+  } catch (err) { status.textContent = err.message; }
+};
 
 // ---- projects ----
 function skeletonCards(n) {
@@ -125,7 +510,7 @@ async function refreshProjects() {
       <h3><a href="#project/${p.id}"><span class="dot ${state}"></span>${p.name}</a></h3>
       <div class="meta">
         ${state} · ${p.image}${p.live?.address ? ` · ${p.live.address}` : ""}<br>
-        ${p.source_path ? escapeHtml(p.source_path) + "<br>" : ""}branch ${escapeHtml(p.branch || `sadbox/${p.name}`)}${gitLine}${p.error ? `<br><span style="color:var(--bad)">${escapeHtml(p.error)}</span>` : ""}
+        ${p.source_path ? escapeHtml(p.source_path) + "<br>" : ""}${p.empty ? "empty VM — repositories cloned in it" : `branch ${escapeHtml(p.branch || `sadbox/${p.name}`)}`}${gitLine}${p.error ? `<br><span style="color:var(--bad)">${escapeHtml(p.error)}</span>` : ""}
       </div>
       <div class="row">
         <button data-details="${p.id}">Details</button>
@@ -133,7 +518,8 @@ async function refreshProjects() {
         <button data-term="${p.id}" data-name="${p.name}">${ICON.terminal}Terminal ↗</button>
         <button data-edit="${p.id}" data-name="${p.name}">${ICON.editor}Editor ↗</button>
         ${p.sync_folder ? `<button data-sync="${p.id}">${ICON.sync}Sync back</button>` : ""}
-        <button data-secrets="${p.id}" data-name="${p.name}">${ICON.secrets}Secrets…</button>
+        ${p.sync_folder ? pushButton(p) : ""}
+        <button data-secrets="${p.id}" data-name="${p.name}">${ICON.secrets}Vault…</button>
         <button class="danger" data-destroy="${p.id}" data-name="${p.name}">${ICON.destroy}Destroy</button>
       </div>
       <div class="sync-result"></div>
@@ -154,6 +540,31 @@ function syncSummary(r) {
   return `Nothing in ${r.folder} was changed: ${r.note}` +
     (r.blocking.length ? `:\n\n${r.blocking.map((f) => "  " + f).join("\n")}\n\nCommit, stash or move them and press Sync back again — or overwrite them with the VM's versions.` : "");
 }
+// ---- push: the folder on this machine → the VM's workdir ----
+function pushButton(p) {
+  return p.state === "running"
+    ? `<button data-push="${p.id}" title="Copy the folder's changed files into the VM (never .env files)">${ICON.push}Push to VM</button>`
+    : `<button disabled title="Start the VM to push into it">${ICON.push}Push to VM</button>`;
+}
+function pushSummary(r) {
+  const env = r.excluded.length ? `\n\nNot pushed (env files never are): ${r.excluded.join(", ")}` : "";
+  const odd = r.skipped.length ? `\n\nCould not push (line break in the name): ${r.skipped.length} file(s)` : "";
+  if (r.applied === "copied") {
+    return `Pushed ${r.changed.length} file${r.changed.length === 1 ? "" : "s"} from ${r.folder} into the VM${r.forced ? " (overwriting uncommitted changes there)" : ""}. ` +
+      `They show up there as uncommitted changes.\n\n${r.changed.map((f) => "  " + f).join("\n")}${env}${odd}`;
+  }
+  if (r.applied === "current") return `Nothing to push — the VM already has the folder's files.${env}${odd}`;
+  return `Nothing was pushed: these files have uncommitted changes in the VM, which the push would overwrite:\n\n` +
+    `${r.blocking.map((f) => "  " + f).join("\n")}\n\nCommit or stash them in the VM and push again — or overwrite them with the folder's versions.${env}${odd}`;
+}
+async function runPush(id, container, force) {
+  const r = await api(`/api/projects/${id}/push`, { method: "POST", body: { force } });
+  const again = r.applied === "not-applied"
+    ? `<button class="danger mini" data-push="${id}" data-force="1">Overwrite ${r.blocking.length} file${r.blocking.length === 1 ? "" : "s"} in the VM</button>`
+    : "";
+  container.querySelector(".sync-result").innerHTML = `<pre class="result">${escapeHtml(pushSummary(r))}</pre>${again}`;
+}
+
 /** Run a sync and show what it did under the project (with a way to force it
  *  when files in the folder were in the way). */
 async function runSync(id, container, force) {
@@ -172,6 +583,7 @@ const svg = (body) => `<svg class="ico" viewBox="0 0 24 24" width="14" height="1
 const ICON = {
   terminal: svg(`<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>`),
   editor: svg(`<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>`),
+  push: svg(`<path d="M12 19V5"/><polyline points="5 12 12 5 19 12"/><line x1="5" y1="21" x2="19" y2="21"/>`),
   sync: svg(`<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>`),
   secrets: svg(`<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/>`),
   rebuild: svg(`<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>`),
@@ -256,12 +668,22 @@ document.addEventListener("click", async (e) => {
       b.disabled = true; b.innerHTML = `<span class="spinner"></span> Syncing…`;
       try { await runSync(b.dataset.sync, container, force); }
       finally { b.disabled = false; b.innerHTML = label; }
+    } else if (b.dataset.push) {
+      const force = b.dataset.force === "1";
+      if (force && !confirm("Overwrite the VM's versions of these files with the folder's? The uncommitted changes to them in the VM are lost.")) return;
+      const label = b.innerHTML;
+      const container = b.closest(".card") || $("#view-detail");
+      b.disabled = true; b.innerHTML = `<span class="spinner"></span> Pushing…`;
+      try { await runPush(b.dataset.push, container, force); }
+      finally { b.disabled = false; b.innerHTML = label; }
     } else if (b.dataset.linkFolder) {
       // connect a local folder to a project cloned from a git URL (reuses the folder picker)
       const id = b.dataset.linkFolder;
       pickerOnSelect = (path) => { setSyncFolder(id, path); };
       picker.showModal();
       loadDir(b.dataset.current || null).catch(() => loadDir(null));
+    } else if (b.dataset.gitRemote) {
+      openGitRemote(b.dataset);
     } else if (b.dataset.unlinkFolder) {
       if (confirm("Disconnect this folder? Nothing in it is changed; the project just stops syncing there.")) {
         setSyncFolder(b.dataset.unlinkFolder, null);
@@ -271,7 +693,10 @@ document.addEventListener("click", async (e) => {
     } else if (b.dataset.memory) {
       await changeMemory(b.dataset.memory, b.dataset.name, Number(b.dataset.mb) || null, b.dataset.running === "1");
     } else if (b.dataset.rebuild) {
-      if (confirm(`Rebuild "${b.dataset.name}"? The VM is destroyed and recreated from the project's original source (local folder re-copied, or git remote re-cloned). Unsynced work inside the VM will be lost.`)) {
+      const what = b.dataset.empty === "1"
+        ? `The VM is destroyed and an empty one takes its place: the repositories cloned in it go too — push what you want to keep first.`
+        : `The VM is destroyed and recreated from the project's original source (local folder re-copied, or git remote re-cloned). Unsynced work inside the VM will be lost.`;
+      if (confirm(`Rebuild "${b.dataset.name}"? ${what} The agents' conversation history is kept.`)) {
         b.disabled = true; b.textContent = "Rebuilding…";
         try {
           await api(`/api/projects/${b.dataset.rebuild}/rebuild`, { method: "POST", body: {} });
@@ -280,15 +705,10 @@ document.addEventListener("click", async (e) => {
         } finally { b.disabled = false; b.textContent = "Rebuild"; }
       }
     } else if (b.dataset.destroy) {
-      if (confirm(`Destroy project "${b.dataset.name}"? The VM and any unsynced work in it are deleted.`)) {
+      if (confirm(`Destroy project "${b.dataset.name}"? The VM and any unsynced work in it are deleted. The agents' conversation history is kept, and comes back if you create a project with the same name.`)) {
         await api(`/api/projects/${b.dataset.destroy}`, { method: "DELETE" });
         if (location.hash.startsWith("#project/")) location.hash = "projects";
         else { refreshProjects(); refreshNavTree(); }
-      }
-    } else if (b.dataset.delSecret) {
-      if (confirm("Delete this secret?")) {
-        await api(`/api/secrets/${b.dataset.delSecret}`, { method: "DELETE" });
-        refreshSecrets();
       }
     }
   } catch (err) {
@@ -297,64 +717,90 @@ document.addEventListener("click", async (e) => {
   }
 });
 
-// ---- project secrets dialog ----
+// ---- a project's vault dialog: which items it may use ----
 const psec = $("#psec");
 let psecProjectId = null;
 
-async function renderProjectSecrets() {
-  const view = await api(`/api/projects/${psecProjectId}/secrets`);
-  $("#psec-own").innerHTML = view.own.length
-    ? view.own.map((s) =>
-        `<li><span>${s.name}</span>
-         <button class="danger" data-del-secret="${s.id}">delete</button></li>`).join("")
-    : `<li class="empty">none — add one below</li>`;
-  const assigned = new Set(view.assigned.map((s) => s.id));
-  $("#psec-globals").innerHTML = secretsCache.length
-    ? secretsCache.map((s) =>
-        `<label><input type="checkbox" name="psec-g" value="${s.id}"
-          ${assigned.has(s.id) ? "checked" : ""}>${s.name}</label>`).join("")
-    : `<span class="empty">no global secrets defined</span>`;
+// what this VM holds for a proxy item — safe to show and copy (it's not the value)
+function placeholderLine(s) {
+  if (s.mode !== "proxy") return "";
+  if (!s.placeholder) return `<div class="phline hint">placeholder made when the VM next gets its vault items</div>`;
+  return `<div class="phline"><span class="hint">in this VM:</span> <code>${escapeHtml(s.placeholder)}</code>
+    <button type="button" class="link-add" data-copy="${escapeHtml(s.placeholder)}">copy</button></div>`;
+}
+
+async function renderProjectVault() {
+  const [view] = await Promise.all([api(`/api/projects/${psecProjectId}/vault`), refreshVault()]);
+  const mine = new Map(view.map((s) => [s.id, s]));
+  $("#psec-items").innerHTML = vaultCache.length
+    ? vaultCache.map((s) => {
+        const m = mine.get(s.id);
+        return `<div class="psec-g"><label><input type="checkbox" name="psec-g" value="${s.id}" ${m ? "checked" : ""}>
+          <span class="sec-name">${escapeHtml(s.name)}</span></label> ${kindBadge(s)}${modeBadges(s)}${m ? placeholderLine(m) : ""}</div>`;
+      }).join("")
+    : `<span class="empty">the vault is empty</span>`;
   $("#psec-status").textContent = "";
 }
 
 async function openProjectSecrets(id, name) {
   psecProjectId = id;
-  $("#psec-title").textContent = `Secrets — ${name}`;
-  if (!secretsCache.length) await refreshSecrets();
+  $("#psec-title").textContent = `Vault — ${name}`;
   psec.showModal();
-  await renderProjectSecrets();
+  await renderProjectVault();
 }
 
 $("#psec-close").onclick = () => psec.close();
-$("#psec-add").onsubmit = async (e) => {
-  e.preventDefault();
-  const f = new FormData(e.target);
-  try {
-    await api(`/api/projects/${psecProjectId}/secrets`, {
-      method: "POST",
-      body: { name: f.get("name"), value: f.get("value") },
-    });
-    e.target.reset();
-    await renderProjectSecrets();
-    $("#psec-status").textContent = "project secret added & injected";
-  } catch (err) { $("#psec-status").textContent = err.message; }
-};
-$("#psec-own").onclick = async (e) => {
-  const b = e.target.closest("button[data-del-secret]");
+$("#psec-new").onclick = () => openItemDialog(null, { projectIds: [psecProjectId], after: renderProjectVault });
+psec.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-copy]");
   if (!b) return;
-  if (!confirm("Delete this project-specific secret?")) return;
-  try {
-    await api(`/api/secrets/${b.dataset.delSecret}`, { method: "DELETE" });
-    await renderProjectSecrets();
-  } catch (err) { $("#psec-status").textContent = err.message; }
-};
+  try { await navigator.clipboard.writeText(b.dataset.copy); b.textContent = "copied"; }
+  catch { b.textContent = "copy failed"; }
+  setTimeout(() => { b.textContent = "copy"; }, 1500);
+});
 $("#psec-apply").onclick = async () => {
   const ids = [...psec.querySelectorAll("input[name=psec-g]:checked")].map((c) => c.value);
   try {
-    await api(`/api/projects/${psecProjectId}/secrets`, { method: "PUT", body: { secretIds: ids } });
-    $("#psec-status").textContent = "globals updated & injected";
+    await api(`/api/projects/${psecProjectId}/vault`, { method: "PUT", body: { itemIds: ids } });
+    await renderProjectVault(); // newly given proxy items now have their placeholders
+    $("#psec-status").textContent = "saved — the VM has its items";
   } catch (err) { $("#psec-status").textContent = err.message; }
 };
+
+// ---- git remote of an existing project (origin in the VM's workdir) ----
+const gitremote = $("#gitremote");
+let gitremoteFor = null;
+function openGitRemote({ gitRemote: id, name, current, token, cloned }) {
+  gitremoteFor = id;
+  const f = $("#gitremote-form");
+  f.reset();
+  f.remote.value = current;
+  f.token.placeholder = token === "1" ? "leave blank to keep the current token" : "leave blank for none";
+  $("#gitremote-title").textContent = `Git remote — ${name}`;
+  $("#gitremote-hint").textContent = "Set as origin in the VM's workdir, so the agent can fetch and push."
+    + (cloned === "1" && current ? " Rebuild re-clones from this URL." : "");
+  $("#gitremote-status").textContent = "";
+  gitremote.showModal();
+}
+$("#gitremote-close").onclick = () => gitremote.close();
+$("#gitremote-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const btn = f.querySelector("button[type=submit]");
+  btn.disabled = true;
+  $("#gitremote-status").textContent = "Saving…";
+  try {
+    await api(`/api/projects/${gitremoteFor}/git-remote`, {
+      method: "PUT", body: { remote: f.remote.value.trim(), token: f.token.value || undefined },
+    });
+    gitremote.close();
+    if (location.hash === `#project/${gitremoteFor}`) renderDetail(gitremoteFor);
+  } catch (err) {
+    $("#gitremote-status").textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 // ---- folder picker ----
 const picker = $("#picker");
@@ -430,12 +876,24 @@ function syncSrcMode() {
   form.cloneRemote.required = mode === "git";
 }
 
+// agent history kept per project name: a new project of that name gets it back
+let historyCache = [];
+function showCreateHistory() {
+  const el = $("#create-history");
+  const name = $("#create-form").name.value.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
+  const h = historyCache.find((x) => x.name === name);
+  el.hidden = !h;
+  if (h) el.textContent = `Agent history from an earlier “${name}” will be mounted — ${h.tools.map((t) => t.tool).join(", ")} · ${fmtBytes(h.bytes)}.`;
+}
+$("#create-form").name.addEventListener("input", showCreateHistory);
+
 function openCreateForm() {
   $("#create-form").hidden = false;
   $("#projects").hidden = true;
   $("#btn-new").hidden = true;
   loadCreateToolchain();
   syncSrcMode();
+  api("/api/history").then((h) => { historyCache = h; showCreateHistory(); }).catch(() => {});
 }
 function closeCreateForm() {
   $("#create-form").hidden = true;
@@ -533,7 +991,12 @@ $("#create-form").onsubmit = async (e) => {
   const status = $("#create-status");
   const mode = f.get("srcMode") || "local";
   let sourcePath, git;
-  if (mode === "git") {
+  let empty = false;
+  if (mode === "empty") {
+    // nothing to seed: repositories are cloned from the terminal
+    empty = true;
+    status.textContent = "Creating (boot, a few seconds)…";
+  } else if (mode === "git") {
     // clone-in-VM mode: the git remote IS the source; no local folder
     git = { remote: (f.get("cloneRemote") || "").trim(), token: (f.get("cloneToken") || "").trim() || undefined };
     status.textContent = "Creating (boot + git clone, a few seconds)…";
@@ -550,6 +1013,7 @@ $("#create-form").onsubmit = async (e) => {
       body: {
         name: f.get("name"),
         sourcePath, // undefined ⇒ backend clones the git remote instead
+        empty,
         apps: (f.get("apps") || "").split(",").map((s) => s.trim()).filter(Boolean),
         secretIds: [...e.target.querySelectorAll("input[name=secret]:checked")].map((c) => c.value),
         git,
@@ -567,17 +1031,6 @@ $("#create-form").onsubmit = async (e) => {
   }
 };
 
-$("#secret-form").onsubmit = async (e) => {
-  e.preventDefault();
-  const f = new FormData(e.target);
-  try {
-    await api("/api/secrets", { method: "POST", body: { name: f.get("name"), value: f.get("value") } });
-    e.target.reset();
-    refreshSecrets();
-  } catch (err) {
-    alert(err.message);
-  }
-};
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) =>
@@ -676,6 +1129,7 @@ async function renderDetail(id) {
   }
   lastDetail = d;
   paintDetail(d);
+  if (netId === id) setNetIsolation(d.live ? !!d.live.isolated : null);
   // usage and tool versions were still being read — fetch again shortly rather
   // than leaving the gaps until the regular refresh
   if (d.partial) {
@@ -724,9 +1178,10 @@ function paintDetail(d) {
     <button data-term="${d.id}" data-name="${d.name}">${ICON.terminal}Terminal ↗</button>
     <button data-edit="${d.id}" data-name="${d.name}" title="Browse and edit the workdir">${ICON.editor}Editor ↗</button>
     ${d.sync_folder ? `<button data-sync="${d.id}">${ICON.sync}Sync back</button>` : ""}
-    <button data-secrets="${d.id}">${ICON.secrets}Secrets…</button>
+    ${d.sync_folder ? pushButton(d) : ""}
+    <button data-secrets="${d.id}" data-name="${escapeHtml(d.name)}">${ICON.secrets}Vault…</button>
     ${powerButton(d)}
-    <button data-rebuild="${d.id}" data-name="${d.name}" title="Destroy the VM and recreate it from the original source">${ICON.rebuild}Rebuild</button>
+    <button data-rebuild="${d.id}" data-name="${d.name}" data-empty="${d.empty ? 1 : 0}" title="${d.empty ? "Destroy the VM and start an empty one" : "Destroy the VM and recreate it from the original source"}">${ICON.rebuild}Rebuild</button>
     <button class="danger" data-destroy="${d.id}" data-name="${d.name}">${ICON.destroy}Destroy</button>`;
 
   stats.innerHTML = `
@@ -736,7 +1191,9 @@ function paintDetail(d) {
         <dl>
           <dt>State</dt><dd><span class="dot ${d.unresponsive ? "error" : state}"></span>${state}${d.unresponsive
             ? ` <span style="color:var(--bad)">· not responding</span> <span class="hint">Stop it, then Start — files are kept</span>` : ""}</dd>
-          <dt>Network</dt><dd>${d.live?.isolated
+          <dt>Network</dt><dd>${d.net_cutoff
+            ? `<span style="color:var(--bad)">internet off</span> <span class="hint">every request refused</span>`
+            : d.live?.isolated
             ? `<span class="ok">isolated</span> <span class="hint">no network — proxy only</span>`
             : d.live?.network
               ? `<span style="color:var(--warn)">not isolated</span> <span class="hint">${escapeHtml(d.live.address || d.live.network)} · direct internet — Rebuild to isolate</span>`
@@ -765,8 +1222,9 @@ function paintDetail(d) {
       <div class="panel stat">
         <h3>Folder & git</h3>
         <dl>
-          <dt>Source</dt><dd class="mono">${d.source_path ? escapeHtml(d.source_path) : "git clone"}</dd>
-          ${d.source_path ? "" : `<dt>Local folder</dt><dd>${folderPending?.id === d.id
+          <dt>Source</dt><dd class="mono">${d.source_path ? escapeHtml(d.source_path) : d.empty ? "none — empty VM" : "git clone"}</dd>
+          ${d.empty ? `<dt>Repositories</dt><dd class="dim">cloned in the terminal; the vault's tokens sign git in</dd>` : ""}
+          ${d.source_path || d.empty ? "" : `<dt>Local folder</dt><dd>${folderPending?.id === d.id
             ? `<span class="spinner"></span> <span class="dim">${folderPending.label}</span>`
             : d.sync_path
             ? `<span class="mono">${escapeHtml(d.sync_path)}</span>
@@ -775,9 +1233,14 @@ function paintDetail(d) {
             : `<span class="dim">not connected</span>
                <button class="mini" data-link-folder="${d.id}" title="Pick a local folder (a git repository or any other folder) to sync this project's work into">Connect a folder…</button>`}</dd>`}
           <dt>Workdir (in VM)</dt><dd class="mono">${escapeHtml(d.workdir)}</dd>
-          <dt>Work branch</dt><dd class="mono">${escapeHtml(d.branch)}</dd>
+          ${d.empty ? "" : `<dt>Work branch</dt><dd class="mono">${escapeHtml(d.branch)}</dd>
           <dt>Uncommitted</dt><dd>${d.git.dirty ?? 0} file(s)</dd>
-          <dt>Git remote</dt><dd class="mono">${d.git_remote ? escapeHtml(d.git_remote) + (d.has_git_token ? " 🔑" : "") : "—"}</dd>
+          <dt>Git remote</dt><dd>${d.git_remote
+            ? `<span class="mono">${escapeHtml(d.git_remote)}${d.has_git_token ? " 🔑" : ""}</span>`
+            : `<span class="dim">none</span>`}
+            <button class="mini" data-git-remote="${d.id}" data-name="${escapeHtml(d.name)}" data-current="${escapeHtml(d.git_remote || "")}"
+              data-token="${d.has_git_token ? 1 : 0}" data-cloned="${d.source_path ? 0 : 1}"
+              ${state === "running" ? "" : `disabled title="Start the VM to change its git remote"`}>${d.git_remote ? "Change" : "Connect a remote…"}</button></dd>`}
         </dl>
       </div>
 
@@ -915,26 +1378,21 @@ async function renderLinks(id) {
 // ---- network activity panel (per-project egress proxy) ----
 let netES = null;
 let netId = null;
-let netModel = { requests: [], pending: [], rules: [], headerRules: [] };
-let netOwnSecrets = []; // this project's own secrets (for header-value picker)
+let netModel = { requests: [], pending: [], rules: [], headerRules: [], cutoff: false, isolated: null, older: [], noOlder: false, summary: null };
 const DUR_OPTS = [["once", "once"], ["1m", "1 min"], ["5m", "5 min"], ["30m", "30 min"], ["60m", "60 min"], ["forever", "forever"]];
 
 function openNet(id) {
   closeNet();
   netId = id;
-  netModel = { requests: [], pending: [], rules: [], headerRules: [] };
-  netOwnSecrets = [];
+  netModel = { requests: [], pending: [], rules: [], headerRules: [], cutoff: false, isolated: null, older: [], noOlder: false, summary: null };
   const el = $("#detail-net");
   if (!el) return;
   el.innerHTML = netShellHtml();
   bindNetHandlers(el);
-  renderPending(); renderLog(); renderRules(); renderHeaders();
+  renderPending(); renderLog(); renderRules(); renderHeaders(); renderCutoff();
   connectNetStream(id);
-  // secrets available as header values: globals (secretsCache) + this project's own
-  Promise.all([
-    secretsCache.length ? Promise.resolve() : refreshSecrets(),
-    api(`/api/projects/${id}/secrets`).then((v) => { netOwnSecrets = v.own || []; }).catch(() => {}),
-  ]).then(() => { if (netId === id) syncHeaderForm(); });
+  // vault items available as header values
+  refreshVault().catch(() => {}).then(() => { if (netId === id) syncHeaderForm(); });
 }
 
 // show/hide the header-form value vs. secret picker based on op + source + scope
@@ -949,12 +1407,12 @@ function syncHeaderForm() {
   if (isSet && useSecret) form.valueSecretId.innerHTML = headerSecretOptions(form.scope.value);
 }
 
+// a project rule can use the items this project may use; a global rule any
+// item (it fills the header only in projects that may use it)
 function headerSecretOptions(scope) {
-  const g = (secretsCache || []).map((s) => `<option value="${s.id}">${escapeHtml(s.name)} · global</option>`).join("");
-  const p = scope === "project"
-    ? (netOwnSecrets || []).map((s) => `<option value="${s.id}">${escapeHtml(s.name)} · project</option>`).join("")
-    : "";
-  return `<option value="">— pick a secret —</option>${g}${p}`;
+  const items = (vaultCache || []).filter((s) => scope !== "project" || s.projectIds.includes(netId));
+  const opts = items.map((s) => `<option value="${s.id}">${escapeHtml(s.name)} · ${s.kind}</option>`).join("");
+  return `<option value="">— pick a vault item —</option>${opts}`;
 }
 
 function closeNet() {
@@ -976,10 +1434,12 @@ function connectNetStream(id) {
       netModel.pending = ev.pending || [];
       netModel.rules = ev.rules || [];
       netModel.headerRules = ev.headerRules || [];
-      renderPending(); renderLog(); renderRules(); renderHeaders();
+      netModel.cutoff = !!ev.cutoff;
+      renderPending(); renderLog(); renderRules(); renderHeaders(); renderCutoff();
     } else if (ev.type === "request") {
       netModel.requests.push(ev.entry);
       if (netModel.requests.length > 500) netModel.requests.shift();
+      summaryStale();
       renderLog();
     } else if (ev.type === "pending") {
       if (!netModel.pending.some((p) => p.id === ev.pending.id)) netModel.pending.push(ev.pending);
@@ -988,6 +1448,8 @@ function connectNetStream(id) {
       netModel.pending = netModel.pending.filter((p) => p.id !== ev.id);
       renderPending(); refreshNavTree();
       reloadNetRules(); // a timed/forever answer may have created a rule
+    } else if (ev.type === "cutoff") {
+      netModel.cutoff = ev.on; renderCutoff(); // switched here, in another tab, or over the API
     }
   };
 }
@@ -1009,30 +1471,72 @@ async function reloadNetRules() {
   } catch {}
 }
 
+// UI state for the Network panel, remembered per browser (a convenience only)
+const NET_UI_KEY = "sadbox.net.ui";
+let netUi = { tab: "activity", mode: "hosts", range: "recent", filter: "", blockedOnly: false, showExpired: false };
+try { Object.assign(netUi, JSON.parse(localStorage.getItem(NET_UI_KEY) || "{}"), { filter: "" }); } catch {}
+const saveNetUi = () => { try { localStorage.setItem(NET_UI_KEY, JSON.stringify({ ...netUi, filter: undefined })); } catch {} };
+
 function netShellHtml() {
+  const tab = (id, label) => `<button type="button" class="net-tab${netUi.tab === id ? " on" : ""}" data-net-tab="${id}">${label} <span class="net-count" id="net-count-${id}"></span></button>`;
   return `
-  <div class="panel net-panel">
+  <div class="panel net-panel net-main">
     <div class="net-head">
       <h3>Network</h3>
       <span id="net-status" class="net-live">connecting…</span>
       <span class="grow"></span>
+      <label class="net-switch" id="net-switch" title="Cut this VM off from every network, or let it out again (rules apply)">
+        <input type="checkbox" id="net-online" checked>
+        <span class="track"><span class="knob"></span></span>
+        <span id="net-online-label">Internet on</span>
+      </label>
       <a class="net-ca" href="/api/net/ca" download title="Trust this CA to inspect traffic outside a VM">Download CA</a>
     </div>
+    <div id="net-cutoff-banner" class="net-banner" hidden>
+      <b>Internet is off.</b> Every request from this VM is refused — rules, approvals and secrets are not consulted.
+    </div>
+    <div id="net-isolation-note" class="net-banner warn" hidden>
+      This VM still has a direct network route (created before isolation), so the switch can't stop all of its
+      traffic. <b>Rebuild</b> it to put it behind the proxy.
+    </div>
     <div id="net-pending"></div>
-    <div class="net-section">
-      <div class="net-subhead">Rules <span class="hint">block wins · no match ⇒ ask for approval</span></div>
-      <div id="net-rules"></div>
+    <div class="net-tabs" role="tablist">
+      ${tab("activity", "Activity")}${tab("rules", "Rules")}${tab("headers", "Header rules")}
+    </div>
+
+    <div class="net-pane" data-pane="activity"${netUi.tab === "activity" ? "" : " hidden"}>
+      <div class="net-tools">
+        <div class="seg" role="group">
+          <button type="button" data-net-mode="hosts" class="${netUi.mode === "hosts" ? "on" : ""}">By host</button>
+          <button type="button" data-net-mode="requests" class="${netUi.mode === "requests" ? "on" : ""}">All requests</button>
+        </div>
+        <select id="net-range" title="By host over the live window, or over the stored log"${netUi.mode === "hosts" ? "" : " hidden"}>
+          <option value="recent"${netUi.range === "recent" ? " selected" : ""}>recent</option>
+          <option value="24h"${netUi.range === "24h" ? " selected" : ""}>last 24 hours</option>
+          <option value="7d"${netUi.range === "7d" ? " selected" : ""}>last 7 days</option>
+        </select>
+        <input id="net-filter" type="search" placeholder="filter host or path">
+        <label class="net-chk"><input type="checkbox" id="net-blocked-only"${netUi.blockedOnly ? " checked" : ""}> blocked only</label>
+        <span class="grow"></span>
+        <span id="net-activity-note" class="hint"></span>
+      </div>
+      <div class="net-log-wrap"><table class="net-log" id="net-activity"></table></div>
+      <button type="button" class="link-add" id="net-older" hidden>load older requests</button>
+    </div>
+
+    <div class="net-pane" data-pane="rules"${netUi.tab === "rules" ? "" : " hidden"}>
       <form id="net-rule-add" class="net-form">
         <select name="action"><option value="allow">allow</option><option value="block">block</option></select>
         <input name="host" placeholder="host — api.github.com, *.github.com, *" required>
         <input name="path" placeholder="path glob (optional)">
         <select name="scope"><option value="project">this project</option><option value="global">all projects</option></select>
-        <button class="primary" type="submit">Add</button>
+        <button class="primary" type="submit">Add rule</button>
       </form>
+      <p class="hint net-howto">Block wins over allow. A host no rule covers waits for your approval.</p>
+      <div id="net-rules"></div>
     </div>
-    <details class="net-section">
-      <summary class="net-subhead">Header rules</summary>
-      <div id="net-headers"></div>
+
+    <div class="net-pane" data-pane="headers"${netUi.tab === "headers" ? "" : " hidden"}>
       <form id="net-header-add" class="net-form">
         <select name="direction"><option value="request">request</option><option value="response">response</option></select>
         <select name="op"><option value="set">set</option><option value="remove">remove</option></select>
@@ -1044,17 +1548,59 @@ function netShellHtml() {
         <select name="scope"><option value="project">this project</option><option value="global">all projects</option></select>
         <button class="primary" type="submit">Add</button>
       </form>
-    </details>
-    <div class="net-section">
-      <div class="net-subhead">Live requests</div>
-      <div class="net-log-wrap">
-        <table class="net-log">
-          <thead><tr><th>time</th><th>method</th><th>host / path</th><th>status</th><th>decision</th><th>size</th><th>allow host</th></tr></thead>
-          <tbody id="net-log"></tbody>
-        </table>
-      </div>
+      <p class="hint net-howto">Set or remove a header on requests to (or responses from) a host. To give a VM a token
+        without it ever seeing the value, prefer a <a href="#secrets">secret delivered via the proxy</a>.</p>
+      <div id="net-headers"></div>
     </div>
   </div>`;
+}
+
+// ---- cutoff switch ----
+function renderCutoff() {
+  const on = !netModel.cutoff;
+  const cb = $("#net-online");
+  if (!cb) return;
+  cb.checked = on;
+  cb.disabled = netModel.isolated === false; // a direct-route VM can't be cut off at the proxy
+  $("#net-online-label").textContent = on ? "Internet on" : "Internet off";
+  $("#net-switch").classList.toggle("off", !on);
+  $("#net-cutoff-banner").hidden = on;
+  $("#net-isolation-note").hidden = netModel.isolated !== false;
+}
+
+/** Told by the detail view whether the VM is behind the proxy only (null: unknown). */
+function setNetIsolation(isolated) {
+  netModel.isolated = isolated;
+  renderCutoff();
+}
+
+async function toggleCutoff(cb) {
+  const cutoff = !cb.checked;
+  cb.disabled = true;
+  try {
+    const r = await api(`/api/projects/${netId}/network`, { method: "PUT", body: { cutoff } });
+    netModel.cutoff = r.cutoff;
+  } catch (err) { alert(err.message); }
+  cb.disabled = false;
+  renderCutoff();
+}
+
+// ---- tabs ----
+function setNetTab(tab) {
+  netUi.tab = tab; saveNetUi();
+  for (const b of document.querySelectorAll("[data-net-tab]")) b.classList.toggle("on", b.dataset.netTab === tab);
+  for (const p of document.querySelectorAll(".net-pane")) p.hidden = p.dataset.pane !== tab;
+}
+
+function renderNetCounts() {
+  const set = (id, n, alert) => { const el = $(`#net-count-${id}`); if (el) { el.textContent = n || ""; el.classList.toggle("alert", !!alert); } };
+  const hosts = new Set(netModel.requests.map((r) => r.host));
+  const blocked = new Set(netModel.requests.filter((r) => r.decision === "blocked").map((r) => r.host));
+  set("activity", hosts.size, false);
+  set("rules", activeRules().length);
+  set("headers", netModel.headerRules.length);
+  const note = $("#net-count-activity");
+  if (note) note.title = `${hosts.size} hosts · ${blocked.size} with blocked requests`;
 }
 
 function renderPending() {
@@ -1062,8 +1608,17 @@ function renderPending() {
   if (!el) return;
   if (!netModel.pending.length) { el.innerHTML = ""; return; }
   el.innerHTML = netModel.pending.map((p) => {
-    const opts = DUR_OPTS.map(([v, l]) => `<option value="${v}"${v === "forever" ? " selected" : ""}>${l}</option>`).join("");
-    return `<div class="approval" data-aid="${p.id}">
+    // a credential defaults to a short window: "forever" would bind the secret to this host for good;
+    // a vault read defaults to this one time
+    const dflt = p.fetch ? "once" : p.credential ? "5m" : "forever";
+    const opts = DUR_OPTS.map(([v, l]) => `<option value="${v}"${v === dflt ? " selected" : ""}>${l}</option>`).join("");
+    // a credential ask: send this proxy secret to a host none of its bindings name?
+    const cred = p.fetch
+      ? `<div class="approval-cred">🔒 wants to read <b>${escapeHtml(p.fetch.name)}</b> from the vault — the VM gets the real value</div>`
+      : p.credential
+      ? `<div class="approval-cred">🔑 sends <b>${escapeHtml(p.credential.name)}</b> to this host — allowing binds the secret to it</div>`
+      : "";
+    return `<div class="approval${p.credential || p.fetch ? " cred" : ""}" data-aid="${p.id}">${cred}
       <div class="approval-req">
         <span class="badge">${p.scheme}</span>
         <b>${escapeHtml(p.method)}</b>
@@ -1078,59 +1633,245 @@ function renderPending() {
   }).join("");
 }
 
-function renderLog() {
-  const el = $("#net-log");
+// ---- rule coverage, client side (same matching as the proxy: exact, *.suffix, *) ----
+const ruleLive = (r, now = Date.now()) => !r.expires_at || Date.parse(r.expires_at) > now;
+const activeRules = () => netModel.rules.filter((r) => ruleLive(r));
+function hostCovers(pattern, host) {
+  if (pattern === "*") return true;
+  if (pattern.startsWith("*.")) { const bare = pattern.slice(2); return host === bare || host.endsWith("." + bare); }
+  return pattern === host;
+}
+/** How a host is treated by rules alone (host-wide rules; path/method rules don't count). */
+function hostAccess(host) {
+  const m = activeRules().filter((r) => !r.path && !r.method && hostCovers(r.host, host));
+  const block = m.find((r) => r.action === "block");
+  if (block) return { kind: "blocked", rule: block };
+  const own = m.find((r) => r.action === "allow" && r.scope === "project");
+  const glob = m.find((r) => r.action === "allow" && r.scope === "global");
+  if (own || glob) return { kind: "allowed", rule: own || glob };
+  return { kind: "ask" };
+}
+
+// ---- activity: by host (default) or every request ----
+let activityQueued = false;
+function renderLog() { // (kept name: called whenever requests or rules change)
+  if (activityQueued) return;
+  activityQueued = true;
+  requestAnimationFrame(() => { activityQueued = false; renderActivity(); renderNetCounts(); });
+}
+
+const RANGE_MS = { "24h": 86_400_000, "7d": 7 * 86_400_000 };
+const RANGE_LABEL = { "24h": "in the last 24 hours", "7d": "in the last 7 days" };
+const fmtCount = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+function activityRows() {
+  const q = netUi.filter.trim().toLowerCase();
+  return [...netModel.older, ...netModel.requests].filter((r) =>
+    (!netUi.blockedOnly || r.decision === "blocked") &&
+    (!q || (r.host + r.path).toLowerCase().includes(q)));
+}
+
+/** Per-host groups: from the live rows, or (24h / 7d) from the stored log's summary. */
+function hostGroups() {
+  const q = netUi.filter.trim().toLowerCase();
+  if (netUi.range !== "recent") {
+    return (netModel.summary || [])
+      .filter((h) => (!netUi.blockedOnly || h.blocked) && (!q || h.host.toLowerCase().includes(q)))
+      .map((h) => ({ host: h.host, n: h.requests, ok: h.ok, err: h.errors, blocked: h.blocked, last: h.last,
+        creds: new Set(h.credentials), lastErr: h.lastError || "" }));
+  }
+  const by = new Map();
+  for (const r of activityRows()) {
+    let g = by.get(r.host);
+    if (!g) by.set(r.host, g = { host: r.host, n: 0, ok: 0, err: 0, blocked: 0, last: 0, creds: new Set(), lastErr: "" });
+    g.n++; g.last = Math.max(g.last, r.ts);
+    if (r.decision === "blocked") { g.blocked++; if (r.error) g.lastErr = r.error; }
+    else if (r.status != null && r.status < 400) g.ok++; else g.err++;
+    for (const c of r.credentials || []) g.creds.add(c);
+  }
+  return [...by.values()].sort((a, b) => b.last - a.last);
+}
+
+function renderActivity() {
+  const el = $("#net-activity");
   if (!el) return;
-  const rows = netModel.requests.slice(-200).reverse();
-  if (!rows.length) { el.innerHTML = `<tr><td colspan="7" class="empty">no requests yet</td></tr>`; return; }
-  // hosts already covered by a plain (host-only) allow rule, per scope — so we
-  // can show "✓ allowed" instead of offering to add a duplicate rule
-  const allowedProject = new Set(netModel.rules.filter((r) => r.action === "allow" && !r.path && !r.method && r.scope !== "global").map((r) => r.host));
-  const allowedGlobal = new Set(netModel.rules.filter((r) => r.action === "allow" && !r.path && !r.method && r.scope === "global").map((r) => r.host));
-  el.innerHTML = rows.map((r) => {
-    const s = r.status;
-    const sc = s == null ? "" : s >= 500 ? "s5xx" : s >= 400 ? "s4xx" : s >= 300 ? "s3xx" : "s2xx";
-    const h = escapeHtml(r.host);
-    const vmBtn = allowedProject.has(r.host)
-      ? `<span class="rowallowed" title="already allowed for this VM">✓ VM</span>`
-      : `<button class="rowallow" data-allow-host="${h}" data-scope="project" title="Allow ${h} for this VM">＋ VM</button>`;
-    const glBtn = allowedGlobal.has(r.host)
-      ? `<span class="rowallowed" title="already allowed for all VMs">✓ all</span>`
-      : `<button class="rowallow" data-allow-host="${h}" data-scope="global" title="Allow ${h} for all VMs">＋ all</button>`;
-    return `<tr class="dec-${r.decision}">
-      <td class="mono">${fmtClock(r.ts)}</td>
-      <td>${escapeHtml(r.method)}</td>
-      <td class="np"><span class="host">${h}</span><span class="path">${escapeHtml(r.path)}</span></td>
-      <td class="mono ${sc}">${s ?? "—"}</td>
-      <td><span class="decb ${r.decision}">${r.decision}</span></td>
-      <td class="mono">${fmtBytes(r.respBytes)}</td>
-      <td class="rowact">${vmBtn}${glBtn}</td>
-    </tr>`;
-  }).join("");
+  const byHost = netUi.mode === "hosts";
+  $("#net-range").hidden = !byHost;
+  const older = $("#net-older");
+  older.hidden = byHost || netModel.noOlder || !netModel.requests.length;
+  if (byHost && netUi.range !== "recent" && !netModel.summary) {
+    loadSummary();
+    el.innerHTML = `<tbody><tr><td class="empty">loading…</td></tr></tbody>`;
+    return;
+  }
+  const groups = byHost ? hostGroups() : null;
+  const rows = byHost ? null : activityRows();
+  const shown = byHost ? groups.length : rows.length;
+  if (byHost && netUi.range !== "recent") {
+    const total = (netModel.summary || []).reduce((a, h) => a + h.requests, 0);
+    $("#net-activity-note").textContent = `${fmtCount(total, "request")} to ${fmtCount((netModel.summary || []).length, "host")} ${RANGE_LABEL[netUi.range]}`;
+  } else {
+    const total = netModel.older.length + netModel.requests.length;
+    $("#net-activity-note").textContent = total ? `${byHost ? fmtCount(shown, "host") + " · " : ""}${fmtCount(total, "recent request")}` : "";
+  }
+  if (!shown) {
+    const any = netModel.requests.length || (netModel.summary || []).length;
+    el.innerHTML = `<tbody><tr><td class="empty">${any ? "nothing matches" : "no requests yet — traffic from the VM shows up here live"}</td></tr></tbody>`;
+    return;
+  }
+  el.innerHTML = byHost ? hostsTable(groups) : requestsTable(rows);
+}
+
+// stored-log summary for 24h / 7d: fetched on demand, refreshed (at most every 5 s) as traffic arrives
+let summaryAt = 0, summaryTimer = null;
+async function loadSummary() {
+  const range = netUi.range, id = netId;
+  if (range === "recent" || !id) return;
+  summaryAt = Date.now();
+  try {
+    const s = await api(`/api/projects/${id}/net/hosts?since=${Date.now() - RANGE_MS[range]}`);
+    if (netId === id && netUi.range === range) { netModel.summary = s; renderActivity(); renderNetCounts(); }
+  } catch {}
+}
+function summaryStale() {
+  if (netUi.range === "recent" || netUi.mode !== "hosts") { netModel.summary = null; return; }
+  if (summaryTimer) return;
+  summaryTimer = setTimeout(() => { summaryTimer = null; loadSummary(); }, Math.max(0, 5000 - (Date.now() - summaryAt)));
+}
+
+async function loadOlder(btn) {
+  const first = netModel.older[0] || netModel.requests[0];
+  if (!first) return;
+  btn.disabled = true;
+  try {
+    const { requests } = await api(`/api/projects/${netId}/net/requests?before=${first.ts}&limit=200`);
+    const seen = new Set([...netModel.older, ...netModel.requests].map((r) => r.id));
+    const fresh = requests.filter((r) => !seen.has(r.id));
+    netModel.older = [...fresh, ...netModel.older];
+    if (requests.length < 200) netModel.noOlder = true;
+    renderActivity();
+  } catch (err) { alert(err.message); }
+  btn.disabled = false;
+}
+
+function accessCell(host) {
+  const a = hostAccess(host);
+  if (a.kind === "blocked") return `<span class="acc blocked" title="block rule ${escapeHtml(a.rule.host)}">blocked · ${a.rule.scope === "global" ? "all projects" : "this project"}</span>`;
+  if (a.kind === "allowed") {
+    const exp = a.rule.expires_at ? ` until ${fmtClock(Date.parse(a.rule.expires_at))}` : "";
+    const via = a.rule.host !== host ? ` via ${escapeHtml(a.rule.host)}` : "";
+    return `<span class="acc allowed" title="allow rule ${escapeHtml(a.rule.host)}${exp}">allowed · ${a.rule.scope === "global" ? "all projects" : "this project"}</span><span class="hint">${via}${exp}</span>`;
+  }
+  return `<span class="acc ask" title="no rule — each new request waits for approval">asks</span>`;
+}
+
+function hostActions(host) {
+  const a = hostAccess(host);
+  const h = escapeHtml(host);
+  const btn = (attrs, label, title) => `<button type="button" class="mini" ${attrs} title="${title}">${label}</button>`;
+  if (a.kind === "allowed") {
+    // this project's allow rule can be widened to every project, and a global one narrowed to this project
+    return a.rule.host === host
+      ? btn(`data-move-rule="${a.rule.id}" data-to="${a.rule.scope === "global" ? "project" : "global"}"`,
+          a.rule.scope === "global" ? "→ this project" : "→ all projects",
+          a.rule.scope === "global" ? `Allow ${h} for this project only` : `Allow ${h} for every project`)
+        + btn(`data-host-rule="block" data-host="${h}" data-scope="project"`, "Block", `Block ${h} for this project`)
+      : btn(`data-host-rule="block" data-host="${h}" data-scope="project"`, "Block", `Block ${h} for this project`);
+  }
+  if (a.kind === "blocked") return a.rule.host === host ? btn(`data-del-rule="${a.rule.id}"`, "Unblock", `Remove the block rule for ${h}`) : "";
+  return btn(`data-host-rule="allow" data-host="${h}" data-scope="project"`, "Allow", `Allow ${h} for this project`)
+    + btn(`data-host-rule="allow" data-host="${h}" data-scope="global"`, "Allow for all", `Allow ${h} for every project`);
+}
+
+// a time of day, with the date in front once it isn't today (the log keeps a week)
+const fmtWhen = (ts) => new Date(ts).toDateString() === new Date().toDateString() ? fmtClock(ts)
+  : `${new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${fmtClock(ts).slice(0, 5)}`;
+
+function hostsTable(groups) {
+  return `<thead><tr><th>host</th><th class="num">requests</th><th>results</th><th>access</th><th>last</th><th></th></tr></thead>
+    <tbody>${groups.map((g) => {
+      const res = [g.ok && `<span class="s2xx">${g.ok} ok</span>`, g.err && `<span class="s4xx">${g.err} error</span>`,
+        g.blocked && `<span class="sblk" title="${escapeHtml(g.lastErr)}">${g.blocked} blocked</span>`].filter(Boolean).join(" · ");
+      const creds = [...g.creds].map((n) => `<span class="cchip in" title="real value swapped in by the proxy">🔑 ${escapeHtml(n)}</span>`).join("");
+      return `<tr class="${g.blocked && !g.ok ? "dec-blocked" : ""}">
+        <td class="np"><span class="host">${escapeHtml(g.host)}</span>${creds}</td>
+        <td class="mono num">${g.n}</td>
+        <td class="res">${res}</td>
+        <td class="acc-cell">${accessCell(g.host)}</td>
+        <td class="mono">${fmtWhen(g.last)}</td>
+        <td class="rowact">${hostActions(g.host)}</td>
+      </tr>`;
+    }).join("")}</tbody>`;
+}
+
+function requestsTable(rows) {
+  // the live window, plus whatever older pages were loaded
+  const shown = rows.slice(-(150 + netModel.older.length)).reverse();
+  return `<thead><tr><th>time</th><th>method</th><th>host / path</th><th>status</th><th>decision</th><th class="num">size</th></tr></thead>
+    <tbody>${shown.map((r) => {
+      const s = r.status;
+      const sc = s == null ? "" : s >= 500 ? "s5xx" : s >= 400 ? "s4xx" : s >= 300 ? "s3xx" : "s2xx";
+      return `<tr class="dec-${r.decision}">
+        <td class="mono">${fmtWhen(r.ts)}</td>
+        <td>${escapeHtml(r.method)}</td>
+        <td class="np"><span class="host">${escapeHtml(r.host)}</span><span class="path">${escapeHtml(r.path)}</span>${credChips(r)}</td>
+        <td class="mono ${sc}">${s ?? "—"}</td>
+        <td><span class="decb ${r.decision}"${r.error ? ` title="${escapeHtml(r.error)}"` : ""}>${r.decision}</span></td>
+        <td class="mono num">${fmtBytes(r.respBytes)}</td>
+      </tr>`;
+    }).join("")}</tbody>`;
+}
+
+// proxy secrets on a log row: swapped in, scrubbed from the response, or seen in the URL
+function credChips(r) {
+  const chip = (cls, icon, names, title) => (names || []).map((n) =>
+    `<span class="cchip ${cls}" title="${title}">${icon} ${escapeHtml(n)}</span>`).join("");
+  return chip("in", "🔑", r.credentials, "real value swapped in by the proxy")
+    + chip("red", "⇄", r.redacted, "real value scrubbed from the response headers")
+    + chip("url", "⚠", r.credentialInUrl, "placeholder in the URL — never swapped");
+}
+
+// ---- rules: this project's and every project's, each movable to the other side ----
+function ruleRow(r) {
+  const live = ruleLive(r);
+  const exp = r.expires_at ? ` <span class="hint">${live ? "until" : "expired"} ${fmtClock(Date.parse(r.expires_at))}</span>` : "";
+  const parts = [r.host];
+  if (r.path) parts.push("path:" + r.path);
+  if (r.method) parts.push(r.method);
+  const move = r.scope === "global"
+    ? `<button type="button" class="mini" data-move-rule="${r.id}" data-to="project" title="Make this rule apply to this project only">→ this project</button>`
+    : `<button type="button" class="mini" data-move-rule="${r.id}" data-to="global" title="Make this rule apply to every project">→ all projects</button>`;
+  return `<div class="rule${live ? "" : " expired"}">
+    <span class="ract ${r.action}">${r.action}</span>
+    <span class="rspec">${escapeHtml(parts.join(" · "))}${exp}</span>
+    ${live ? move : ""}
+    <button class="link-del" data-del-rule="${r.id}" title="delete">✕</button>
+  </div>`;
 }
 
 function renderRules() {
   const el = $("#net-rules");
   if (!el) return;
-  if (!netModel.rules.length) { el.innerHTML = `<div class="empty">no rules — every new host prompts for approval</div>`; return; }
-  el.innerHTML = netModel.rules.map((r) => {
-    const exp = r.expires_at ? ` <span class="hint">until ${fmtClock(Date.parse(r.expires_at))}</span>` : "";
-    const parts = [r.host];
-    if (r.path) parts.push("path:" + r.path);
-    if (r.method) parts.push(r.method);
-    return `<div class="rule">
-      <span class="ract ${r.action}">${r.action}</span>
-      <span class="rscope">${r.scope === "global" ? "global" : "project"}</span>
-      <span class="rspec">${escapeHtml(parts.join(" · "))}${exp}</span>
-      <button class="link-del" data-del-rule="${r.id}" title="delete">✕</button>
-    </div>`;
-  }).join("");
+  const now = Date.now();
+  const expired = netModel.rules.filter((r) => !ruleLive(r, now));
+  const shown = netUi.showExpired ? netModel.rules : netModel.rules.filter((r) => ruleLive(r, now));
+  // allow before block, then by host, so a long list reads like a list
+  const order = (a, b) => a.action.localeCompare(b.action) || a.host.localeCompare(b.host);
+  const group = (title, hint, rules) => `<div class="rule-group">
+    <div class="net-subhead">${title} <span class="hint">${hint}</span></div>
+    ${rules.length ? rules.sort(order).map(ruleRow).join("") : `<div class="empty">none</div>`}
+  </div>`;
+  el.innerHTML =
+    group("This project", "only this VM", shown.filter((r) => r.scope !== "global"))
+    + group("All projects", "global — every VM", shown.filter((r) => r.scope === "global"))
+    + (expired.length ? `<button type="button" class="link-add" data-toggle-expired>${netUi.showExpired ? "hide" : "show"} ${expired.length} expired</button>` : "");
+  renderNetCounts();
 }
 
 function renderHeaders() {
   const el = $("#net-headers");
   if (!el) return;
-  if (!netModel.headerRules.length) { el.innerHTML = `<div class="empty">no header rules</div>`; return; }
+  if (!netModel.headerRules.length) { el.innerHTML = `<div class="empty">no header rules</div>`; renderNetCounts(); return; }
   el.innerHTML = netModel.headerRules.map((r) => {
     let spec;
     if (r.op !== "set") spec = `remove ${escapeHtml(r.header)}`;
@@ -1138,11 +1879,12 @@ function renderHeaders() {
     else spec = `${escapeHtml(r.header)}: ${escapeHtml(r.value || "")}`;
     return `<div class="rule">
       <span class="ract ${r.direction === "request" ? "allow" : "block"}">${r.direction}</span>
-      <span class="rscope">${r.scope === "global" ? "global" : "project"}</span>
+      <span class="rscope">${r.scope === "global" ? "all projects" : "this project"}</span>
       <span class="rspec">${escapeHtml(r.host)} · ${spec}</span>
       <button class="link-del" data-del-header="${r.id}" title="delete">✕</button>
     </div>`;
   }).join("");
+  renderNetCounts();
 }
 
 function bindNetHandlers(el) {
@@ -1153,19 +1895,32 @@ function bindNetHandlers(el) {
     }
     if (appr && e.target.closest("[data-block]")) {
       const d = appr.querySelector(".dur").value; // once ⇒ deny this only; else a permanent block rule
-      return sendApproval(appr.dataset.aid, "block", d === "once" ? "once" : "forever");
+      // a credential block refuses this request only (no rule) — the host itself stays reachable
+      const cred = appr.classList.contains("cred");
+      return sendApproval(appr.dataset.aid, "block", d === "once" || cred ? "once" : "forever");
     }
-    const al = e.target.closest("[data-allow-host]");
-    if (al) {
-      const host = al.dataset.allowHost;
-      const scope = al.dataset.scope; // "project" | "global"
-      const base = scope === "global" ? "/api/net/rules" : `/api/projects/${netId}/net/rules`;
-      al.disabled = true;
-      try {
-        await api(base, { method: "POST", body: { action: "allow", host } });
-        al.textContent = "✓ done";
-        await reloadNetRules(); // updates the Rules list and flips these buttons to "✓"
-      } catch (err) { al.disabled = false; alert(err.message); }
+    const tab = e.target.closest("[data-net-tab]");
+    if (tab) return setNetTab(tab.dataset.netTab);
+    const mode = e.target.closest("[data-net-mode]");
+    if (mode) {
+      netUi.mode = mode.dataset.netMode; saveNetUi();
+      for (const b of el.querySelectorAll("[data-net-mode]")) b.classList.toggle("on", b === mode);
+      return renderActivity();
+    }
+    if (e.target.closest("[data-toggle-expired]")) { netUi.showExpired = !netUi.showExpired; saveNetUi(); return renderRules(); }
+    const hr = e.target.closest("[data-host-rule]");
+    if (hr) {
+      const base = hr.dataset.scope === "global" ? "/api/net/rules" : `/api/projects/${netId}/net/rules`;
+      hr.disabled = true;
+      try { await api(base, { method: "POST", body: { action: hr.dataset.hostRule, host: hr.dataset.host } }); await reloadNetRules(); }
+      catch (err) { hr.disabled = false; alert(err.message); }
+      return;
+    }
+    const mv = e.target.closest("[data-move-rule]");
+    if (mv) {
+      mv.disabled = true;
+      try { await api(`/api/projects/${netId}/net/rules/${mv.dataset.moveRule}`, { method: "PATCH", body: { scope: mv.dataset.to } }); await reloadNetRules(); }
+      catch (err) { mv.disabled = false; alert(err.message); }
       return;
     }
     const dr = e.target.closest("[data-del-rule]");
@@ -1173,6 +1928,13 @@ function bindNetHandlers(el) {
     const dh = e.target.closest("[data-del-header]");
     if (dh) { try { await api(`/api/net/headers/${dh.dataset.delHeader}`, { method: "DELETE" }); } catch {} return reloadNetRules(); }
   });
+  el.querySelector("#net-online").addEventListener("change", (e) => toggleCutoff(e.target));
+  el.querySelector("#net-filter").addEventListener("input", (e) => { netUi.filter = e.target.value; renderActivity(); });
+  el.querySelector("#net-range").addEventListener("change", (e) => {
+    netUi.range = e.target.value; saveNetUi(); netModel.summary = null; renderActivity();
+  });
+  el.querySelector("#net-older").addEventListener("click", (e) => loadOlder(e.target));
+  el.querySelector("#net-blocked-only").addEventListener("change", (e) => { netUi.blockedOnly = e.target.checked; saveNetUi(); renderActivity(); });
   el.querySelector("#net-rule-add").addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
@@ -1224,5 +1986,6 @@ $("#nav-signout").onclick = async (e) => {
 };
 
 // boot: secrets cache first (for create-form checkboxes), then route
-refreshSecrets().then(() => { if (!location.hash) location.hash = "home"; else route(); });
+refreshVault().catch(() => {}).then(() => { if (!location.hash) location.hash = "home"; else route(); });
 setInterval(() => { if (!$("#view-projects").hidden) { refreshProjects(); refreshNavTree(); } }, 5000);
+setInterval(() => { if (!$("#view-home").hidden) refreshServiceStatus(); }, 5000);

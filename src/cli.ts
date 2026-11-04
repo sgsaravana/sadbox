@@ -1,10 +1,10 @@
-import { mkdtempSync, mkdirSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
+import { mkdirSync } from "fs";
 import { config, VERSION } from "./config";
-import { baseImageFiles } from "./assets";
+import { buildBaseImage } from "./core/baseimage";
 import { startServer } from "./api/http";
 import { startProxy } from "./net/proxy";
+import { startLoginLoop } from "./core/logins";
+import { startClaudeRefresher } from "./net/claudeoauth";
 import { startForwards } from "./net/forwards";
 import { MIN_PASSWORD, authEnabled, ensurePassword, initialPasswordFile, setPassword } from "./core/auth";
 
@@ -22,17 +22,6 @@ async function sh(cmd: string[], opts: { inherit?: boolean } = {}) {
 
 async function has(bin: string) {
   return (await sh(["sh", "-c", `command -v ${bin}`])).code === 0;
-}
-
-/** Build the base image from the embedded Dockerfile + tmux.conf. */
-async function buildBaseImage() {
-  const ctx = mkdtempSync(join(tmpdir(), "sadbox-img-"));
-  for (const [name, embeddedPath] of Object.entries(baseImageFiles)) {
-    await Bun.write(join(ctx, name), Bun.file(embeddedPath));
-  }
-  console.log("→ building base image sadbox-base:latest (~1 min)…");
-  const r = await sh([BIN, "build", "-t", "sadbox-base:latest", ctx], { inherit: true });
-  if (r.code !== 0) throw new Error("base image build failed");
 }
 
 async function setup() {
@@ -57,7 +46,8 @@ async function setup() {
   mkdirSync(config.dataDir, { recursive: true });
   console.log(`✓ data dir ${config.dataDir}`);
 
-  await buildBaseImage();
+  console.log(`→ building base image ${config.baseImage} (a few minutes)…`);
+  await buildBaseImage({ inherit: true });
   console.log("\n✓ setup complete — run 'sadbox serve' and open http://localhost:7070");
 }
 
@@ -113,7 +103,7 @@ Usage: sadbox <command>
   help       Show this help
 
 Env: SADBOX_PORT, SADBOX_HOST, SADBOX_PASSWORD, SADBOX_AUTH=off, SADBOX_NETWORK, SADBOX_PROXY_PORT, SADBOX_PROXY_HOST,
-     SADBOX_FORWARD_HOST, SADBOX_DATA, SADBOX_BASE_IMAGE`;
+     SADBOX_FORWARD_HOST, SADBOX_DATA, SADBOX_BASE_IMAGE, SADBOX_NET_LOG_DAYS (network log retention, ≥ 7)`;
 
 export async function main(argv: string[]) {
   const cmd = argv[2] ?? "serve";
@@ -134,6 +124,9 @@ export async function main(argv: string[]) {
       // filtered until it's available.
       startProxy().catch((e) => console.error(`⚠ proxy not started: ${e instanceof Error ? e.message : e}`));
       startForwards().catch((e) => console.error(`⚠ port forwards not started: ${e instanceof Error ? e.message : e}`));
+      // agent logins: capture from running VMs, and Claude's refresh, owned by sadbox
+      startLoginLoop();
+      startClaudeRefresher();
       break;
     case "setup": await setup(); break;
     case "doctor": await doctor(); break;

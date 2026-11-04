@@ -5,7 +5,7 @@ FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git tmux ncurses-term procps unzip ripgrep \
-      openssh-client locales sudo less jq \
+      openssh-client locales sudo less jq libatomic1 \
  && rm -rf /var/lib/apt/lists/* \
  && sed -i 's/# en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen && locale-gen
 
@@ -26,11 +26,25 @@ RUN ~/.bun/bin/bun install -g @oh-my-pi/pi-coding-agent
 # opencode coding agent (https://opencode.ai — documented npm package)
 RUN ~/.bun/bin/bun install -g opencode-ai
 
+# nvm + the current Node.js LTS (with npm; node needs libatomic1, above). nvm
+# is a shell function that bash picks up from ~/.bashrc (the installer adds
+# it); ~/.nvm/current links to the default version so node and npm are on PATH
+# in every shell, sh -c included.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ENV NVM_DIR=/home/agent/.nvm
+RUN curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash \
+ && . "$NVM_DIR/nvm.sh" \
+ && nvm install --lts \
+ && nvm alias default 'lts/*' \
+ && ln -s "$(dirname "$(dirname "$(nvm which default)")")" "$NVM_DIR/current" \
+ && "$NVM_DIR/current/bin/node" --version && "$NVM_DIR/current/bin/npm" --version \
+ && nvm cache clear
+
 # login shells: Debian /etc/profile resets PATH and skel ~/.profile only
 # re-adds ~/.local/bin — put the full toolchain PATH back for sh -l / ssh
-RUN printf 'export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"\n' >> ~/.profile
+RUN printf 'export PATH="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.nvm/current/bin:$PATH"\n' >> ~/.profile
 
-ENV PATH="/home/agent/.local/bin:/home/agent/.bun/bin:$PATH" \
+ENV PATH="/home/agent/.local/bin:/home/agent/.bun/bin:/home/agent/.nvm/current/bin:$PATH" \
     DISABLE_AUTOUPDATER=1
 
 COPY --chown=agent:agent tmux.conf /home/agent/.tmux.conf

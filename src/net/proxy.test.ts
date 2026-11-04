@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { classifyAddress } from "./proxy";
+import { classifyAddress, resolveTarget } from "./proxy";
 
 // the machine's own interface addresses, as os.networkInterfaces() would list them
 const own = new Set(["127.0.0.1", "::1", "192.168.50.48", "192.168.64.1", "fe80::1", "2001:db8::10"]);
@@ -31,6 +31,21 @@ describe("where a VM's request is allowed to go", () => {
     for (const a of ["93.184.216.34", "1.1.1.1", "172.15.255.255", "172.32.0.1", "192.167.1.1", "192.169.1.1",
                      "169.253.1.1", "100.63.255.255", "100.128.0.1", "11.0.0.1", "2606:4700:4700::1111"]) {
       expect(reach(a)).toBe("public");
+    }
+  });
+});
+
+describe("the supervisor itself (its API, the reveal endpoint) is out of a VM's reach", () => {
+  test("localhost names and loopback addresses are this machine — refused before any rule is looked at", async () => {
+    for (const h of ["localhost", "LOCALHOST", "api.localhost", "127.0.0.1", "[::1]", "0.0.0.0"]) {
+      expect((await resolveTarget(h))?.reach).toBe("self");
+    }
+  });
+
+  test("so is every address this machine has (the VM's gateway among them)", async () => {
+    const { networkInterfaces } = await import("node:os");
+    for (const list of Object.values(networkInterfaces())) {
+      for (const a of list ?? []) expect((await resolveTarget(a.address))?.reach).toBe("self");
     }
   });
 });

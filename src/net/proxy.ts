@@ -13,13 +13,15 @@
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
+import zlib from "node:zlib";
+import { Transform } from "node:stream";
 import dns from "node:dns/promises";
 import { networkInterfaces } from "node:os";
 import { mkdirSync, rmSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { config, runDir } from "../config";
-import { startGuestRelay } from "./guest";
+import { ensureGuestTools, startGuestRelay } from "./guest";
 import { db } from "../db";
 import { logEvent } from "../db";
 import { getDriver } from "../driver";
@@ -27,7 +29,11 @@ import { ensureCA, certForHost, leafKey, caCertPem, caReady } from "./ca";
 import { evaluate, applyHeaders } from "./rules";
 import { requestApproval } from "./approvals";
 import { inSetup } from "./setup";
-import { recordRequest, type RequestEntry } from "./events";
+import { recordRequest, startRequestLog, type RequestEntry } from "./events";
+import { bodyRedactor, redactResponse, substituteRequest, swapsBodies, textualType, type SwapBody, type SwapResult } from "./credentials";
+import { CUTOFF_MESSAGE, isCutOff } from "./cutoff";
+import { serveVault, VAULT_HOST } from "./vaultfetch";
+import { answerTokenRequest, CLAUDE_LOGIN_NAME, isClaudeTokenRequest } from "./claudeoauth";
 import { carryLink, linkTarget } from "./links";
 
 const driver = getDriver();
@@ -116,7 +122,7 @@ export function classifyAddress(addr: string, own: Set<string> = ownAddresses())
 const REACH_RANK: Record<Reach, number> = { public: 0, private: 1, self: 2 };
 
 /** Resolve a target and classify it by the most sensitive address it maps to. */
-async function resolveTarget(host: string): Promise<{ address: string; reach: Reach } | null> {
+export async function resolveTarget(host: string): Promise<{ address: string; reach: Reach } | null> {
   const bare = host.replace(/^\[|\]$/g, "");
   if (bare === "localhost" || bare.endsWith(".localhost")) return { address: "127.0.0.1", reach: "self" };
   let addrs: string[];
@@ -133,6 +139,39 @@ async function resolveTarget(host: string): Promise<{ address: string; reach: Re
 
 let seq = 0;
 const rid = () => `${(++seq).toString(36)}-${Date.now().toString(36)}`;
+
+/** Request bodies up to this size are held back to swap placeholders in them
+ *  (only for a project with items that are swapped in bodies); a larger one,
+ *  or one of a binary type, goes through as it is. */
+const BODY_CAP = 1 << 20;
+
+/** Read a request body, unless it grows past `cap`: then the chunks read so
+ *  far come back with `over` set, and the rest is still unread on `req`. */
+function readBody(req: IncomingMessage, cap: number): Promise<{ chunks: Buffer[]; over: boolean }> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let n = 0;
+    const onData = (c: Buffer) => {
+      chunks.push(c); n += c.length;
+      if (n > cap) { req.off("data", onData); req.off("end", onEnd); req.pause(); resolve({ chunks, over: true }); }
+    };
+    const onEnd = () => resolve({ chunks, over: false });
+    req.on("data", onData);
+    req.once("end", onEnd);
+    req.once("error", reject);
+  });
+}
+
+/** A decoder for a response body the redactor has to read, or null if it is
+ *  sent as is; undefined for an encoding it can't read (then it is not touched). */
+function decoderFor(encoding: string | undefined): Transform | null | undefined {
+  const e = (encoding || "identity").trim().toLowerCase();
+  if (e === "identity") return null;
+  if (e === "gzip" || e === "x-gzip") return zlib.createGunzip();
+  if (e === "deflate") return zlib.createInflate();
+  if (e === "br") return zlib.createBrotliDecompress();
+  return undefined;
+}
 
 // ---- the request handler (shared by the http + per-host https servers) ----
 function makeHandler(scheme: "http" | "https") {
@@ -156,6 +195,35 @@ function makeHandler(scheme: "http" | "https") {
     const started = Date.now();
 
     const projectId = ctx.projectId ?? (await projectForIp(ctx.clientIp))?.id ?? null;
+
+    // the vault, as a VM sees it: answered here, never forwarded anywhere
+    if (host.toLowerCase() === VAULT_HOST) {
+      req.resume();
+      return serveVault(projectId, scheme, method, path, res);
+    }
+
+    // network cut off: nothing leaves, whatever the rules say — checked per request,
+    // so a tunnel opened before the switch was flipped stops carrying anything too
+    if (isCutOff(projectId)) {
+      req.resume();
+      try { res.writeHead(403, { "content-type": "text/plain" }); res.end(`sadbox: ${CUTOFF_MESSAGE}\n`); } catch {}
+      log(projectId, { id: rid(), ts: started, method, scheme, host, path, status: 403, decision: "blocked", reqBytes: 0, respBytes: 0, durationMs: Date.now() - started, error: CUTOFF_MESSAGE });
+      return;
+    }
+
+    // Claude's token endpoint: answered by sadbox, which owns the login (A7) —
+    // a VM never gets, or spends, a real token
+    if (projectId && isClaudeTokenRequest(scheme, host, method, path)) {
+      const { chunks } = await readBody(req, BODY_CAP);
+      const name = db.query<{ name: string }, [string]>("SELECT name FROM projects WHERE id = ?").get(projectId)?.name ?? projectId;
+      const r = await answerTokenRequest(projectId, name, host, Buffer.concat(chunks).toString("utf8"), String(req.headers["content-type"] || ""), res);
+      log(projectId, {
+        id: rid(), ts: started, method, scheme, host, path, status: r.status, decision: "allowed",
+        reqBytes: 0, respBytes: 0, durationMs: Date.now() - started, credentials: [CLAUDE_LOGIN_NAME],
+        ...(r.status >= 400 ? { error: r.note } : {}),
+      });
+      return;
+    }
 
     // link names are handled before a request gets here (see acceptClient); one
     // arriving any other way — a Host header inside some other tunnel — is refused
@@ -190,25 +258,106 @@ function makeHandler(scheme: "http" | "https") {
     // allowed -> forward upstream
     const headers: Record<string, unknown> = { ...req.headers };
     delete headers["proxy-connection"];
-    if (projectId) applyHeaders(projectId, host, "request", headers);
+
+    // A textual body is held back to swap placeholders in it — only for a
+    // project with items swapped in bodies, and only up to BODY_CAP.
+    const contentType = String(req.headers["content-type"] || "");
+    let held: { chunks: Buffer[]; over: boolean } | null = null;
+    if (projectId && scheme === "https" && textualType(contentType) && swapsBodies(projectId)
+        && Number(req.headers["content-length"] || 0) <= BODY_CAP) {
+      held = await readBody(req, BODY_CAP);
+    }
+    const swapBodyIn: SwapBody | null = held && !held.over
+      ? { text: Buffer.concat(held.chunks).toString("utf8"), contentType } : null;
+
+    // proxy vault items: placeholder -> real value, before the header rules
+    // run (so an explicit `set` rule still has the last word)
+    let creds: SwapResult | null = null;
+    if (projectId) {
+      const swapReq = { scheme, host, path, method };
+      creds = substituteRequest(projectId, swapReq, headers, new Set(), swapBodyIn);
+      // a real value never travels unencrypted; fail loudly rather than send a placeholder that 401s
+      let why = creds.plainHttp.length ? `${creds.plainHttp.join(", ")} is only sent over https` : null;
+      const approved = new Set<string>();
+      for (const u of why ? [] : creds.unbound) {
+        // the provisioning window has nobody to ask, so an unbound secret is simply refused
+        const d = inSetup(projectId) ? "block"
+          : await requestApproval({ projectId, host, method, scheme, path, credential: u });
+        if (d === "block") { why = `${u.name} is not allowed to ${host}`; break; }
+        approved.add(u.secretId);
+      }
+      if (why) {
+        req.resume();
+        try { res.writeHead(403, { "content-type": "text/plain" }); res.end(`sadbox: ${why}\n`); } catch {}
+        log(projectId, {
+          id: rid(), ts: started, method, scheme, host, path, status: 403, decision: "blocked",
+          reqBytes: 0, respBytes: 0, durationMs: Date.now() - started, error: why,
+          ...(creds.inUrl.length ? { credentialInUrl: creds.inUrl } : {}),
+        });
+        return;
+      }
+      if (approved.size) {
+        const more = substituteRequest(projectId, { ...swapReq, path: creds.path }, headers, approved,
+          swapBodyIn && { text: creds.body!, contentType });
+        creds = { ...creds, injected: [...creds.injected, ...more.injected], path: more.path, body: more.body };
+      }
+      applyHeaders(projectId, host, "request", headers);
+    }
+    const credLog = (redacted: string[] = []) => ({
+      ...(creds?.injected.length ? { credentials: creds.injected } : {}),
+      ...(redacted.length ? { redacted } : {}),
+      ...(creds?.inUrl.length ? { credentialInUrl: creds.inUrl } : {}),
+    });
 
     let reqBytes = 0, respBytes = 0;
     req.on("data", (c: Buffer) => { reqBytes += c.length; });
+    // a body swapped here goes on as one piece, with its new length
+    const sendBody = swapBodyIn ? Buffer.from(creds?.body ?? swapBodyIn.text, "utf8") : null;
+    if (sendBody) {
+      reqBytes = sendBody.length;
+      delete headers["transfer-encoding"];
+      delete headers["expect"]; // answered here already
+      headers["content-length"] = String(sendBody.length);
+    }
 
     const mod = scheme === "https" ? https : http;
     const up = mod.request(
       // connect to the address that was classified; Host header + SNI keep the name
-      { host: target!.address, port, method, path, headers: headers as any, ...(net.isIP(host) ? {} : { servername: host }) },
+      { host: target!.address, port, method, path: creds?.path ?? path, headers: headers as any, ...(net.isIP(host) ? {} : { servername: host }) },
       (upRes) => {
         const out: Record<string, unknown> = { ...upRes.headers };
+        // a real secret value never reaches the VM, even echoed back in a header…
+        const redacted = projectId ? redactResponse(projectId, out) : [];
         if (projectId) applyHeaders(projectId, host, "response", out);
-        try { res.writeHead(upRes.statusCode || 502, out as any); } catch {}
+        // …or in a textual body (decoded first if compressed; sent on uncompressed)
+        const status = upRes.statusCode || 502;
+        const hasBody = method !== "HEAD" && status !== 204 && status !== 304;
+        const decoder = decoderFor(upRes.headers["content-encoding"] as string | undefined);
+        const redactor = projectId && hasBody && decoder !== undefined && textualType(String(upRes.headers["content-type"] || ""))
+          ? bodyRedactor(projectId) : null;
+        if (redactor) {
+          delete out["content-length"];
+          if (decoder) delete out["content-encoding"];
+        }
+        try { res.writeHead(status, out as any); } catch {}
         upRes.on("data", (c: Buffer) => { respBytes += c.length; });
-        upRes.pipe(res);
-        upRes.on("end", () => log(projectId, {
+        const done = () => log(projectId, {
           id: rid(), ts: started, method, scheme, host, path, status: upRes.statusCode ?? null,
           decision: "allowed", ruleId: verdict.rule?.id ?? null, reqBytes, respBytes, durationMs: Date.now() - started,
-        }));
+          ...credLog([...new Set([...redacted, ...(redactor?.redacted ?? [])])]),
+        });
+        if (!redactor) {
+          upRes.pipe(res);
+          upRes.on("end", done);
+          return;
+        }
+        const scrub = new Transform({
+          transform(chunk: Buffer, _enc, cb) { cb(null, redactor.write(chunk)); },
+          flush(cb) { cb(null, redactor.end()); },
+        });
+        const fail = () => { try { res.destroy(); } catch {} };
+        (decoder ? upRes.pipe(decoder).on("error", fail) : upRes).pipe(scrub).pipe(res);
+        scrub.on("end", done);
       },
     );
     up.on("error", (e: Error) => {
@@ -216,11 +365,21 @@ function makeHandler(scheme: "http" | "https") {
       log(projectId, {
         id: rid(), ts: started, method, scheme, host, path, status: 502, decision: "allowed",
         ruleId: verdict.rule?.id ?? null, reqBytes, respBytes, durationMs: Date.now() - started, error: e.message,
+        ...credLog(),
       });
     });
-    req.pipe(up);
+    if (sendBody) up.end(sendBody);
+    else if (held) {
+      // held back but too large to swap: what was read, then the rest as it comes
+      for (const c of held.chunks) { up.write(c); reqBytes += c.length; }
+      req.pipe(up);
+      req.resume();
+    } else req.pipe(up);
   };
 }
+
+const hostOfUrl = (u?: string) => { try { return new URL(u || "").hostname; } catch { return ""; } };
+const pathOfUrl = (u?: string) => { try { const x = new URL(u || ""); return x.pathname + x.search; } catch { return ""; } };
 
 function log(projectId: string | null, entry: RequestEntry): void {
   if (projectId) recordRequest(projectId, entry);
@@ -376,6 +535,7 @@ export async function installGuestProxy(ref: string): Promise<void> {
   // A network-less VM reaches the proxy through the relay on its own loopback;
   // a legacy VM on a real network dials the host's address on that network.
   const info = await driver.inspect(ref);
+  await ensureGuestTools(ref); // the relay, and sadbox-vault — on a network or not
   let url: string, noProxy = "localhost,127.0.0.1,::1";
   if (info.isolated) {
     await startGuestRelay(ref);
@@ -393,6 +553,7 @@ export async function installGuestProxy(ref: string): Promise<void> {
     `export NO_PROXY="${noProxy}"`, `export no_proxy="${noProxy}"`,
     `export NODE_EXTRA_CA_CERTS="${config.guestCaPath}"`,
     `export NODE_USE_ENV_PROXY=1`, // Node's built-in fetch ignores the proxy vars without it
+    `export PI_PROXY="${url}"`, // oh-my-pi sends Anthropic calls over node:https and only hands off to a proxy for PI_PROXY
     `export REQUESTS_CA_BUNDLE="${config.guestCaBundle}"`,
     `export SSL_CERT_FILE="${config.guestCaBundle}"`,
     `export GIT_SSL_CAINFO="${config.guestCaBundle}"`,
@@ -422,7 +583,18 @@ function acceptClient(socket: net.Socket, knownProject?: string, onActive?: () =
     const ip = (socket.remoteAddress || "").replace(/^::ffff:/, "");
     // Over TCP only project VMs may use the proxy. It listens on every
     // interface, so this is what keeps the rest of the network from borrowing it.
-    if (!knownProject && !(await projectForIp(ip))) { socket.destroy(); return; }
+    const owner = knownProject ?? (await projectForIp(ip))?.id;
+    if (!owner) { socket.destroy(); return; }
+    // network cut off: refuse the tunnel itself, before any TLS (the request is logged)
+    if (isCutOff(owner)) {
+      recordRequest(owner, {
+        id: rid(), ts: Date.now(), method: method || "?", scheme: method === "CONNECT" ? "https" : "http",
+        host: method === "CONNECT" ? splitHostPort(target || "", 443).host : hostOfUrl(target), path: method === "CONNECT" ? "" : pathOfUrl(target),
+        status: 403, decision: "blocked", reqBytes: 0, respBytes: 0, durationMs: 0, error: CUTOFF_MESSAGE,
+      });
+      try { socket.write(`HTTP/1.1 403 Forbidden\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\nsadbox: ${CUTOFF_MESSAGE}\n`); socket.end(); } catch {}
+      return;
+    }
     const who = { clientIp: ip, projectId: knownProject };
     // <project>.sadbox.internal: another VM, reachable only through a link
     let asked = "";
@@ -456,6 +628,7 @@ export async function startProxy(): Promise<void> {
   if (started) return;
   await ensureCA(); // throws if openssl is missing -> caller logs, UI/API still run
   started = true;
+  startRequestLog(); // persisted request log: prune to the retention window, hourly
 
   httpServer = http.createServer(makeHandler("http"));
   await new Promise<void>((r) => httpServer!.listen(0, "127.0.0.1", () => r()));

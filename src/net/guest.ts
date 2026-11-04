@@ -71,6 +71,37 @@ s.on("error", () => process.exit(1));
 s.on("close", () => process.stdout.write("", () => process.exit(0)));
 `;
 
+// `sadbox-vault`: the vault from inside the VM (docs/research/12, V5). It asks
+// the proxy for http://vault.sadbox.internal, which the proxy answers itself.
+// Errors go to stderr with a non-zero exit, so `$(sadbox-vault get X)` never
+// captures an error message as a value.
+const VAULT_SH = `#!/bin/sh
+# sadbox-vault — this project's vault items, fetched at runtime.
+#   sadbox-vault list              the items this project may use (no values)
+#   sadbox-vault get NAME          an item's value on stdout — may wait for the owner to allow it
+#   sadbox-vault get --json NAME   {"name", "type", "value"}
+# A proxy item is not fetched: its placeholder is in $NAME, and the proxy swaps in the value.
+[ -f ${config.guestNetEnvFile} ] && . ${config.guestNetEnvFile}
+proxy="\${HTTP_PROXY:-http://127.0.0.1:${config.guestProxyPort}}"
+base=http://vault.sadbox.internal/v1
+q() {
+  umask 077; tmp=$(mktemp) || exit 1
+  code=$(curl -sS --max-time 180 --proxy "$proxy" -o "$tmp" -w '%{http_code}' "$1") || { rm -f "$tmp"; exit 1; }
+  if [ "$code" -ge 400 ]; then cat "$tmp" >&2; rm -f "$tmp"; exit 1; fi
+  cat "$tmp"; rm -f "$tmp"
+}
+case "$1" in
+  list|"") q "$base/" ;;
+  get)
+    shift; fmt=""
+    [ "$1" = "--json" ] && { fmt="?format=json"; shift; }
+    [ -n "$1" ] || { echo "usage: sadbox-vault get [--json] NAME" >&2; exit 2; }
+    q "$base/$1$fmt" ;;
+  -h|--help|help) sed -n '2,6p' "$0" | cut -c3- ;;
+  *) echo "usage: sadbox-vault list | get [--json] NAME" >&2; exit 2 ;;
+esac
+`;
+
 const relayPath = `${config.guestToolsDir}/relay.js`;
 const connectPath = `${config.guestToolsDir}/connect.js`;
 
@@ -83,7 +114,8 @@ export async function ensureGuestTools(ref: string): Promise<void> {
     `mkdir -p ${config.guestToolsDir} && ` +
     `cat > ${relayPath} <<'SADBOX_EOF'\n${RELAY_JS}SADBOX_EOF\n` +
     `cat > ${connectPath} <<'SADBOX_EOF'\n${CONNECT_JS}SADBOX_EOF\n` +
-    `chmod 755 ${config.guestToolsDir} && chmod 644 ${relayPath} ${connectPath}`;
+    `cat > /usr/local/bin/sadbox-vault <<'SADBOX_EOF'\n${VAULT_SH}SADBOX_EOF\n` +
+    `chmod 755 ${config.guestToolsDir} /usr/local/bin/sadbox-vault && chmod 644 ${relayPath} ${connectPath}`;
   const r = await driver.exec(ref, ["sh", "-c", script], { user: "root" });
   if (r.exitCode !== 0) throw new Error(`could not install guest tools: ${r.stderr.trim()}`);
   installed.add(ref);

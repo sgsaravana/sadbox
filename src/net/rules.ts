@@ -76,6 +76,29 @@ export function deleteRule(id: string): void {
   db.query("DELETE FROM net_rules WHERE id=?").run(id);
 }
 
+/** Move a rule between this project and all projects (global), keeping its
+ *  action, host, path, method and expiry. If the target scope already has the
+ *  same rule, the moved one is dropped instead of duplicated. Returns the rule
+ *  that now stands in the target scope. */
+export function moveRule(id: string, scope: "global" | "project", projectId?: string | null): NetRule {
+  const r = db.query<NetRule, [string]>("SELECT * FROM net_rules WHERE id=?").get(id);
+  if (!r) throw new Error("rule not found");
+  if (scope !== "global" && scope !== "project") throw new Error("scope must be global or project");
+  if (scope === "project" && !projectId) throw new Error("moving a rule to a project needs the project");
+  const target = scope === "global" ? null : projectId!;
+  if (r.scope === scope && r.project_id === target) return r;
+  const twin = db.query<NetRule, [string, string, string | null, string, string | null, string | null]>(
+    `SELECT * FROM net_rules WHERE scope=? AND action=? AND project_id IS ? AND host=?
+       AND path IS ? AND method IS ? AND expires_at IS NULL`,
+  ).get(scope, r.action, target, r.host, r.path, r.method);
+  if (twin && !r.expires_at) {
+    deleteRule(id); // the target already has it, permanently
+    return twin;
+  }
+  db.query("UPDATE net_rules SET scope=?, project_id=? WHERE id=?").run(scope, target, id);
+  return db.query<NetRule, [string]>("SELECT * FROM net_rules WHERE id=?").get(id)!;
+}
+
 // ---- header rule CRUD ----
 
 const HEADER_SELECT =
@@ -112,13 +135,12 @@ export function createHeaderRule(o: {
 
   let valueSecretId: string | null = null;
   if (o.op === "set" && o.valueSecretId) {
-    const s = db.query<{ id: string; project_id: string | null }, [string]>(
-      "SELECT id, project_id FROM secrets WHERE id=?",
-    ).get(o.valueSecretId);
-    if (!s) throw new Error("secret not found");
-    // a project-specific secret is only usable by a rule scoped to that project
-    if (s.project_id && (o.scope !== "project" || s.project_id !== o.projectId)) {
-      throw new Error("that secret belongs to another project");
+    const s = db.query<{ id: string }, [string]>("SELECT id FROM secrets WHERE id=?").get(o.valueSecretId);
+    if (!s) throw new Error("vault item not found");
+    // a project's rule may only use what the project has access to; a global
+    // rule fills the header only in projects that have (see applyHeaders)
+    if (o.scope === "project" && !db.query("SELECT 1 FROM project_secrets WHERE project_id=? AND secret_id=?").get(o.projectId!, s.id)) {
+      throw new Error("this project has no access to that vault item");
     }
     valueSecretId = s.id;
   }
@@ -188,9 +210,10 @@ export function applyHeaders(
     }
     let value = r.value ?? "";
     if (r.value_secret_id) {
-      // resolve from the secret store; only globals or this project's own secret
+      // resolve from the vault — only an item this project has access to
       const s = db.query<{ value_enc: string }, [string, string | null]>(
-        "SELECT value_enc FROM secrets WHERE id=? AND (project_id IS NULL OR project_id=?)",
+        `SELECT s.value_enc FROM secrets s JOIN project_secrets ps ON ps.secret_id = s.id
+         WHERE s.id=? AND ps.project_id=?`,
       ).get(r.value_secret_id, projectId);
       if (!s) continue; // secret gone or not accessible → leave the header untouched
       value = decrypt(s.value_enc);
@@ -209,7 +232,7 @@ function matchRule(r: NetRule, req: { host: string; path: string; method: string
   return true;
 }
 
-function hostMatch(pattern: string, host: string): boolean {
+export function hostMatch(pattern: string, host: string): boolean {
   if (pattern === "*") return true;
   if (pattern.startsWith("*.")) {
     const bare = pattern.slice(2);
@@ -218,11 +241,11 @@ function hostMatch(pattern: string, host: string): boolean {
   return host === pattern;
 }
 
-function pathMatch(pattern: string, path: string): boolean {
+export function pathMatch(pattern: string, path: string): boolean {
   if (pattern.endsWith("*")) return path.startsWith(pattern.slice(0, -1));
   return path === pattern;
 }
 
-function normalizeHost(h: string): string {
+export function normalizeHost(h: string): string {
   return h.trim().toLowerCase().replace(/^https?:\/\//, "").split("/")[0].split(":")[0];
 }

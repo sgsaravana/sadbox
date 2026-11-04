@@ -5,21 +5,27 @@ import { config } from "../config";
 import { staticRoutes, aceFiles } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
-import { assignSecrets, createGlobalSecret, createProjectSecret, deleteSecret, injectSecrets, listGlobalSecrets, projectSecretView } from "../core/secrets";
-import { connectSyncFolder, createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject, setProjectMemory, startProject, stopProject } from "../core/projects";
+import { addBinding, createItem, deleteBinding, deleteItem, getItem, injectVault, listItems, projectVaultView, revealItem, revokeFetchGrant, setItemProjects, setProjectItems, updateItem } from "../core/vault";
+import { connectSyncFolder, listProjects, setGitRemote, createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject, setProjectMemory, startProject, stopProject } from "../core/projects";
 import { syncStatus, syncProject } from "../core/sync";
+import { pushProject } from "../core/push";
 import { terminalLinks } from "../core/links";
 import { getSettings, updateSettings } from "../core/settings";
 import { baseImageToolchain } from "../core/toolchain";
-import { createRule, deleteRule, listRules, createHeaderRule, deleteHeaderRule, listHeaderRules } from "../net/rules";
+import { deleteHistory, listHistory } from "../core/history";
+import { applyToRunning, forgetLogin, listLogins } from "../core/logins";
+import { claudeLogin, refreshClaude } from "../net/claudeoauth";
+import { createRule, deleteRule, listRules, moveRule, createHeaderRule, deleteHeaderRule, listHeaderRules } from "../net/rules";
+import { isCutOff, setCutoff } from "../net/cutoff";
 import { resolveApproval, listPending, pendingCounts } from "../net/approvals";
-import { recentRequests, subscribe } from "../net/events";
+import { hostSummary, recentRequests, requestsBefore, subscribe } from "../net/events";
 import { caCertPem } from "../net/ca";
 import { createForward, deleteForward, listForwards } from "../net/forwards";
 import { createLink, deleteLink, listLinks } from "../net/links";
 import { AuthError, authEnabled, clearCookie, crossOrigin, login, logout, safeNext, sessionCookie, signedIn, tokenFrom } from "../core/auth";
 import { FileError, commitStaged, deletePath, discardPaths, listStashes, stash, fileIndex, gitStatus, headFile, lastCommit, listBranches, listDir, makeDir, pushBranch, readFile, renamePath, stageFile, stagePaths, switchBranch, writeFile } from "../core/files";
 
+const liveProjectNames = () => listProjects().map((p) => p.name);
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
 
@@ -42,6 +48,7 @@ function netStream(projectId: string): Response {
         pending: listPending(projectId),
         rules: listRules(projectId),
         headerRules: listHeaderRules(projectId),
+        cutoff: isCutOff(projectId),
       });
       unsub = subscribe(projectId, send);
       hb = setInterval(() => { try { controller.enqueue(enc.encode(": ping\n\n")); } catch {} }, 25_000);
@@ -128,7 +135,8 @@ export function startServer() {
             : undefined;
           return json(await createProject({
             name: b.name,
-            sourcePath: (b.sourcePath && String(b.sourcePath).trim()) || undefined, // empty ⇒ clone mode
+            sourcePath: (b.sourcePath && String(b.sourcePath).trim()) || undefined, // none ⇒ clone mode (or empty)
+            empty: b.empty === true,
             apps: b.apps, secretIds: b.secretIds, git,
           }), 201);
         }
@@ -139,29 +147,24 @@ export function startServer() {
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/details$/);
         if (m && req.method === "GET") return json(await projectDetails(m[1]));
-        m = p.match(/^\/api\/projects\/([\w-]+)\/secrets$/);
-        if (m && req.method === "GET") return json(projectSecretView(m[1]));
-        if (m && req.method === "PUT") {          // assign globals
+        // the vault items a project may use (and what its VM holds for each)
+        m = p.match(/^\/api\/projects\/([\w-]+)\/vault$/);
+        if (m && req.method === "GET") return json(projectVaultView(m[1]));
+        if (m && req.method === "PUT") {
           const b = await req.json();
-          assignSecrets(m[1], b.secretIds ?? []);
-          await injectSecrets(m[1]);
-          return json(projectSecretView(m[1]));
-        }
-        if (m && req.method === "POST") {         // create project-specific secret
-          const b = await req.json();
-          const s = createProjectSecret(m[1], b.name, b.value);
-          try {
-            await injectSecrets(m[1]);
-          } catch (e) {
-            await deleteSecret(s.id);             // keep create+inject atomic
-            throw e;
-          }
-          return json(projectSecretView(m[1]), 201);
+          setProjectItems(m[1], b.itemIds ?? []);
+          if (getProject(m[1])?.state === "running") await injectVault(m[1]);
+          return json(projectVaultView(m[1]));
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/sync$/);
         if (m && req.method === "POST") {
           const b = await req.json().catch(() => ({}));
           return json(await syncProject(m[1], { force: b.force === true }));
+        }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/push$/);
+        if (m && req.method === "POST") {           // copy the local folder into the VM
+          const b = await req.json().catch(() => ({}));
+          return json(await pushProject(m[1], { force: b.force === true }));
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/term\/links$/);
         if (m && req.method === "GET") return json(await terminalLinks(m[1]));
@@ -180,6 +183,11 @@ export function startServer() {
           return json(await connectSyncFolder(m[1], b.path ?? null));
         }
         if (m && req.method === "DELETE") return json(await connectSyncFolder(m[1], null));
+        m = p.match(/^\/api\/projects\/([\w-]+)\/git-remote$/);
+        if (m && req.method === "PUT") {            // add or change origin on an existing VM
+          const b = await req.json();
+          return json(await setGitRemote(m[1], { remote: b.remote, token: b.token ? String(b.token) : undefined }));
+        }
         m = p.match(/^\/api\/projects\/([\w-]+)\/sync\/status$/);
         if (m && req.method === "GET") return json(await syncStatus(m[1]));
 
@@ -187,7 +195,17 @@ export function startServer() {
         m = p.match(/^\/api\/projects\/([\w-]+)\/net\/stream$/);
         if (m && req.method === "GET") return netStream(m[1]);
         m = p.match(/^\/api\/projects\/([\w-]+)\/net\/requests$/);
-        if (m && req.method === "GET") return json({ requests: recentRequests(m[1]), pending: listPending(m[1]) });
+        if (m && req.method === "GET") {
+          // ?before=<ms>&limit=N pages back through the stored log; without it: the live view's recent requests
+          const before = Number(url.searchParams.get("before"));
+          if (before) return json({ requests: requestsBefore(m[1], before, Number(url.searchParams.get("limit")) || 200) });
+          return json({ requests: recentRequests(m[1]), pending: listPending(m[1]) });
+        }
+        // requests per host since ?since=<ms> (default: the last 24 hours)
+        m = p.match(/^\/api\/projects\/([\w-]+)\/net\/hosts$/);
+        if (m && req.method === "GET") {
+          return json(hostSummary(m[1], Number(url.searchParams.get("since")) || Date.now() - 86_400_000));
+        }
         m = p.match(/^\/api\/projects\/([\w-]+)\/net\/approvals\/([\w-]+)$/);
         if (m && req.method === "POST") {
           const b = await req.json();
@@ -201,6 +219,19 @@ export function startServer() {
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/net\/rules\/([\w-]+)$/);
         if (m && req.method === "DELETE") { deleteRule(m[2]); return json({ ok: true }); }
+        // move a rule between this project and all projects: {scope: "global" | "project"}
+        if (m && req.method === "PATCH") {
+          const b = await req.json();
+          // only this project's own rules or global ones can be moved from here
+          if (!listRules(m[1]).some((r) => r.id === m![2])) return err("rule not found", 404);
+          return json(moveRule(m[2], b.scope, m[1]));
+        }
+        // one-click internet cutoff: {cutoff: true | false}
+        m = p.match(/^\/api\/projects\/([\w-]+)\/network$/);
+        if (m && req.method === "PUT") {
+          const b = await req.json();
+          return json({ cutoff: setCutoff(m[1], b.cutoff === true) });
+        }
         m = p.match(/^\/api\/projects\/([\w-]+)\/net\/headers$/);
         if (m && req.method === "GET") return json(listHeaderRules(m[1]));
         if (m && req.method === "POST") {
@@ -340,6 +371,35 @@ export function startServer() {
           });
         }
 
+        // the VM backend's own service (Apple's container-apiserver): up or not, and why
+        if (p === "/api/system/status" && req.method === "GET") {
+          return json(await getDriver().serviceStatus());
+        }
+
+        // agent history kept per project name (core/history.ts): what a new
+        // project of that name would get mounted
+        if (p === "/api/history" && req.method === "GET") return json(listHistory());
+
+        // ---- agents: logins sadbox keeps, history per project name (Agents page)
+        if (p === "/api/agents" && req.method === "GET") {
+          return json({ logins: listLogins(), history: listHistory(), liveNames: liveProjectNames() });
+        }
+        if (p === "/api/agents/apply" && req.method === "POST") return json(await applyToRunning());
+        if (p === "/api/agents/claude/refresh" && req.method === "POST") {
+          if (!claudeLogin()) return json({ error: "sadbox holds no Claude login" }, 404);
+          return json({ ok: await refreshClaude("asked from the Agents page"), logins: listLogins() });
+        }
+        const lm = p.match(/^\/api\/agents\/logins\/([^/]+)\/([^/]+)$/);
+        if (lm && req.method === "DELETE") {
+          if (!forgetLogin(decodeURIComponent(lm[1]), decodeURIComponent(lm[2]))) return json({ error: "no such login" }, 404);
+          return json({ ok: true });
+        }
+        const hm = p.match(/^\/api\/agents\/history\/([^/]+)$/);
+        if (hm && req.method === "DELETE") {
+          try { deleteHistory(decodeURIComponent(hm[1]), liveProjectNames()); } catch (e) { return json({ error: e instanceof Error ? e.message : String(e) }, 400); }
+          return json({ ok: true });
+        }
+
         // toolchain baked into the image new projects boot from (name + version)
         if (p === "/api/toolchain" && req.method === "GET") {
           return json(await baseImageToolchain(url.searchParams.get("refresh") === "1"));
@@ -353,14 +413,48 @@ export function startServer() {
           }));
         }
 
-        if (p === "/api/secrets" && req.method === "GET") return json(listGlobalSecrets());
-        if (p === "/api/secrets" && req.method === "POST") {
+        // ---- vault ----
+        if (p === "/api/vault" && req.method === "GET") return json(listItems());
+        if (p === "/api/vault" && req.method === "POST") {
           const b = await req.json();
-          return json(createGlobalSecret(b.name, b.value), 201);
+          return json(createItem({
+            name: b.name, value: b.value, kind: b.kind, type: b.type, mode: b.mode, inEnv: b.inEnv,
+            askOnFetch: b.askOnFetch, swapUrl: b.swapUrl, swapBody: b.swapBody, bindings: b.bindings, projectIds: b.projectIds,
+          }), 201);
         }
-        m = p.match(/^\/api\/secrets\/([\w-]+)$/);
+        m = p.match(/^\/api\/vault\/([\w-]+)$/);
+        if (m && req.method === "GET") return json(getItem(m[1]));
+        if (m && req.method === "PATCH") {
+          const b = await req.json();
+          return json(await updateItem(m[1], {
+            name: b.name, value: b.value, kind: b.kind, type: b.type, mode: b.mode, inEnv: b.inEnv, askOnFetch: b.askOnFetch,
+            swapUrl: b.swapUrl, swapBody: b.swapBody,
+          }));
+        }
         if (m && req.method === "DELETE") {
-          await deleteSecret(m[1]);
+          await deleteItem(m[1]);
+          return json({ ok: true });
+        }
+        // the eye icon: a secret's value (logged)
+        m = p.match(/^\/api\/vault\/([\w-]+)\/value$/);
+        if (m && req.method === "GET") return json(revealItem(m[1]));
+        m = p.match(/^\/api\/vault\/([\w-]+)\/projects$/);
+        if (m && req.method === "PUT") {
+          const b = await req.json();
+          return json(await setItemProjects(m[1], b.projectIds ?? []));
+        }
+        // take back "fetch without asking" from a project
+        m = p.match(/^\/api\/vault\/([\w-]+)\/grants\/([\w-]+)$/);
+        if (m && req.method === "DELETE") return json(revokeFetchGrant(m[1], m[2]));
+        // where a proxy item's real value may go
+        m = p.match(/^\/api\/vault\/([\w-]+)\/bindings$/);
+        if (m && req.method === "POST") {
+          const b = await req.json();
+          return json(addBinding(m[1], { host: b.host, path: b.path, method: b.method, header: b.header, expiresAt: b.expiresAt }), 201);
+        }
+        m = p.match(/^\/api\/vault\/([\w-]+)\/bindings\/([\w-]+)$/);
+        if (m && req.method === "DELETE") {
+          deleteBinding(m[1], m[2]);
           return json({ ok: true });
         }
       } catch (e) {
