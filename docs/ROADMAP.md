@@ -29,6 +29,10 @@ All on Apple silicon + macOS 26, through the Apple `container` driver
 Remaining before merge: Spike D **round 2** with real, short-lived tokens
 (create them as *proxy* vault items in the UI; see the spike README), and a
 real Claude `/login` + refresh through the proxy (Agent logins, below).
+Both are **ready to run** (prepared 2026-11-04): the step-by-step procedure,
+`round2-vm.sh` (VM checks) and `round2-report.ts` (request log + leak scan)
+are in [`spikes/d-credential-proxy/`](../spikes/d-credential-proxy/README.md#vm-experiments-round-2-real-tokens).
+Only the tokens and the run are left.
 Merge `feature/proxy` into `main` first, then this branch. In `acceptClient`,
 the cutoff check must stay before link handling.
 
