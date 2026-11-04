@@ -153,6 +153,13 @@ export const containerDriver: ProjectDriver = {
       await rm(opts.socket.host, { force: true }); // the runtime creates it
       res.push("--publish-socket", `${opts.socket.host}:${opts.socket.guest}`);
     }
+    // virtiofs, verified on container 1.4.1 (research/13, Spike F.1): ownership
+    // maps to the guest user both ways, a single file can be mounted too, and
+    // the mounts come back after a stop / start
+    for (const m of opts?.mounts ?? []) {
+      if (/[:,]/.test(m.host + m.guest)) throw new Error(`cannot mount a path with ':' or ',' in it: ${m.host}`);
+      res.push("--volume", `${m.host}:${m.guest}`);
+    }
     const r = await run(["run", "--name", ref, "--detach", ...res, image], undefined, LIFECYCLE_MS);
     if (r.exitCode !== 0) throw failed("container run failed", r.stderr);
   },

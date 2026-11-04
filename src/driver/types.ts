@@ -81,10 +81,13 @@ export interface ProjectDriver {
   /** `network: "none"` boots the guest with no network interface. `socket`
    *  publishes a unix socket that a process in the guest listens on (`guest`)
    *  as a socket on the host (`host`) — the host dials in; it is the one
-   *  channel a network-less guest has. */
+   *  channel a network-less guest has. `mounts` shares host folders (or single
+   *  files) into the guest, read-write, for the VM's whole life — a guest cannot
+   *  add one later. */
   create(ref: string, image: string, opts?: {
     cpus?: number; memoryMB?: number; diskGB?: number; network?: string;
     socket?: { host: string; guest: string };
+    mounts?: { host: string; guest: string }[];
   }): Promise<void>;
   destroy(ref: string): Promise<void>;
   /** Boot a stopped VM again; its disk is as it was left. */

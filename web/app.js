@@ -606,7 +606,7 @@ document.addEventListener("click", async (e) => {
     } else if (b.dataset.memory) {
       await changeMemory(b.dataset.memory, b.dataset.name, Number(b.dataset.mb) || null, b.dataset.running === "1");
     } else if (b.dataset.rebuild) {
-      if (confirm(`Rebuild "${b.dataset.name}"? The VM is destroyed and recreated from the project's original source (local folder re-copied, or git remote re-cloned). Unsynced work inside the VM will be lost.`)) {
+      if (confirm(`Rebuild "${b.dataset.name}"? The VM is destroyed and recreated from the project's original source (local folder re-copied, or git remote re-cloned). Unsynced work inside the VM will be lost; the agents' conversation history is kept.`)) {
         b.disabled = true; b.textContent = "Rebuilding…";
         try {
           await api(`/api/projects/${b.dataset.rebuild}/rebuild`, { method: "POST", body: {} });
@@ -615,7 +615,7 @@ document.addEventListener("click", async (e) => {
         } finally { b.disabled = false; b.textContent = "Rebuild"; }
       }
     } else if (b.dataset.destroy) {
-      if (confirm(`Destroy project "${b.dataset.name}"? The VM and any unsynced work in it are deleted.`)) {
+      if (confirm(`Destroy project "${b.dataset.name}"? The VM and any unsynced work in it are deleted. The agents' conversation history is kept, and comes back if you create a project with the same name.`)) {
         await api(`/api/projects/${b.dataset.destroy}`, { method: "DELETE" });
         if (location.hash.startsWith("#project/")) location.hash = "projects";
         else { refreshProjects(); refreshNavTree(); }
@@ -786,12 +786,24 @@ function syncSrcMode() {
   form.cloneRemote.required = mode === "git";
 }
 
+// agent history kept per project name: a new project of that name gets it back
+let historyCache = [];
+function showCreateHistory() {
+  const el = $("#create-history");
+  const name = $("#create-form").name.value.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
+  const h = historyCache.find((x) => x.name === name);
+  el.hidden = !h;
+  if (h) el.textContent = `Agent history from an earlier “${name}” will be mounted — ${h.tools.map((t) => t.tool).join(", ")} · ${fmtBytes(h.bytes)}.`;
+}
+$("#create-form").name.addEventListener("input", showCreateHistory);
+
 function openCreateForm() {
   $("#create-form").hidden = false;
   $("#projects").hidden = true;
   $("#btn-new").hidden = true;
   loadCreateToolchain();
   syncSrcMode();
+  api("/api/history").then((h) => { historyCache = h; showCreateHistory(); }).catch(() => {});
 }
 function closeCreateForm() {
   $("#create-form").hidden = true;

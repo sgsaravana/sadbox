@@ -128,6 +128,7 @@
         <form id="create-form" class="panel create-panel" hidden>
           <h2>New project</h2>
           <label>Name <input name="name" required placeholder="my-feature" pattern="[a-zA-Z0-9-]+"></label>
+          <p id="create-history" class="hint" hidden></p>
           <div class="seg" id="src-mode">
             <label class="seg-opt"><input type="radio" name="srcMode" value="local" checked><span>📁 Local folder</span></label>
             <label class="seg-opt"><input type="radio" name="srcMode" value="git"><span>⎇ Git repository</span></label>

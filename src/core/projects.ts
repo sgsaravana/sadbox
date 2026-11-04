@@ -18,6 +18,7 @@ import { duringSetup } from "../net/setup";
 import { type ToolInfo } from "./toolchain";
 import { ensureBaseImage } from "./baseimage";
 import { isEnvFile } from "./envfiles";
+import { copyOutHistory, historyOf, linkHistory, prepareHistory } from "./history";
 import { forgetVitals, liveStats, liveToolchain, QUERY_TIMEOUT_MS } from "./vitals";
 
 const driver = getDriver();
@@ -38,6 +39,7 @@ export interface ProjectRow {
   branch: string | null;      // checked out in the VM when last seen (null: never asked)
   memory_mb: number | null;   // the VM's memory (null: created before this was recorded)
   net_cutoff: number;         // 1 = all egress refused by the proxy (see net/cutoff.ts)
+  history_mounted: number;    // 1 = agent history is mounted from the store (core/history.ts)
   error: string | null;
   created_at: string;
 }
@@ -231,15 +233,21 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   const memoryMB = p.memory_mb ?? s.defaultMemoryMB; // the project's own, once it has one
   db.query("UPDATE projects SET memory_mb = ? WHERE id = ?").run(memoryMB, p.id);
   noteBranch(p.id, branchFor(p.name)); // a new VM starts on its own branch
+  // the agents' history for this project name, kept on the host (and whatever
+  // an earlier project of the same name left there)
+  const mounts = prepareHistory(p.name);
   await driver.create(ref, p.image, {
     cpus: s.defaultCpus, memoryMB, diskGB: s.defaultDiskGB, network: config.network,
     socket: isolated ? { host: openProjectSocket(p.id), guest: config.guestCarrierSocket } : undefined,
+    mounts,
   });
+  db.query("UPDATE projects SET history_mounted = 1 WHERE id = ?").run(p.id);
 
   // a sized workdir volume mounts root-owned — hand it to the agent user
   if (s.defaultDiskGB) {
     await driver.exec(ref, ["chown", "agent:agent", config.guestWorkdir], { user: "root" });
   }
+  await linkHistory(ref);
 
   // Trust the proxy CA + point the guest's tools at the proxy — before anything
   // below needs the network. For a network-less VM the proxy is the only way
@@ -373,6 +381,8 @@ export async function createProject(opts: {
   ).run(id, name, image, cloneMode ? "" : opts.sourcePath!,
         JSON.stringify(opts.apps ?? []), gitRemote, gitTokenEnc);
   for (const n of notes) logEvent(id, "image", n);
+  const earlier = historyOf(name);
+  if (earlier) logEvent(id, "history", `agent history of an earlier ${name} mounted (${earlier.tools.map((t) => t.tool).join(", ")}, ${mb(earlier.bytes)})`);
   logEvent(id, "create.start", cloneMode ? `${name} cloning ${gitRemote}` : `${name} from ${opts.sourcePath}`);
 
   try {
@@ -559,9 +569,37 @@ export async function setGitRemote(id: string, git: { remote?: string; token?: s
   return { git_remote: remote, has_git_token: tokenEnc != null };
 }
 
+/** A VM created before history was mounted keeps its agents' history on its own
+ *  disk: copy it into the project's store before the VM goes (research/13, A3).
+ *  A stopped VM is booted for it. Throws if the history is there but could not
+ *  be copied; a VM that is gone or will not boot is skipped (and logged). */
+async function rescueHistory(p: ProjectRow): Promise<void> {
+  if (p.history_mounted) return;
+  const ref = refFor(p.name);
+  const state = (await driver.inspect(ref)).state;
+  if (state === "unknown") return; // no VM left to copy from
+  let booted = false;
+  if (state !== "running") {
+    try { await driver.start(ref); booted = true; } catch (e) {
+      logEvent(p.id, "history.copyout", `skipped — the VM would not start: ${e instanceof Error ? e.message : e}`);
+      return;
+    }
+  }
+  try {
+    const n = await copyOutHistory(p.name, ref);
+    logEvent(p.id, "history.copyout", n ? `${n} file(s) of agent history copied out of the VM, kept for ${p.name}` : "the VM had no agent history");
+  } catch (e) {
+    logEvent(p.id, "history.copyout.error", String(e));
+    if (booted) await driver.stop(ref).catch(() => {});
+    throw new Error(`could not copy the agent history out of the VM first: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
 export async function destroyProject(id: string): Promise<void> {
   const p = getProject(id);
   if (!p) throw new Error("project not found");
+  // best effort here: a destroy must always be possible
+  await rescueHistory(p).catch(() => {});
   await driver.destroy(refFor(p.name));
   purgeProjectVault(id);   // its vault access and placeholders go; the items stay
   purgeProjectNet(id);     // per-project net rules die with the VM too
@@ -595,6 +633,7 @@ export async function rebuildProject(id: string): Promise<ProjectRow> {
   // first created with), built afresh if its recipe has changed, so tools
   // added to the base after this project — e.g. nvm — land in the fresh VM.
   const image = await resolveImage((m) => logEvent(id, "image", m));
+  await rescueHistory(p); // an older VM's agent history, before the VM goes
   logEvent(id, "rebuild.start",
     (cloneMode ? `re-clone ${p.git_remote}` : `re-copy ${p.source_path}`) +
     (image !== p.image ? ` · image ${p.image} → ${image}` : ""));
@@ -801,6 +840,8 @@ export async function projectsWithLiveState() {
     live: live.get(refFor(r.name)) ?? null,
   }));
 }
+
+const mb = (n: number) => `${(n / 1048576).toFixed(n < 10 * 1048576 ? 1 : 0)} MB`;
 
 function shellArg(v: string): string {
   return `'${v.replace(/'/g, `'\\''`)}'`;

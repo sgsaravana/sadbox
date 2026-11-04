@@ -1,6 +1,7 @@
 # Agent sessions — logins and conversation history kept by the supervisor
 
-> **Status: planned 2026-11-03** (agreed with the owner, not built yet). Step 0
+> **Status: step 5 built 2026-11-04** (history store and mounts — see "As
+> built — step 5"); step 6 (logins) not yet. Planned 2026-11-03. Step 0
 > (Spike F, `spikes/f-agent-sessions/`) ran the same day: history mounts hold;
 > **copying OAuth logins does not** (F.3) — replaced for OAuth by A7, which
 > Spike F.5 confirmed end to end (2026-11-04). See "After Spike F". Goes with [12-vaults.md](12-vaults.md).
@@ -78,6 +79,69 @@ two VMs (two kernels) at once is how databases get corrupted.
 3. **Live pick-up**: does a running tool notice a replaced login file?
 4. **Body swapping** (for Vaults V3): substituting in request bodies through the
    proxy, including Content-Length / chunked bodies.
+
+## As built — step 5 (2026-11-04)
+
+`src/core/history.ts`; wired into create / rebuild / destroy in `src/core/projects.ts`.
+
+**Store**: `~/.sadbox/agents/history/<project-name>/` (A1), one folder per tool.
+Only history — logins sitting next to it (`.credentials.json`, omp's
+`agent.db`, opencode's `auth.json`) are left out.
+
+| Tool | In the VM | In the store | How |
+|---|---|---|---|
+| Claude | `~/.claude/projects/` (transcripts) | `claude/projects/` | folder mount |
+| Claude | `~/.claude/file-history/` (what `/rewind` restores) | `claude/file-history/` | folder mount |
+| Claude | `~/.claude/history.jsonl` (prompt history) | `claude/history.jsonl` | **file** mount |
+| omp | `~/.omp/agent/sessions/` | `omp/sessions/` | folder mount |
+| omp | `~/.omp/agent/history.db` | `omp/db/history.db` | symlink into `~/.sadbox/history/omp` (mounted `omp/db/`) |
+| opencode | `~/.local/share/opencode/opencode.db` (sessions) | `opencode/db/opencode.db` | symlink into `~/.sadbox/history/opencode` (mounted `opencode/db/`) |
+| opencode | `~/.local/share/opencode/snapshot/` | `opencode/snapshot/` | folder mount |
+
+Why the mix, found while building:
+
+- **A guest cannot mount anything** (`mount --bind` as root: permission
+  denied), so every mount is fixed by `container run --volume` at create.
+- **Claude opens `history.jsonl` with `O_NOFOLLOW`** ("history.jsonl is not a
+  regular file") — a symlink would break it. A single-file virtiofs mount
+  works (checked: written through to the host, back after stop / start).
+- **SQLite files are linked, not mounted**: a file mount would leave the
+  `-wal` / `-shm` files on the VM's disk; through a symlink SQLite puts them
+  beside the real file, in the store (checked with bun:sqlite in a VM;
+  opencode created its `opencode.db` through the link).
+- The runtime makes the mount points' parent folders **root-owned**; they are
+  handed to `agent` after create (`linkHistory`), not recursively.
+
+**Older VMs** (`projects.history_mounted = 0`, every VM from before this):
+Rebuild and Destroy first copy the VM's history into the store (A3) —
+tmux is ended so the agents stop writing, the paths above are tarred in the VM
+(links skipped), unpacked on the host into a temp folder (bsdtar: no absolute
+paths, no `..`, no extracting through links) and only plain files and folders
+are copied into the store. The VM's copy of a file wins; Claude's prompt
+history is appended to what an earlier project of the name left; a database
+replaces its `-wal` / `-shm` as a set. A stopped VM is booted for it. A copy
+that fails stops a Rebuild (VM untouched) but never a Destroy; a VM that will
+not boot is skipped. Either way it is logged (`history.copyout`).
+
+**Safety**: the store is written by a VM. Before every create each path from
+the data dir down is checked with `lstat` — a symlink where a mount source
+should be is refused, since mounting it would hand the VM that part of this
+machine. Sizes are counted without following links. The VM only ever sees its
+own project's folders, never the store's parents.
+
+**UI / API**: `GET /api/history` (stores with their size per tool; empty ones
+are left out). The create form says when history from an earlier project of
+that name will be mounted; Rebuild and Destroy say the history is kept.
+
+**Tested for real** (2026-11-04, a throwaway supervisor and VM): the seven
+mounts, owners and links in a fresh VM; history written in it (prompt history,
+a transcript, an omp database in WAL mode) back in a recreated VM of the same
+name, with the create logged; copy-out of `spike-login`'s real history (37
+files, Claude / omp / opencode; no links, no login files).
+
+**Not yet**: deleting a store, and seeing them all, is the Agents page (step 6).
+Claude still deletes its own transcripts older than `cleanupPeriodDays` (30 by
+default) — the mount does not change that.
 
 ## Build steps (agent sessions)
 

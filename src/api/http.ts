@@ -12,6 +12,7 @@ import { pushProject } from "../core/push";
 import { terminalLinks } from "../core/links";
 import { getSettings, updateSettings } from "../core/settings";
 import { baseImageToolchain } from "../core/toolchain";
+import { listHistory } from "../core/history";
 import { createRule, deleteRule, listRules, moveRule, createHeaderRule, deleteHeaderRule, listHeaderRules } from "../net/rules";
 import { isCutOff, setCutoff } from "../net/cutoff";
 import { resolveApproval, listPending, pendingCounts } from "../net/approvals";
@@ -358,6 +359,10 @@ export function startServer() {
         if (p === "/api/system/status" && req.method === "GET") {
           return json(await getDriver().serviceStatus());
         }
+
+        // agent history kept per project name (core/history.ts): what a new
+        // project of that name would get mounted
+        if (p === "/api/history" && req.method === "GET") return json(listHistory());
 
         // toolchain baked into the image new projects boot from (name + version)
         if (p === "/api/toolchain" && req.method === "GET") {
