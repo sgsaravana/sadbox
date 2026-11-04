@@ -34,6 +34,7 @@ import { bodyRedactor, redactResponse, substituteRequest, swapsBodies, textualTy
 import { CUTOFF_MESSAGE, isCutOff } from "./cutoff";
 import { serveVault, VAULT_HOST } from "./vaultfetch";
 import { answerTokenRequest, CLAUDE_LOGIN_NAME, isClaudeTokenRequest } from "./claudeoauth";
+import { carryLink, linkTarget } from "./links";
 
 const driver = getDriver();
 // local copy of core/projects' refFor to avoid a proxy<->projects import cycle
@@ -224,7 +225,9 @@ function makeHandler(scheme: "http" | "https") {
       return;
     }
 
-    const target = await resolveTarget(host);
+    // link names are handled before a request gets here (see acceptClient); one
+    // arriving any other way — a Host header inside some other tunnel — is refused
+    const target = linkTarget(host) !== undefined ? { address: "", reach: "self" as Reach } : await resolveTarget(host);
     let verdict = evaluate(projectId, { host, path, method });
     if (target?.reach === "self") verdict = { decision: "block" };
     else {
@@ -593,6 +596,14 @@ function acceptClient(socket: net.Socket, knownProject?: string, onActive?: () =
       return;
     }
     const who = { clientIp: ip, projectId: knownProject };
+    // <project>.sadbox.internal: another VM, reachable only through a link
+    let asked = "";
+    if (method === "CONNECT") asked = splitHostPort(target || "", 443).host;
+    else try { asked = new URL(target || "").hostname; } catch {}
+    if (linkTarget(asked) !== undefined) {
+      carryLink(socket, buf, method, target || "", knownProject ?? (await projectForIp(ip))?.id ?? null);
+      return;
+    }
     if (method === "CONNECT") {
       const { host, port: connectPort } = splitHostPort(target || "", 443);
       try {

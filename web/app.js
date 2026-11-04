@@ -510,7 +510,7 @@ async function refreshProjects() {
       <h3><a href="#project/${p.id}"><span class="dot ${state}"></span>${p.name}</a></h3>
       <div class="meta">
         ${state} · ${p.image}${p.live?.address ? ` · ${p.live.address}` : ""}<br>
-        ${p.source_path ? escapeHtml(p.source_path) + "<br>" : ""}branch ${escapeHtml(p.branch || `sadbox/${p.name}`)}${gitLine}${p.error ? `<br><span style="color:var(--bad)">${escapeHtml(p.error)}</span>` : ""}
+        ${p.source_path ? escapeHtml(p.source_path) + "<br>" : ""}${p.empty ? "empty VM — repositories cloned in it" : `branch ${escapeHtml(p.branch || `sadbox/${p.name}`)}`}${gitLine}${p.error ? `<br><span style="color:var(--bad)">${escapeHtml(p.error)}</span>` : ""}
       </div>
       <div class="row">
         <button data-details="${p.id}">Details</button>
@@ -693,7 +693,10 @@ document.addEventListener("click", async (e) => {
     } else if (b.dataset.memory) {
       await changeMemory(b.dataset.memory, b.dataset.name, Number(b.dataset.mb) || null, b.dataset.running === "1");
     } else if (b.dataset.rebuild) {
-      if (confirm(`Rebuild "${b.dataset.name}"? The VM is destroyed and recreated from the project's original source (local folder re-copied, or git remote re-cloned). Unsynced work inside the VM will be lost; the agents' conversation history is kept.`)) {
+      const what = b.dataset.empty === "1"
+        ? `The VM is destroyed and an empty one takes its place: the repositories cloned in it go too — push what you want to keep first.`
+        : `The VM is destroyed and recreated from the project's original source (local folder re-copied, or git remote re-cloned). Unsynced work inside the VM will be lost.`;
+      if (confirm(`Rebuild "${b.dataset.name}"? ${what} The agents' conversation history is kept.`)) {
         b.disabled = true; b.textContent = "Rebuilding…";
         try {
           await api(`/api/projects/${b.dataset.rebuild}/rebuild`, { method: "POST", body: {} });
@@ -988,7 +991,12 @@ $("#create-form").onsubmit = async (e) => {
   const status = $("#create-status");
   const mode = f.get("srcMode") || "local";
   let sourcePath, git;
-  if (mode === "git") {
+  let empty = false;
+  if (mode === "empty") {
+    // nothing to seed: repositories are cloned from the terminal
+    empty = true;
+    status.textContent = "Creating (boot, a few seconds)…";
+  } else if (mode === "git") {
     // clone-in-VM mode: the git remote IS the source; no local folder
     git = { remote: (f.get("cloneRemote") || "").trim(), token: (f.get("cloneToken") || "").trim() || undefined };
     status.textContent = "Creating (boot + git clone, a few seconds)…";
@@ -1005,6 +1013,7 @@ $("#create-form").onsubmit = async (e) => {
       body: {
         name: f.get("name"),
         sourcePath, // undefined ⇒ backend clones the git remote instead
+        empty,
         apps: (f.get("apps") || "").split(",").map((s) => s.trim()).filter(Boolean),
         secretIds: [...e.target.querySelectorAll("input[name=secret]:checked")].map((c) => c.value),
         git,
@@ -1082,6 +1091,7 @@ function showDetailSkeleton() {
        <div class="detail-grid">${skeletonPanel(6) + skeletonPanel(6) + skeletonPanel(5) + skeletonPanel(4)}</div>
      </div>
      <div id="detail-ports"></div>
+     <div id="detail-links"></div>
      <div id="detail-net">${skeletonNet()}</div>
      <div class="sync-result"></div>`;
 }
@@ -1089,6 +1099,7 @@ function showDetailSkeleton() {
 async function openDetail(id) {
   showDetailSkeleton();
   openPorts(id);
+  openLinks(id);
   openNet(id);
   await renderDetail(id);
   clearInterval(detailTimer);
@@ -1170,7 +1181,7 @@ function paintDetail(d) {
     ${d.sync_folder ? pushButton(d) : ""}
     <button data-secrets="${d.id}" data-name="${escapeHtml(d.name)}">${ICON.secrets}Vault…</button>
     ${powerButton(d)}
-    <button data-rebuild="${d.id}" data-name="${d.name}" title="Destroy the VM and recreate it from the original source">${ICON.rebuild}Rebuild</button>
+    <button data-rebuild="${d.id}" data-name="${d.name}" data-empty="${d.empty ? 1 : 0}" title="${d.empty ? "Destroy the VM and start an empty one" : "Destroy the VM and recreate it from the original source"}">${ICON.rebuild}Rebuild</button>
     <button class="danger" data-destroy="${d.id}" data-name="${d.name}">${ICON.destroy}Destroy</button>`;
 
   stats.innerHTML = `
@@ -1211,8 +1222,9 @@ function paintDetail(d) {
       <div class="panel stat">
         <h3>Folder & git</h3>
         <dl>
-          <dt>Source</dt><dd class="mono">${d.source_path ? escapeHtml(d.source_path) : "git clone"}</dd>
-          ${d.source_path ? "" : `<dt>Local folder</dt><dd>${folderPending?.id === d.id
+          <dt>Source</dt><dd class="mono">${d.source_path ? escapeHtml(d.source_path) : d.empty ? "none — empty VM" : "git clone"}</dd>
+          ${d.empty ? `<dt>Repositories</dt><dd class="dim">cloned in the terminal; the vault's tokens sign git in</dd>` : ""}
+          ${d.source_path || d.empty ? "" : `<dt>Local folder</dt><dd>${folderPending?.id === d.id
             ? `<span class="spinner"></span> <span class="dim">${folderPending.label}</span>`
             : d.sync_path
             ? `<span class="mono">${escapeHtml(d.sync_path)}</span>
@@ -1221,14 +1233,14 @@ function paintDetail(d) {
             : `<span class="dim">not connected</span>
                <button class="mini" data-link-folder="${d.id}" title="Pick a local folder (a git repository or any other folder) to sync this project's work into">Connect a folder…</button>`}</dd>`}
           <dt>Workdir (in VM)</dt><dd class="mono">${escapeHtml(d.workdir)}</dd>
-          <dt>Work branch</dt><dd class="mono">${escapeHtml(d.branch)}</dd>
+          ${d.empty ? "" : `<dt>Work branch</dt><dd class="mono">${escapeHtml(d.branch)}</dd>
           <dt>Uncommitted</dt><dd>${d.git.dirty ?? 0} file(s)</dd>
           <dt>Git remote</dt><dd>${d.git_remote
             ? `<span class="mono">${escapeHtml(d.git_remote)}${d.has_git_token ? " 🔑" : ""}</span>`
             : `<span class="dim">none</span>`}
             <button class="mini" data-git-remote="${d.id}" data-name="${escapeHtml(d.name)}" data-current="${escapeHtml(d.git_remote || "")}"
               data-token="${d.has_git_token ? 1 : 0}" data-cloned="${d.source_path ? 0 : 1}"
-              ${state === "running" ? "" : `disabled title="Start the VM to change its git remote"`}>${d.git_remote ? "Change" : "Connect a remote…"}</button></dd>
+              ${state === "running" ? "" : `disabled title="Start the VM to change its git remote"`}>${d.git_remote ? "Change" : "Connect a remote…"}</button></dd>`}
         </dl>
       </div>
 
@@ -1299,6 +1311,68 @@ async function renderPorts(id) {
       <button class="link-del" data-del-port="${f.id}" title="remove">✕</button>
     </div>`;
   }).join("");
+}
+
+// ---- links panel (this VM may reach one port of another project's VM) ----
+async function openLinks(id) {
+  const el = $("#detail-links");
+  if (!el) return;
+  el.innerHTML = `
+  <div class="panel net-panel">
+    <div class="net-head"><h3>Links to other projects</h3></div>
+    <div class="net-section">
+      <div class="net-subhead">This project can reach <span class="hint">from inside this VM, at the address shown — over HTTP(S), one port each; every other port and project stays closed</span></div>
+      <div id="link-out"></div>
+      <form id="link-add" class="net-form">
+        <select name="to" required><option value="">project…</option></select>
+        <input name="port" type="number" min="1" max="65535" placeholder="its port (e.g. 3000)" required>
+        <button type="submit">Allow</button>
+      </form>
+    </div>
+    <div class="net-section">
+      <div class="net-subhead">Can be reached from <span class="hint">links other projects have to this one; this VM gets no access back</span></div>
+      <div id="link-in"></div>
+    </div>
+  </div>`;
+  el.addEventListener("click", async (e) => {
+    const del = e.target.closest("[data-del-link]");
+    if (!del) return;
+    try { await api(`/api/projects/${id}/links/${del.dataset.delLink}`, { method: "DELETE" }); } catch {}
+    renderLinks(id);
+  });
+  el.querySelector("#link-add").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try {
+      await api(`/api/projects/${id}/links`, { method: "POST", body: { to: f.get("to"), port: Number(f.get("port")) } });
+      e.target.reset(); renderLinks(id);
+    } catch (err) { alert(err.message); }
+  });
+  try {
+    const others = (await api("/api/projects")).filter((p) => p.id !== id);
+    el.querySelector("select[name=to]").innerHTML = others.length
+      ? `<option value="">project…</option>` + others.map((p) => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("")
+      : `<option value="">no other projects</option>`;
+  } catch {}
+  renderLinks(id);
+}
+
+async function renderLinks(id) {
+  const out = $("#link-out"), inc = $("#link-in");
+  if (!out || !inc) return;
+  let data;
+  try { data = await api(`/api/projects/${id}/links`); }
+  catch (e) { out.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  out.innerHTML = data.outgoing.length ? data.outgoing.map((l) => `<div class="rule">
+      <span class="ract allow">reach</span>
+      <span class="rspec"><code class="link-addr">http://${escapeHtml(l.host)}</code> → <a href="#project/${l.project}">${escapeHtml(l.name)}</a> port ${l.port}</span>
+      <button class="link-del" data-del-link="${l.id}" title="remove">✕</button>
+    </div>`).join("") : `<div class="empty">no links — this VM cannot reach any other project</div>`;
+  inc.innerHTML = data.incoming.length ? data.incoming.map((l) => `<div class="rule">
+      <span class="ract allow">from</span>
+      <span class="rspec"><a href="#project/${l.project}">${escapeHtml(l.name)}</a> → this VM's port ${l.port}</span>
+      <button class="link-del" data-del-link="${l.id}" title="remove">✕</button>
+    </div>`).join("") : `<div class="empty">no project can reach this one</div>`;
 }
 
 // ---- network activity panel (per-project egress proxy) ----

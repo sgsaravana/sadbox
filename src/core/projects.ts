@@ -14,6 +14,7 @@ import { purgeProjectNet } from "../net/rules";
 import { clearProjectApprovals } from "../net/approvals";
 import { clearProjectFeed } from "../net/events";
 import { purgeProjectForwards } from "../net/forwards";
+import { purgeProjectLinks } from "../net/links";
 import { duringSetup } from "../net/setup";
 import { type ToolInfo } from "./toolchain";
 import { ensureBaseImage } from "./baseimage";
@@ -41,6 +42,7 @@ export interface ProjectRow {
   memory_mb: number | null;   // the VM's memory (null: created before this was recorded)
   net_cutoff: number;         // 1 = all egress refused by the proxy (see net/cutoff.ts)
   history_mounted: number;    // 1 = agent history is mounted from the store (core/history.ts)
+  empty: number;              // 1 = no folder, no remote: an empty workdir to clone into
   error: string | null;
   created_at: string;
 }
@@ -55,6 +57,10 @@ export const refFor = (name: string) => `sadbox-${name}`;
  *  from, or one connected later to a project cloned from a git URL. */
 export const syncFolderOf = (p: Pick<ProjectRow, "source_path" | "sync_path">) => p.source_path || p.sync_path || "";
 export const branchFor = (name: string) => `sadbox/${name}`;
+/** An empty project: no local folder, no git remote — the VM starts with an
+ *  empty workdir, and you clone what you need into it from the terminal (with
+ *  the vault's tokens, through the git credential helper — net/guest.ts). */
+export const isEmptyProject = (p: Pick<ProjectRow, "empty">) => p.empty === 1;
 
 async function hostGit(repo: string, args: string[]): Promise<{ code: number; out: string }> {
   const proc = Bun.spawn(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
@@ -224,7 +230,8 @@ async function installShellHooks(ref: string) {
  *  freshly-destroyed ref, so rebuild is just destroy + provisionVM. */
 async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } = {}) {
   const ref = refFor(p.name);
-  const cloneMode = !p.source_path; // no local folder → clone the git remote
+  const empty = isEmptyProject(p);
+  const cloneMode = !p.source_path && !empty; // no local folder → clone the git remote
   const s = getSettings();          // default resource allocation
   // No network interface at all: the VM cannot reach the internet, this
   // machine, the LAN or other VMs — whatever it runs, as whichever user. Its one
@@ -233,7 +240,9 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   forgetGuestTools(ref); // a new VM under this name has a fresh filesystem
   const memoryMB = p.memory_mb ?? s.defaultMemoryMB; // the project's own, once it has one
   db.query("UPDATE projects SET memory_mb = ? WHERE id = ?").run(memoryMB, p.id);
-  noteBranch(p.id, branchFor(p.name)); // a new VM starts on its own branch
+  // a new VM starts on its own branch (an empty one on none: its workdir is no repository)
+  if (empty) db.query("UPDATE projects SET branch = NULL WHERE id = ?").run(p.id);
+  else noteBranch(p.id, branchFor(p.name));
   // the agents' history for this project name, kept on the host (and whatever
   // an earlier project of the same name left there)
   const mounts = prepareHistory(p.name);
@@ -262,7 +271,16 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
     if (isolated) throw new Error(`could not connect the VM to the egress proxy: ${e instanceof Error ? e.message : e}`);
   }
 
-  if (cloneMode) {
+  if (empty) {
+    // nothing to seed: the workdir is where repositories get cloned, and commits
+    // in them need an author
+    const setup = await driver.exec(ref, ["sh", "-c",
+      `mkdir -p ${config.guestWorkdir} && ` +
+      `git config --global user.name "sadbox project ${p.name}" && ` +
+      `git config --global user.email "project@sadbox.local"`]);
+    if (setup.exitCode !== 0) throw new Error(`guest setup failed: ${setup.stderr}`);
+    db.query("UPDATE projects SET base_sha = NULL, last_synced_sha = NULL, source_branch = NULL WHERE id = ?").run(p.id);
+  } else if (cloneMode) {
     if (!p.git_remote) throw new Error("no git remote to clone from");
     // creds first (private repos), then clone straight into the workdir
     if (p.git_token_enc) await writeGitCredentials(ref, p.git_remote, decrypt(p.git_token_enc));
@@ -300,7 +318,7 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
 
   // external git remote + credentials — local mode only; clone mode already has
   // origin (from the clone) and credentials written above.
-  if (!cloneMode) await configureGitRemote(ref, p);
+  if (!cloneMode && !empty) await configureGitRemote(ref, p);
 
   // The base image is built once and its agents go stale, so bring claude, omp
   // and opencode to their latest releases in every new or rebuilt VM. Best
@@ -351,17 +369,24 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
 export async function createProject(opts: {
   name: string;
   sourcePath?: string;    // omit to create from a git remote (clone-in-VM mode)
+  empty?: boolean;        // neither: an empty workdir, to clone into from the terminal
   apps?: string[];
   secretIds?: string[];
   git?: GitSetup;
 }): Promise<ProjectRow> {
   const name = opts.name.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
   if (!name) throw new Error("invalid project name");
-  const cloneMode = !opts.sourcePath; // no local folder → clone the git remote in the VM
+  const empty = opts.empty === true;
+  const cloneMode = !opts.sourcePath && !empty; // no local folder → clone the git remote in the VM
+  if (empty && (opts.sourcePath || opts.git?.remote)) {
+    throw new Error("an empty project has no local folder or git remote — clone repositories from its terminal");
+  }
   if (opts.git?.remote && !/^https?:\/\//.test(opts.git.remote)) {
     throw new Error("git remote must be an http(s) URL");
   }
-  if (cloneMode) {
+  if (empty) {
+    // nothing to check: the VM starts with an empty workdir
+  } else if (cloneMode) {
     if (!opts.git?.remote) throw new Error("provide a local folder or a git repository URL");
   } else {
     if (!existsSync(opts.sourcePath!)) throw new Error(`source folder not found: ${opts.sourcePath}`);
@@ -379,14 +404,14 @@ export async function createProject(opts: {
   const gitTokenEnc = opts.git?.token ? encrypt(opts.git.token) : null;
   // base_sha/source_branch recorded by provisionVM once the workdir is seeded
   db.query(
-    `INSERT INTO projects (id, name, image, state, source_path, source_branch, base_sha, last_synced_sha, apps, git_remote, git_token_enc)
-     VALUES (?, ?, ?, 'creating', ?, NULL, NULL, NULL, ?, ?, ?)`,
-  ).run(id, name, image, cloneMode ? "" : opts.sourcePath!,
-        JSON.stringify(opts.apps ?? []), gitRemote, gitTokenEnc);
+    `INSERT INTO projects (id, name, image, state, source_path, source_branch, base_sha, last_synced_sha, apps, git_remote, git_token_enc, empty)
+     VALUES (?, ?, ?, 'creating', ?, NULL, NULL, NULL, ?, ?, ?, ?)`,
+  ).run(id, name, image, opts.sourcePath && !empty ? opts.sourcePath : "",
+        JSON.stringify(opts.apps ?? []), gitRemote, gitTokenEnc, empty ? 1 : 0);
   for (const n of notes) logEvent(id, "image", n);
   const earlier = historyOf(name);
   if (earlier) logEvent(id, "history", `agent history of an earlier ${name} mounted (${earlier.tools.map((t) => t.tool).join(", ")}, ${mb(earlier.bytes)})`);
-  logEvent(id, "create.start", cloneMode ? `${name} cloning ${gitRemote}` : `${name} from ${opts.sourcePath}`);
+  logEvent(id, "create.start", empty ? `${name}, empty workdir` : cloneMode ? `${name} cloning ${gitRemote}` : `${name} from ${opts.sourcePath}`);
 
   try {
     await provisionVM(getProject(id)!, { assignSecretIds: opts.secretIds });
@@ -473,9 +498,10 @@ async function loadDetails(id: string) {
     source_path: p.source_path,
     sync_path: p.sync_path,           // folder connected to a cloned project, if any
     sync_folder: syncFolderOf(p),     // where Sync back delivers ('' = nowhere yet)
+    empty: isEmptyProject(p),         // no folder, no remote: repositories are cloned in the terminal
     source_branch: p.source_branch,
     workdir: config.guestWorkdir,
-    branch: (guest.git_branch && noteBranch(p.id, guest.git_branch)) || getProject(p.id)?.branch || branchFor(p.name), // what is checked out now
+    branch: (guest.git_branch && noteBranch(p.id, guest.git_branch)) || getProject(p.id)?.branch || (isEmptyProject(p) ? null : branchFor(p.name)), // what is checked out now
     base_sha: p.base_sha,
     last_synced_sha: p.last_synced_sha,
     apps: JSON.parse(p.apps),
@@ -525,6 +551,7 @@ export async function connectSyncFolder(id: string, path: string | null) {
   const p = getProject(id);
   if (!p || p.state === "destroyed") throw new Error("project not found");
   if (p.source_path) throw new Error("this project was created from a local folder and already syncs there");
+  if (isEmptyProject(p)) throw new Error("an empty project has no repository of its own to sync — push from the repositories you cloned in it");
   if (path == null || !String(path).trim()) {
     db.query("UPDATE projects SET sync_path = NULL WHERE id = ?").run(id);
     await rm(join(config.dataDir, "sync", `${id}.git`), { recursive: true, force: true });
@@ -561,6 +588,8 @@ export async function setGitRemote(id: string, git: { remote?: string; token?: s
   if (!p || p.state === "destroyed") throw new Error("project not found");
   const remote = String(git.remote ?? "").trim();
   if (!/^https?:\/\//.test(remote)) throw new Error("git remote must be an http(s) URL");
+  // (it would also make a Rebuild clone this remote instead of starting empty)
+  if (isEmptyProject(p)) throw new Error("an empty project's workdir is not a repository — set the remote in the repository you cloned, from the terminal");
   const ref = refFor(p.name);
   if ((await driver.inspect(ref)).state !== "running") throw new Error("start the VM first — the remote is set inside it");
   const token = git.token?.trim();
@@ -608,6 +637,7 @@ export async function destroyProject(id: string): Promise<void> {
   purgeProjectLogins(id);  // …and its login placeholders; the logins stay
   purgeProjectNet(id);     // per-project net rules die with the VM too
   purgeProjectForwards(id); // …and so do its port forwards (frees the host ports)
+  purgeProjectLinks(id);    // …and its links, both ways
   await rm(join(config.dataDir, "sync", `${id}.git`), { recursive: true, force: true });
   closeProjectSocket(id);
   clearProjectApprovals(id);
@@ -626,8 +656,11 @@ export async function rebuildProject(id: string): Promise<ProjectRow> {
   const p = getProject(id);
   if (!p) throw new Error("project not found");
   if (p.state === "destroyed") throw new Error("project has been destroyed");
-  const cloneMode = !p.source_path;
-  if (cloneMode) {
+  const empty = isEmptyProject(p);
+  const cloneMode = !p.source_path && !empty;
+  if (empty) {
+    // starts empty again: what was cloned into the old VM goes with it
+  } else if (cloneMode) {
     if (!p.git_remote) throw new Error("this project has no source to rebuild from");
   } else if (!existsSync(p.source_path)) {
     throw new Error(`source folder no longer exists, cannot rebuild: ${p.source_path}`);
@@ -639,7 +672,7 @@ export async function rebuildProject(id: string): Promise<ProjectRow> {
   const image = await resolveImage((m) => logEvent(id, "image", m));
   await rescueHistory(p); // an older VM's agent history, before the VM goes
   logEvent(id, "rebuild.start",
-    (cloneMode ? `re-clone ${p.git_remote}` : `re-copy ${p.source_path}`) +
+    (empty ? "empty workdir" : cloneMode ? `re-clone ${p.git_remote}` : `re-copy ${p.source_path}`) +
     (image !== p.image ? ` · image ${p.image} → ${image}` : ""));
   db.query("UPDATE projects SET state = 'creating', error = NULL, image = ? WHERE id = ?").run(image, id);
   try {
@@ -804,7 +837,7 @@ export function noteBranch(id: string, branch: string): string {
   if (e) e.at = Date.now(); else branchAsked.set(id, { at: Date.now() });
   return branch;
 }
-async function liveBranch(p: ProjectRow, running: boolean): Promise<string> {
+async function liveBranch(p: ProjectRow, running: boolean): Promise<string | null> {
   let e = branchAsked.get(p.id);
   if (running && (!e || Date.now() - e.at > BRANCH_TTL_MS)) {
     const first = !e;
@@ -819,7 +852,7 @@ async function liveBranch(p: ProjectRow, running: boolean): Promise<string> {
     // with nothing recorded yet the answer is worth a short wait; otherwise the last one serves while it refreshes
     if (first && !p.branch) await Promise.race([entry.asking, new Promise((r) => setTimeout(r, 1500))]);
   }
-  return getProject(p.id)?.branch ?? branchFor(p.name);
+  return getProject(p.id)?.branch ?? (isEmptyProject(p) ? null : branchFor(p.name));
 }
 
 export async function projectsWithLiveState() {
@@ -836,6 +869,7 @@ export async function projectsWithLiveState() {
     state: settle(r, live.get(refFor(r.name))),
     source_path: r.source_path,
     sync_folder: syncFolderOf(r),
+    empty: isEmptyProject(r),
     source_branch: r.source_branch,
     git_remote: r.git_remote,
     has_git_token: r.git_token_enc != null,

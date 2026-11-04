@@ -60,7 +60,10 @@ for (const [col, ddl] of [["git_remote", "git_remote TEXT"], ["git_token_enc", "
   ["net_cutoff", "net_cutoff INTEGER NOT NULL DEFAULT 0"],
   // history_mounted: 1 = the VM was created with the project's agent history
   // mounted (research/13, A2); 0 = an older VM that keeps it on its own disk
-  ["history_mounted", "history_mounted INTEGER NOT NULL DEFAULT 0"]]) {
+  ["history_mounted", "history_mounted INTEGER NOT NULL DEFAULT 0"],
+  // empty: 1 = created with neither a folder nor a git remote — the VM starts
+  // with an empty workdir and repositories are cloned into it from the terminal
+  ["empty", "empty INTEGER NOT NULL DEFAULT 0"]]) {
   const has = db.query<{ name: string }, []>("PRAGMA table_info(projects)").all().some((c) => c.name === col);
   if (!has) db.run(`ALTER TABLE projects ADD COLUMN ${ddl}`);
 }
@@ -340,6 +343,18 @@ db.run(`
     provider TEXT NOT NULL,
     hash TEXT NOT NULL,
     PRIMARY KEY (project_id, tool, provider)
+  )`);
+
+// Project links (see net/links.ts): from_project may reach `port` inside
+// to_project's VM, as <to-name>.sadbox.internal:<port> — one way, one port.
+db.run(`
+  CREATE TABLE IF NOT EXISTS project_links (
+    id TEXT PRIMARY KEY,
+    from_project TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    to_project TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    port INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (from_project, to_project, port)
   )`);
 
 // Browser sessions (see core/auth.ts). Only a hash of each token is stored.
