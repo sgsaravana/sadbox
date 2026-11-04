@@ -4,7 +4,8 @@ Supervisor for **microVM AI-agent sandboxes** on macOS (Apple silicon, macOS 26+
 — see [Supported platforms](#supported-platforms)). Spin up isolated Linux
 microVMs — each one a **project** — with a copy of a source folder and Claude
 Code + toolchain baked in; watch and steer the agent through a browser terminal
-attached to tmux inside the VM; manage per-project secrets; pull the agent's
+attached to tmux inside the VM; give it vault variables and secrets it can use
+but never read; keep agents' logins and history across VMs; pull the agent's
 work back into your repo as git commits — on demand, with a diff preview,
 without the agent ever touching your original folder.
 
@@ -15,17 +16,21 @@ not shared-kernel containers.
 ## Status
 
 v0 scaffold — the full vertical slice works: create → browser tmux terminal →
-secrets → git sync-back → destroy, with a browser editor that can stage,
+vault → agent logins & history → git sync-back → destroy, with a browser editor that can stage,
 commit, push, switch branches, stash and discard inside the VM. The web UI opens on a **Home** overview
 (intro, feature tour, and quick-start) and has a side nav with a nested
-project list, Secrets, and Settings (default VM CPU/memory/disk for new projects),
+project list, Vaults, Agents, and Settings (default VM CPU/memory/disk for new projects),
 plus a per-project detail view with live CPU/memory/disk/network usage and
 tmux state. Every VM's egress is routed through the supervisor as a **filtering
 MITM proxy** — block-by-default with interactive, time-boxed approvals, allow/
 block + header-rewrite rules (global or per-project), and a live request log on
-the detail view. A secret can be delivered **via the proxy**: the VM only ever
-holds a placeholder, and the proxy swaps in the real token on the way out to the
-hosts that secret is allowed to reach. See `docs/research/` for the design research and `spikes/` for
+the detail view. **Vaults** hold variables and secrets that a VM can use but
+not read: a *proxy* item is only ever a placeholder in the VM, swapped for the
+real value on the way out to the hosts it may reach; a *fetch* item is read on
+demand (`sadbox-vault get`), and a secret asks you first. **Agents**: sadbox
+keeps the agents' logins (Claude's it owns and refreshes, handing VMs
+placeholders) and each project's agent history, which a new VM of the same
+name picks up. See `docs/research/` for the design research and `spikes/` for
 the de-risk experiments behind each piece, and [`docs/ROADMAP.md`](docs/ROADMAP.md)
 for what's next.
 
@@ -138,20 +143,18 @@ The first `sadbox serve` generates a sign-in password, prints it once, and
 saves it in `~/.sadbox/initial-password`. Use it to sign in, or set your own
 with `sadbox passwd`. Then, in the browser:
 
-1. **Add a Claude credential** under **Secrets**: run `claude setup-token` on
-   your Mac and save the result as `CLAUDE_CODE_OAUTH_TOKEN` (or save an
-   `ANTHROPIC_API_KEY`). Choose **via the proxy** and the **Anthropic** preset
-   so the real token never enters the VM. Skip this if you will use another
-   agent or log in inside the VM.
-2. **Create a project** under **Projects**: give it a name and either a local
+1. **Create a project** under **Projects**: give it a name and either a local
    folder that is a git repository with at least one commit, or a git URL to
-   clone. Tick the secret you just added.
-3. Open **Terminal ↗** and run `claude` (or `omp`, `opencode`). The first
+   clone. Tick any **vault** items it should use (add them under **Vaults**
+   first — API keys, tokens, settings).
+2. Open **Terminal ↗** and run `claude` (or `omp`, `opencode`). The first time,
+   `/login` in Claude: sadbox keeps that login and every VM after this one is
+   logged in already (see [Agent logins](#how-it-works)). The first
    requests to each new host wait for your approval — a popup appears right
    in the terminal and editor tabs (and in the **Network** panel on the
    project's page).
    Egress is blocked by default.
-4. When you like the result, **Sync back**: the VM's workdir is copied into
+3. When you like the result, **Sync back**: the VM's workdir is copied into
    your folder as ordinary, uncommitted file changes — review them with
    `git diff` and commit what you want. Nothing is committed for you, in the VM
    or in your repo, and uncommitted work of yours in the folder is never
@@ -202,11 +205,11 @@ your folder as uncommitted changes for you to review and commit.
 ```
 Browser (dashboard + xterm.js tabs)
    │ REST + WebSocket
-Supervisor (Bun/TS, this repo) ── SQLite state, AES-GCM secrets
+Supervisor (Bun/TS, this repo) ── SQLite state, AES-GCM vault + agent logins
    │ ProjectDriver interface
 Apple container CLI ── one microVM per project
    │ vsock (exec)
-Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
+Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent user,
        workdir = your repo copy
 ```
 
@@ -219,6 +222,15 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   the VM — or you **connect a local folder** to it later (detail page → Folder
   & git → *Connect a folder…*) and use **Sync back** like any other project.
   The folder can be a git repository or any other folder.
+- **Env files never enter a VM**: `.env` and `.env.*` (`.env.local`,
+  `.env.production`, …) at any depth, and anything under a `.env` directory,
+  are left out of every copy into a VM — create, rebuild and push. Put what
+  they hold in a vault.
+- **Push to VM** (the other way from Sync back): copies the folder's changed
+  files into a running VM as uncommitted changes, the same files a create
+  would copy. Only files whose content differs travel; a file the folder no
+  longer has stays in the VM; uncommitted work in the VM that exists nowhere
+  else is not overwritten unless you say so.
 - **Sync back** makes the folder's files match the VM's workdir — committed
   or not, minus gitignored files — and commits nothing: not in the VM (the
   agent's branch, index and loose changes stay as they are) and not in your
@@ -321,28 +333,67 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   the base image via `/api/toolchain`); the detail view's **Installed tools**
   panel probes the *running VM* itself, so an older VM correctly shows which
   tools it's missing.
-- **Secrets** (two scopes): **global** secrets are shared and assignable to any
-  number of projects; **project-specific** secrets live in one project and are
-  deleted with it (overriding a global of the same name). All encrypted at rest
-  (AES-256-GCM) in SQLite, injected as a 0600 env file in the guest before tmux
-  starts, write-only in the API/UI. Each secret has a **delivery**:
-  - **in the VM** (`env`): the real value goes into the env file. Anything in
-    the VM — the agent included — can read it.
-  - **via the proxy** (`proxy`): the env file gets a **placeholder** shaped like
-    the token (`ghp_sbx…`, same prefix and length), different in every VM and
-    stable across restarts. The secret lists the hosts it may be sent to
-    (**bindings**: `api.github.com`, `*.example.com`, optionally a path like
-    `/v1/*`, a method, a header; presets for GitHub, Anthropic, OpenAI). When a
-    request from the VM carries the placeholder in a header — `Bearer`,
-    `token`, `x-api-key`, or inside git's `Basic` auth — over https to a bound
-    host, the proxy swaps in the real value. A real value showing up in a
-    response header is swapped back to the placeholder. Sending a placeholder
-    to any other host **asks first** (🔑 approval: allowing for a window or
-    always adds a binding); over plain http it is refused with a 403. The
-    request log shows which secret was used (🔑 name, never the value).
-    Changing the value takes effect on the next request — nothing to re-inject.
-    Tested with curl, git, gh, Claude Code (OAuth token and API key), Bun
-    `fetch` and Python `requests` (`spikes/d-credential-proxy/`).
+- **Vaults** (*Vaults* tab): one list of **variables** and **secrets**, typed
+  `string` / `number` / `json`, encrypted at rest (AES-256-GCM) in SQLite. A
+  variable's value shows in the list; a secret's shows `••••` and an eye icon
+  that reveals it (each reveal is logged). Each item is given to the projects
+  you tick — on the item, on the create form, or from a project's **Vault…**
+  button — and has a **mode**:
+  - **proxy**: the VM holds a **placeholder** shaped like the token
+    (`ghp_sbx…`, same prefix and length), different in every VM and stable
+    across restarts. The item lists the hosts it may be sent to (**bindings**:
+    `api.github.com`, `*.example.com`, optionally a path like `/v1/*`, a method,
+    a header; presets for GitHub, Anthropic, OpenAI). When a request carries the
+    placeholder in a header — `Bearer`, `token`, `x-api-key`, or inside git's
+    `Basic` auth — over https to a bound host, the proxy swaps in the real
+    value; opt in per item to have it swapped in the **URL** and the **body**
+    too (JSON, forms, text; up to 1 MiB; a `number` / `json` item becomes a
+    typed JSON value). A real value coming back is swapped to the placeholder in
+    response headers **and bodies** (streamed, so SSE is not delayed). Sending a
+    placeholder to any other host **asks first** (🔑 approval: allowing for a
+    window or always adds a binding); over plain http it is refused. Changing
+    the value takes effect on the next request.
+  - **fetch at runtime**: nothing is in the VM until a program asks —
+    `sadbox-vault get NAME` (`--json` for the typed value; `sadbox-vault list`
+    shows what the VM may use, without values), or
+    `http://vault.sadbox.internal/v1/NAME`. The proxy answers that itself, for
+    projects ticked for the item only. A **secret's** first fetch from a project
+    waits for your answer (once / a window / always, like network approvals;
+    "always" can be taken back on the item's card); a variable is served without
+    asking. Every read is in the project's request log (name, never the value).
+    A proxy item is never served this way.
+
+  Secrets created before Vaults were migrated: proxy ones kept their bindings;
+  ones that were written into the VM's env file became fetch items that keep
+  being written there (`~/.sadbox/env`, readable in the VM) until you turn
+  **+ env file** off on the item. A VM can never reach sadbox's own API — the
+  proxy refuses this machine before any rule — so the reveal endpoint is out of
+  its reach.
+- **Agent logins** (*Agents* tab): sadbox keeps the agents' logins and puts them
+  into each VM at create, rebuild and start, so you log in once.
+  - **Claude Code** (claude.ai login): run `/login` in any VM. sadbox makes the
+    token exchange itself and keeps the tokens; the VM's
+    `~/.claude/.credentials.json` holds **placeholders** with an expiry years
+    away. The proxy swaps in the real access token only in the `Authorization`
+    header and only to `api.anthropic.com`. sadbox refreshes the login ahead of
+    expiry; a refresh a VM asks for is answered by sadbox (at most one real
+    refresh a minute), so no VM ever holds a real token or can invalidate the
+    others' by rotating it. A VM that already had a real login is taken over
+    within about 30 s. If a refresh is refused, the Agents page says so — log in
+    again in any VM. **Refresh now** and **Forget** are on the page.
+  - **API keys** you enter in `omp` or `opencode` are captured from running VMs
+    (about every 30 s) and copied into the others — these are readable in the
+    VM, like a key you typed there. Their **OAuth** logins are not shared (a
+    copy stops working once another VM refreshes it): log in per VM.
+  - **Apply to running VMs** copies the current logins in now.
+- **Agent history**: Claude's projects, file history and prompt history, omp's
+  sessions and history, and opencode's database and snapshots live on this
+  machine under `~/.sadbox/agents/history/<project name>/`, mounted into the
+  VM. They survive **Rebuild** and **Destroy**, and a new project with the
+  same name gets them back (the create form says so). A VM created before
+  this has its history copied out on its first rebuild. Stored history is
+  listed on the Agents page with **Delete** (not while a project of that name
+  exists). Logins are never part of it.
 - **Git setup** (optional, at create): give a remote URL + access token and the
   project's `origin` is pointed there with the token stored via git's credential
   helper (`~/.git-credentials`, 0600) so the agent can push/pull. The token is
@@ -359,7 +410,7 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   stopped VM it is the last one seen, kept in the database), folder/remote
   info, and the installed-toolchain probe — plus the live **Network** panel
   (below). The buttons along the top are **Terminal**, **Editor**, **Sync
-  back** (once a folder is connected), **Secrets**, **Stop** / **Start**,
+  back** / **Push to VM** (once a folder is connected), **Vault…**, **Stop** / **Start**,
   **Rebuild** and **Destroy**; the project cards on the list carry the same
   ones. **Stop** (solid red) shuts the VM down and keeps its disk — files,
   installed packages and logins — while agents and terminals in it end;
@@ -368,8 +419,8 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   terminals in it end, while its files, installed packages and logins stay.
   A **Rebuild** action destroys the VM and recreates it from the
   project's original source (local folder re-copied at its current HEAD, or the
-  git remote re-cloned), keeping the project's secrets and network rules;
-  unsynced work inside the old VM is lost. Rebuild uses the **current** base
+  git remote re-cloned), keeping the project's vault access, network rules,
+  agent history and logins; unsynced work inside the old VM is lost. Rebuild uses the **current** base
   image, so a project created before a tool was baked in (e.g. opencode) picks
   it up on rebuild.
 - **Network proxy** (egress control): every VM routes its HTTP(S) through the
@@ -381,23 +432,23 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
   and forever answers persist as rules so the host isn't re-prompted. Rules
   (allow/block by host `*.example.com`/`*`, optional path glob + method) and
   header rewrites (set/remove on request or response) are **global** (all VMs)
-  or **per-project**. A `set` value can be a literal or drawn from a **secret**
-  (global or the project's own) — so a real token can be injected per-host (e.g.
+  or **per-project**. A `set` value can be a literal or drawn from a **vault
+  item** (one the project may use) — so a real token can be injected per-host (e.g.
   `Authorization` for `api.anthropic.com`) while never living inside the VM. The
   detail view's **Network** panel streams activity live over SSE, in tabs:
   **Activity** (grouped by host — requests, results, which rule lets it through,
-  secrets used, one-click allow/block; or every request, filterable),
+  vault items used, one-click allow/block; or every request, filterable),
   **Rules** (this project's and all projects', each movable to the other side
   in one click; expired timed rules folded away) and **Header rules**. An
   **Internet on/off** switch in the panel's header cuts the VM off completely:
-  every request and CONNECT is refused before rules, approvals or secrets are
+  every request and CONNECT is refused before rules, approvals or vault items are
   looked at, held approvals are denied, and it stays off across restarts.
   Every request is also **stored** (SQLite `net_requests`, written in 1-second
   batches) and kept for **7 days** — `SADBOX_NET_LOG_DAYS` keeps it longer,
   never shorter; older rows are pruned at startup and hourly. Activity's by-host
   view can span the last 24 hours or 7 days, "All requests" pages back through
   it, and the live view refills from it after a restart. Stored: method, host,
-  path, status, decision, sizes, timing, and the *names* of secrets used — no
+  path, status, decision, sizes, timing, and the *names* of vault items used — no
   headers or bodies, and never a secret value. Wiring: guest tools honor
   `HTTP(S)_PROXY` → `net` proxy on the host catches `CONNECT`, MITMs via a
   per-host `https` server, filters/rewrites, forwards upstream, logs.
@@ -455,21 +506,31 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 
 | Method | Path | |
 |---|---|---|
-| GET/POST | `/api/projects` | list (with live VM state and each VM's current `branch`) / create (`{name, sourcePath?, apps?, secretIds?, git?: {remote, token?}}` — omit `sourcePath` to clone `git.remote` in the VM) |
+| GET/POST | `/api/projects` | list (with live VM state and each VM's current `branch`) / create (`{name, sourcePath?, apps?, secretIds?: vault item ids, git?: {remote, token?}}` — omit `sourcePath` to clone `git.remote` in the VM) |
 | GET | `/api/projects/:id/details` | full detail: resources, tmux, git, folder |
 | DELETE | `/api/projects/:id` | destroy VM |
 | POST | `/api/projects/:id/start`, `…/stop` | boot a stopped VM / shut a running one down (its disk is kept) |
 | POST | `/api/projects/:id/sync` | sync-back (`{force?: bool}` overwrites files changed in the folder) |
 | GET | `/api/projects/:id/term/links` | links currently on the project's terminal (wrapped URLs re-joined) |
-| POST | `/api/projects/:id/rebuild` | destroy + recreate the VM from the project's original source (keeps secrets + net rules) |
+| POST | `/api/projects/:id/rebuild` | destroy + recreate the VM from the project's original source (keeps vault access, net rules, agent history) |
+| POST | `/api/projects/:id/push` | copy the folder's changed files into the VM, never env files (`{force?: bool}` overwrites uncommitted work in the VM) |
 | GET | `/api/projects/:id/net/requests?before=&limit=` | stored request log, paged back from a timestamp (without `before`: the live view's recent requests + pending approvals) |
 | GET | `/api/projects/:id/net/hosts?since=` | requests per host since a timestamp (default 24 h) |
 | GET | `/api/projects/:id/sync/status` | count of uncommitted files in the VM |
 | PUT | `/api/projects/:id/memory` | `{memoryMB}` — change this VM's memory; a running VM is restarted to take it (disk kept) |
 | PUT/DELETE | `/api/projects/:id/sync-folder` | connect (`{path}`) / disconnect a local folder for a project cloned from a git URL |
-| GET/PUT/POST | `/api/projects/:id/secrets` | view / assign globals / add project-specific |
-| GET/POST | `/api/secrets`, DELETE `/api/secrets/:id` | global secret store; POST (here and on a project) takes `{name, value, delivery?: "env"\|"proxy", bindings?: [{host, path?, method?, header?, expiresAt?}]}` |
-| POST/DELETE | `/api/secrets/:id/bindings`, `/api/secrets/:id/bindings/:bid` | add / remove a host a proxy secret may be sent to |
+| GET/PUT | `/api/projects/:id/vault` | the items a project may use, with the placeholder its VM holds for each / set them (`{itemIds}`) |
+| GET/POST | `/api/vault` | list items (no secret values) / create (`{name, value, kind?: "secret"\|"variable", type?: "string"\|"number"\|"json", mode?: "proxy"\|"fetch", inEnv?, askOnFetch?, swapUrl?, swapBody?, bindings?, projectIds?}`) |
+| GET/PATCH/DELETE | `/api/vault/:id` | one item / change it (an empty `value` keeps the old one) / delete it |
+| GET | `/api/vault/:id/value` | reveal the value (the eye icon; logged) |
+| PUT | `/api/vault/:id/projects` | `{projectIds}` — the projects that may use the item |
+| POST/DELETE | `/api/vault/:id/bindings`, `/api/vault/:id/bindings/:bid` | add (`{host, path?, method?, header?, expiresAt?}`) / remove a host a proxy item may be sent to |
+| DELETE | `/api/vault/:id/grants/:projectId` | take back a project's "fetch without asking" |
+| GET | `/api/agents` | `{logins, history, liveNames}` — the logins sadbox keeps (never their values) and stored history per project name |
+| POST | `/api/agents/apply`, `/api/agents/claude/refresh` | copy the logins into every running VM now / refresh the Claude login now |
+| DELETE | `/api/agents/logins/:tool/:provider`, `/api/agents/history/:name` | forget a login / delete a name's history (refused while that project exists) |
+| GET | `/api/history` | stored agent history per project name |
+| GET | `/api/system/status` | whether the VM backend's service (Apple's `container` API server) is up, and why not |
 | PUT | `/api/projects/:id/network` | `{cutoff: true\|false}` — cut the VM off from every network, or let it out again |
 | PATCH | `/api/projects/:id/net/rules/:rid` | `{scope: "global"\|"project"}` — move a rule between this project and all projects |
 | GET/PUT | `/api/settings` | default VM resources (CPUs, memory, disk) for new projects |
@@ -506,7 +567,8 @@ Guest: Debian + tmux + Bun + Claude Code + omp + opencode, agent user,
 | GET | `/api/auth/status` | `{enabled, signedIn}` |
 
 Every endpoint except `/api/auth/login` and `/api/auth/status` needs the session
-cookie (`401` otherwise).
+cookie (`401` otherwise). Inside a VM, `http://vault.sadbox.internal/v1/` and
+`/v1/NAME` are answered by the proxy (see Vaults), never by this API.
 
 ## Deploying
 
@@ -606,27 +668,32 @@ Notes:
 - Apple silicon + macOS 26 only (see [Supported platforms](#supported-platforms));
   the Linux/Cloud Hypervisor driver and docker-compose packaging are designed
   (`docs/research/02`) but not built.
-- Secret rotation reaches new shells/panes only (env-file semantics) — except
-  for secrets delivered **via the proxy**, which take effect on the next request.
-- Proxy-delivered secrets protect the **token string**, not its use: the agent
-  can still call the bound hosts with it, so prefer narrow bindings and
-  least-privilege tokens. Only request **headers** are swapped (not the URL or
-  body; a placeholder in the URL is flagged in the log), and only response
-  **headers** are scrubbed — an endpoint that echoes request headers into its
-  response *body* would show the real value. Flows that mint new credentials
-  (OAuth refresh, token-creation APIs) hand the VM real tokens in their bodies.
-  Bindings belong to the secret, so a binding added from one project's approval
-  applies wherever that secret is assigned.
+- A change to an item still written to the env file reaches new shells/panes
+  only — proxy items take effect on the next request, fetch items on the next
+  read.
+- Proxy items protect the **value**, not its use: the agent can still call the
+  bound hosts with it, so prefer narrow bindings and least-privilege tokens.
+  Response redaction covers string values of 8+ characters in textual bodies;
+  a value echoed back encoded some other way (base64, split up) is not caught.
+  Token-creation APIs other than Claude's login hand the VM real tokens.
+  Bindings belong to the item, so a binding added from one project's approval
+  applies wherever that item is used.
+- A fetched value is in the VM once read — that is the point — so give fetch
+  mode only to what a program must have locally, and leave secrets asking.
 - Egress is HTTP(S)-only, through the proxy; tools find it via
   `HTTP(S)_PROXY` (curl, git, bun, pip do; Node's built-in `fetch` does with
   `NODE_USE_ENV_PROXY=1`, which is set). A program that ignores those variables
   has no network at all. WebSockets *out of* a VM are not supported by the
   proxy. Projects created before isolation stay on the NAT network until
   rebuilt. Proxy env + CA reach new shells only (same env-file semantics as
-  secrets).
+  env-file items).
 - VMs must be started by sadbox. One started by hand with `container start`
   comes up without its proxy relay; sadbox restarts the relay within about
   half a minute while the supervisor is running.
-- Claude Code auth: create a `CLAUDE_CODE_OAUTH_TOKEN` secret (from
-  `claude setup-token` on the host) and assign it to projects — or an
-  `ANTHROPIC_API_KEY`. See `docs/research/05`.
+- Claude Code auth: `/login` once in any VM (see Agent logins). A
+  `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or `ANTHROPIC_API_KEY`
+  proxy item with the Anthropic preset still works instead. omp and opencode
+  OAuth logins are per VM; their API keys are copied in readable.
+- Agent history is matched by exact project name: renaming means starting
+  fresh (the old name's history stays until deleted). Two agents writing the
+  same history at once is not possible, since a name is one live project.

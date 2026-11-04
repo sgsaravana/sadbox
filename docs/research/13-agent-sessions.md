@@ -1,7 +1,8 @@
 # Agent sessions — logins and conversation history kept by the supervisor
 
-> **Status: steps 5 and 6 built 2026-11-04** (history store and mounts;
-> logins and the Agents page — see "As built"); step 7 (docs) next.
+> **Status: built 2026-11-04** — steps 5 (history store and mounts), 6
+> (logins and the Agents page) and 7 (README, home page) — see "As built".
+> Not yet tried live: a real Claude `/login` and refresh through the proxy.
 > Planned 2026-11-03. Step 0
 > (Spike F, `spikes/f-agent-sessions/`) ran the same day: history mounts hold;
 > **copying OAuth logins does not** (F.3) — replaced for OAuth by A7, which
@@ -226,4 +227,6 @@ stand-in token server; F.5 did the refresh by hand).
 5. History store, mounts at create / rebuild, copy-out before an existing VM's
    first rebuild.
 6. Login capture loop, copy-in at create / rebuild / start, Agents page.
-7. Docs and the home page's "Good to know".
+7. Docs and the home page's "Good to know". ✓ README (Vaults, Agent logins,
+   Agent history, env files, Push to VM, API, limitations), home page tips
+   and feature cards, research index.

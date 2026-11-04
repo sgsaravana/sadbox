@@ -126,12 +126,13 @@ swappable per-platform backends.
 5. **Credential proxy** — built. Placeholders in the VM, real
    tokens swapped in by the proxy ([11](11-credential-proxy.md)); starts with
    Spike D (`spikes/d-credential-proxy/`).
-6. **Vaults + agent sessions** — **← current step.** Vault items usable but
-   not readable by VMs ([12](12-vaults.md)); agent logins and per-project
-   conversation history kept by the supervisor ([13](13-agent-sessions.md)).
-   Starts with the spikes in `spikes/f-agent-sessions/`.
-7. **Linux support (Cloud Hypervisor driver)** — phased plan, starting with
-   Spike E, in [`../ROADMAP.md`](../ROADMAP.md).
+6. **Vaults + agent sessions** — **built 2026-11-04** on
+   `feature/proxy-credentials`. Vault items usable but not readable by VMs
+   ([12](12-vaults.md)); agent logins and per-project conversation history
+   kept by the supervisor ([13](13-agent-sessions.md)). Spikes in
+   `spikes/f-agent-sessions/`.
+7. **Linux support (Cloud Hypervisor driver)** — **← next.** Phased plan,
+   starting with Spike E, in [`../ROADMAP.md`](../ROADMAP.md).
 
 ## Doc index
 

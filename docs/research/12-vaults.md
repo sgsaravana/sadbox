@@ -1,7 +1,7 @@
 # Vaults — variables and secrets a VM can use but not read
 
-> **Status: planned 2026-11-03** (agreed with the owner, not built yet). Replaces
-> the Secrets tab. Builds on the credential proxy (`11-credential-proxy.md`) and
+> **Status: built 2026-11-04** (steps 1–4, see "As built"; planned 2026-11-03
+> with the owner). Replaced the Secrets tab; documented in the README. Builds on the credential proxy (`11-credential-proxy.md`) and
 > the network approvals (`10-network-proxy.md`). Build order at the end.
 > Spike F (2026-11-03/04, `spikes/f-agent-sessions/`): body swapping (V3)
 > works with real clients (F.4); the proxy already refuses the supervisor's own
