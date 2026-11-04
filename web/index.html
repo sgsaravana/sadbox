@@ -145,6 +145,7 @@
           <div class="seg" id="src-mode">
             <label class="seg-opt"><input type="radio" name="srcMode" value="local" checked><span>📁 Local folder</span></label>
             <label class="seg-opt"><input type="radio" name="srcMode" value="git"><span>⎇ Git repository</span></label>
+            <label class="seg-opt"><input type="radio" name="srcMode" value="empty"><span>▢ Empty VM</span></label>
           </div>
 
           <div class="src-group" data-src="local">
@@ -175,6 +176,14 @@
             </label>
             <p class="hint">The VM clones this repository into its workdir. Commit and
               <code>git push</code> from inside the VM — there's no local folder to sync back into.</p>
+          </div>
+
+          <div class="src-group" data-src="empty" hidden>
+            <p class="hint">The VM starts with an empty workdir. Open its terminal and clone one or more
+              repositories into it — <code>git clone https://github.com/you/repo.git</code> signs in with the
+              vault item bound to that host (tick a <code>GITHUB_TOKEN</code> proxy item below); the VM only ever
+              holds its placeholder. Commit and <code>git push</code> from each repository. A Rebuild starts
+              empty again.</p>
           </div>
 
           <fieldset id="create-toolchain-fs">

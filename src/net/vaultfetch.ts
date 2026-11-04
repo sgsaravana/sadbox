@@ -5,6 +5,10 @@
 //
 //   GET /v1/          the items this project may use (names, kinds, types, modes — no values)
 //   GET /v1/NAME      a fetch item's value, as the body (`?format=json`: {name, type, value})
+//   GET /git/credential?host=H
+//                     for git's credential helper: the placeholder of the proxy
+//                     item bound to H, as `username=…` / `password=…` lines —
+//                     never a value, so nobody is asked
 //
 // A fetch item that asks first holds the request for the owner's answer (an
 // approval of kind `fetch`), unless an earlier answer still stands. A proxy
@@ -17,6 +21,7 @@ import { decrypt } from "../crypto";
 import { requestApproval } from "./approvals";
 import { hasFetchGrant } from "./fetchgrants";
 import { recordRequest } from "./events";
+import { gitCredentialFor } from "./credentials";
 
 export const VAULT_HOST = "vault.sadbox.internal";
 
@@ -61,6 +66,14 @@ export async function serveVault(
   if (!projectId) return fail(403, "this request does not come from a project's VM");
   if (method !== "GET") return fail(405, "only GET");
   const url = new URL(path, `http://${VAULT_HOST}`);
+  if (url.pathname === "/git/credential") {
+    const host = (url.searchParams.get("host") ?? "").toLowerCase().replace(/:443$/, "");
+    if (!/^[a-z0-9.-]+$/.test(host)) return fail(400, "give ?host=");
+    const c = gitCredentialFor(projectId, host);
+    if (!c) return fail(404, `no proxy item in this project's vault is bound to ${host}`);
+    logEvent(projectId, "vault.git", `${c.name} for ${host}`);
+    return reply(200, `username=x-access-token\npassword=${c.placeholder}\n`);
+  }
   const m = /^\/v1\/?([^/]*)$/.exec(url.pathname);
   if (!m) return fail(404, "unknown path — try /v1/ or /v1/NAME");
   const items = projectItems(projectId);
