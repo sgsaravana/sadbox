@@ -132,5 +132,17 @@ const BT_PH = placeholderFor(P, bt.id, BODY_REAL);
     `${lines.length} line(s)`);
 }
 
+{
+  // the vault's own name, through the proxy's front door (not a link to a project "vault")
+  const p = Bun.spawn(["curl", "-sS", "--max-time", "10", "--proxy", `http://127.0.0.1:${port}`,
+    "http://vault.sadbox.internal/git/credential?host=httpbin.org"], { stdout: "pipe", stderr: "pipe" });
+  const out = await new Response(p.stdout).text();
+  await p.exited;
+  // several items are bound to httpbin.org; the helper gets one of them — always a placeholder
+  const reals = [REAL, KEY_REAL, BODY_REAL];
+  check("vault.sadbox.internal answered by the vault: git gets a placeholder",
+    /^username=x-access-token\npassword=\S*sbx\S+\n$/.test(out) && !reals.some((r) => out.includes(r)), out.trim().split("\n").pop());
+}
+
 console.log(failed ? `\n${failed} failed` : "\nall passed");
 process.exit(failed ? 1 : 0);

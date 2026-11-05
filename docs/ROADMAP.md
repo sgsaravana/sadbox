@@ -29,6 +29,10 @@ All on Apple silicon + macOS 26, through the Apple `container` driver
 Remaining before merge: Spike D **round 2** with real, short-lived tokens
 (create them as *proxy* vault items in the UI; see the spike README), and a
 real Claude `/login` + refresh through the proxy (Agent logins, below).
+Both are **ready to run** (prepared 2026-11-04): the step-by-step procedure,
+`round2-vm.sh` (VM checks) and `round2-report.ts` (request log + leak scan)
+are in [`spikes/d-credential-proxy/`](../spikes/d-credential-proxy/README.md#vm-experiments-round-2-real-tokens).
+Only the tokens and the run are left.
 Merge `feature/proxy` into `main` first, then this branch. In `acceptClient`,
 the cutoff check must stay before link handling.
 
@@ -74,6 +78,9 @@ Design: [`research/12-vaults.md`](research/12-vaults.md),
 | Env files ✓ | `.env` / `.env.*` never copied into a VM (create, rebuild, push) |
 | Push to VM ✓ | Copy the folder's changed files into a running VM |
 | Service status ✓ | Home page shows whether Apple's container service is up, and why not |
+| Git remote tokens in the vault ✓ | The token given for a project's remote becomes a proxy vault item (`GITHUB_TOKEN` with GitHub's hosts, `GITLAB_TOKEN`, or `GIT_TOKEN`), reused by name + value; the VM gets a placeholder via git's credential helper. Older projects' `~/.git-credentials` (a real token in the VM) are moved over and deleted on the next supervisor start |
+| `vault.sadbox.internal` vs links ✓ | The proxy took the vault's own name for a link to a project called "vault", so `sadbox-vault`, `/v1/NAME` and git's credential helper got a 403 inside VMs. Fixed in `linkTarget`; covered by e2e.ts |
+| Bindings allow their hosts ✓ | A project with access to a proxy item is allowed to the item's bound hosts (host, path, method, expiry) without a network rule, so the first, unauthenticated `git clone` request isn't held. Derived at request time, shown read-only in Rules (🔑 vault · NAME); a block rule still wins |
 
 ## Then: Linux support
 

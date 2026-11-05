@@ -14,7 +14,9 @@ runs against the built feature, no patch. Findings below.
 
 | File | What |
 |---|---|
-| `e2e.ts` | Host-only end-to-end run of the **built** credential proxy against httpbin.org with dummy tokens: bound / Basic / plain-http / approval deny + allow / redaction / in-URL; and since vault step 3 (2026-11-04) URL and body swapping, typed values, and body redaction (plain, gzip, streamed) — 16 checks, all passing. Because response bodies are redacted now, "sent upstream" is shown by the log recording a redaction of httpbin's echo. `bun spikes/d-credential-proxy/e2e.ts` |
+| `e2e.ts` | Host-only end-to-end run of the **built** credential proxy against httpbin.org with dummy tokens: bound / Basic / plain-http / approval deny + allow / redaction / in-URL; and since vault step 3 (2026-11-04) URL and body swapping, typed values, and body redaction (plain, gzip, streamed), and (2026-11-06) `vault.sadbox.internal` through the proxy's front door — 17 checks, all passing. Because response bodies are redacted now, "sent upstream" is shown by the log recording a redaction of httpbin's echo. `bun spikes/d-credential-proxy/e2e.ts` |
+| `round2-vm.sh` | Round 2, VM side: curl / git clone + push + delete branch / gh REST + GraphQL / `claude -p` with the API key and with the sadbox-owned login / Anthropic SSE. One PASS/FAIL line each. `sh round2-vm.sh OWNER/REPO` in the project's terminal |
+| `round2-report.ts` | Round 2, host side: the project's request log by host (🔑 swapped, redacted, in-URL, blocked), then a leak scan that greps the VM's files and process environments for every real value sadbox would swap (raw and base64 at all three offsets), fed on stdin. Checked against planted dummy leaks (file, base64 at offsets 0–2, process env) on 2026-11-04. `SADBOX_DATA=… bun spikes/d-credential-proxy/round2-report.ts <project>` |
 
 The spike-only harness (a `proxy.patch` hook, the standalone swap `subst.ts`
 and its tests, `smoke.ts`, the placeholder printer and map-file helper) was
@@ -168,16 +170,32 @@ path. Use a short path.
 ### VM experiments, round 2: real tokens
 
 _Not run yet._ Confirms upstream success (200s) with real tokens against the
-built feature, and checks real API responses for any echoed credential.
+built feature, and that no real value ends up anywhere in the VM.
 
-1. Make **least-privilege, short-lived** tokens, revoked afterwards: a GitHub
-   fine-grained PAT (one private test repo, contents read/write) and
-   `claude setup-token` (and/or an `ANTHROPIC_API_KEY`).
-2. In the UI, add them under **Secrets** as **via the proxy** with the GitHub /
-   Anthropic presets, and assign them to a throwaway project. The real value
-   goes from the password field straight to the supervisor; the VM gets only
-   placeholders.
-3. In the VM: `git push` to the test repo, `gh api user` (install `gh` with apt),
-   `claude -p hi` with each credential. Expect 200s and 🔑 chips in the request
-   log, with no ⚠ rows and no 🔑 approval prompts for these hosts.
-4. Revoke the tokens and destroy the project.
+**Prepared 2026-11-04:** e2e.ts re-run (16/16), a throwaway supervisor and
+project, and the two round-2 scripts dry-run without tokens (proxy path,
+public clone, gh install all fine; 401s where a token is needed).
+
+1. Start a throwaway supervisor (short data path; leaves the real one on 7070 alone):
+   `SADBOX_DATA=/tmp/sbxd2 SADBOX_PORT=17070 SADBOX_PROXY_PORT=17071 SADBOX_PASSWORD=spike-d2 bun run src/index.ts serve`
+   and create an empty project `spike-d2`. Allow (this project)
+   `deb.debian.org` and `security.debian.org` for installing `gh`. The GitHub
+   and Anthropic hosts need no rule: a proxy item's bindings allow them
+   (expect "allowed · 🔑 GITHUB_TOKEN" in Activity).
+2. Make **least-privilege, short-lived** tokens, revoked afterwards: a GitHub
+   fine-grained PAT (one private test repo, contents read/write, metadata read,
+   pull requests read) and an `ANTHROPIC_API_KEY` from a throwaway workspace.
+3. In the UI (http://localhost:17070), add them under **Vault** as **via the
+   proxy** with the GitHub / Anthropic presets and give `spike-d2` access. The
+   real value goes from the password field straight to the supervisor; the VM
+   gets only placeholders.
+4. In the project's terminal, run `claude`, `/login`, finish the browser flow,
+   and quit: sadbox takes the login over and the VM keeps placeholders (Agents
+   page shows "Claude login").
+5. In the terminal: `sh round2-vm.sh OWNER/REPO` (copy it in with Push to VM,
+   or paste it). Expect every line PASS.
+6. On the host: `SADBOX_DATA=/tmp/sbxd2 bun spikes/d-credential-proxy/round2-report.ts spike-d2`.
+   Expect 🔑 on the GitHub / Anthropic rows, nothing blocked, nothing in a URL,
+   and every leak-scan line PASS. For the refresh, `POST /api/agents/claude/refresh`
+   (or the Agents page button), then run `claude -p hi` again and re-run the report.
+7. Revoke the tokens, destroy the project, `rm -rf /tmp/sbxd2`.

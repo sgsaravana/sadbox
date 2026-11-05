@@ -2,6 +2,13 @@
 // rewrites, keyed by host (exact, *.suffix, or *), optional path glob + method.
 // Global rules apply to every project; project rules apply to one. Block wins
 // over allow; no match → "ask" (interactive approval, block-by-default).
+//
+// A project's proxy vault items also allow the hosts they are bound to (their
+// bindings' host, path, method and expiry): giving a project GITHUB_TOKEN bound
+// to github.com lets `git clone` through, including git's first, unauthenticated
+// request. These are derived, not stored, so they come and go with the item's
+// access, mode and bindings; listRules shows them read-only (source "vault").
+// The rules people write still decide first: a block rule wins over them.
 import { db } from "../db";
 import { decrypt } from "../crypto";
 
@@ -16,6 +23,9 @@ export interface NetRule {
   expires_at: string | null;
   note: string | null;
   created_at: string;
+  source?: "vault";        // derived from a proxy vault item's binding (read-only)
+  secret_id?: string;
+  secret_name?: string;
 }
 
 export interface HeaderRule {
@@ -38,12 +48,31 @@ export type Verdict = { decision: "allow" | "block" | "ask"; rule?: NetRule };
 
 export function listRules(projectId?: string): NetRule[] {
   return projectId
-    ? db.query<NetRule, [string]>(
+    ? [...db.query<NetRule, [string]>(
         "SELECT * FROM net_rules WHERE scope='global' OR project_id=? ORDER BY scope, created_at DESC",
-      ).all(projectId)
+      ).all(projectId), ...vaultRules(projectId)]
     : db.query<NetRule, []>(
         "SELECT * FROM net_rules WHERE scope='global' ORDER BY created_at DESC",
       ).all();
+}
+
+export const VAULT_RULE_PREFIX = "vault-";
+export const isVaultRule = (id: string) => id.startsWith(VAULT_RULE_PREFIX);
+
+/** The allows a project's proxy vault items give it: one per binding. */
+export function vaultRules(projectId: string): NetRule[] {
+  return db.query<{ id: string; host: string; path: string | null; method: string | null; expires_at: string | null;
+    created_at: string; secret_id: string; name: string }, [string]>(
+    `SELECT b.id, b.host, b.path, b.method, b.expires_at, b.created_at, s.id AS secret_id, s.name
+     FROM secret_bindings b JOIN secrets s ON s.id = b.secret_id
+     JOIN project_secrets ps ON ps.secret_id = s.id
+     WHERE ps.project_id = ? AND s.delivery = 'proxy' ORDER BY s.name, b.rowid`,
+  ).all(projectId).map((b) => ({
+    id: VAULT_RULE_PREFIX + b.id, scope: "project", project_id: projectId, action: "allow",
+    host: b.host, path: b.path, method: b.method, expires_at: b.expires_at,
+    note: `vault item ${b.name}`, created_at: b.created_at,
+    source: "vault", secret_id: b.secret_id, secret_name: b.name,
+  }));
 }
 
 export function createRule(o: {
@@ -188,6 +217,12 @@ export function evaluate(
   if (block) return { decision: "block", rule: block };
   const allow = matches.find((r) => r.action === "allow");
   if (allow) return { decision: "allow", rule: allow };
+  if (projectId) {
+    // a binding's path is matched without the query string, as the swap matches it
+    const bare = { ...req, path: req.path.split("?")[0] };
+    const vault = vaultRules(projectId).find((r) => (!r.expires_at || Date.parse(r.expires_at) > now) && matchRule(r, bare));
+    if (vault) return { decision: "allow", rule: vault };
+  }
   return { decision: "ask" };
 }
 

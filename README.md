@@ -132,6 +132,43 @@ UI and base-image recipe are embedded, so it runs without the checkout.
 A Homebrew formula is kept in `packaging/homebrew/sadbox.rb`, but it is not
 published to a tap yet, so `brew install` of sadbox itself is not available.
 
+### Updating
+
+Your projects, vault, agent logins and history live in `~/.sadbox` and are
+kept across updates; nothing there needs to be exported or migrated by hand.
+
+1. **Stop the supervisor**: Ctrl-C on `sadbox serve` (or unload its launchd
+   job). Running VMs keep running — agents and terminals in them carry on —
+   and reconnect when the supervisor is back.
+2. **Install the new version** the way you installed it:
+   - install script: run the same command again —
+     `curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh | sh`
+     (add `SADBOX_VERSION=vX.Y.Z` before `sh` for a given release);
+   - downloaded binary: replace it with the new one, as in
+     [Option 2](#option-2--download-the-binary-yourself);
+   - from source: `git pull && bun install`.
+3. **Start it again** — `sadbox serve` (or load the launchd job) — and check
+   `sadbox version`.
+
+What happens on its own:
+
+- The database is migrated when the new version starts.
+- If the release changed the **base image** (new tools in the VM), it is
+  rebuilt before the next project is created or rebuilt — that one create
+  takes a few minutes longer. No `sadbox setup` is needed.
+
+What does not:
+
+- **Existing VMs stay on the image they were built from.** **Rebuild** a
+  project to give it the new base image; a create or rebuild also brings
+  Claude Code, omp and opencode to their latest releases. Rebuild keeps the
+  project's vault access, network rules, agent history and logins, but
+  replaces the VM's disk — sync back or push what you want to keep first.
+- The programs sadbox puts in a VM (`sadbox-vault`, git's credential helper,
+  the proxy relay) are rewritten when the VM starts, not while it keeps
+  running across the update: **Stop** then **Start** a project to give it
+  the new ones without a Rebuild.
+
 ## First run
 
 ```sh
@@ -165,9 +202,8 @@ browser:
 listens on localhost only by default; see [Deploying](#deploying) before
 exposing it to other machines.
 
-To update, re-run the install script (or `git pull && bun install` from
-source), then `sadbox setup` again if the release notes mention a new base
-image. To uninstall, remove the binary and `~/.sadbox`.
+To update, see [Updating](#updating). To uninstall, remove the binary and
+`~/.sadbox`.
 
 ### Sign-in password
 
@@ -378,7 +414,11 @@ Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent us
     response headers **and bodies** (streamed, so SSE is not delayed). Sending a
     placeholder to any other host **asks first** (🔑 approval: allowing for a
     window or always adds a binding); over plain http it is refused. Changing
-    the value takes effect on the next request.
+    the value takes effect on the next request. A project with access to a
+    proxy item is also **allowed to its bound hosts** (same host, path, method
+    and expiry), so `git clone` works without adding network rules; these
+    allows show read-only under Network → Rules (🔑 vault · NAME) and go with
+    the binding or the access. A block rule still wins over them.
   - **fetch at runtime**: nothing is in the VM until a program asks —
     `sadbox-vault get NAME` (`--json` for the typed value; `sadbox-vault list`
     shows what the VM may use, without values), or
@@ -420,10 +460,18 @@ Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent us
   this has its history copied out on its first rebuild. Stored history is
   listed on the Agents page with **Delete** (not while a project of that name
   exists). Logins are never part of it.
-- **Git setup** (optional, at create): give a remote URL + access token and the
-  project's `origin` is pointed there with the token stored via git's credential
-  helper (`~/.git-credentials`, 0600) so the agent can push/pull. The token is
-  encrypted at rest on the host.
+- **Git setup** (optional, at create or later from the project page): give a
+  remote URL + access token and the project's `origin` is pointed there. The
+  token becomes a **proxy vault item** the project is given — `GITHUB_TOKEN`
+  bound to `github.com`, `api.github.com` and `uploads.github.com`;
+  `GITLAB_TOKEN` to `gitlab.com`; `GIT_TOKEN` to any other remote's host —
+  so the VM holds only its placeholder: git's credential helper signs in with
+  it and the proxy swaps in the real token (and `gh` finds the placeholder in
+  `GITHUB_TOKEN`). An item with the same name and value is reused; a new token
+  updates the project's own item, or moves the project to a new one when the
+  item is shared. Projects from before this had the token in the VM's
+  `~/.git-credentials`: it moves to the vault, and the file is deleted, at the
+  supervisor's next start (a stopped VM: when it starts).
 - **Sync-back**: the guest records its workdir as a snapshot commit on a hidden
   ref (throwaway index — branch and working state untouched) → `git bundle`
   over exec stdout → fetched into a private repo whose work tree is the folder
@@ -586,7 +634,7 @@ Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent us
 | GET | `/api/history` | stored agent history per project name |
 | GET | `/api/system/status` | whether the VM backend's service (Apple's `container` API server) is up, and why not |
 | PUT | `/api/projects/:id/network` | `{cutoff: true\|false}` — cut the VM off from every network, or let it out again |
-| PATCH | `/api/projects/:id/net/rules/:rid` | `{scope: "global"\|"project"}` — move a rule between this project and all projects |
+| PATCH | `/api/projects/:id/net/rules/:rid` | `{scope: "global"\|"project"}` — move a rule between this project and all projects (a `source: "vault"` allow, id `vault-…`, is read-only: 409) |
 | GET/PUT | `/api/settings` | default VM resources (CPUs, memory, disk) for new projects |
 | GET | `/api/toolchain` | agents/tools + versions baked into the base image (`?refresh=1` to re-probe) |
 | GET | `/api/fs/dirs?path=` | folder picker (lists subdirs, flags git repos) |

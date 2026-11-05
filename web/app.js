@@ -778,6 +778,7 @@ function openGitRemote({ gitRemote: id, name, current, token, cloned }) {
   f.token.placeholder = token === "1" ? "leave blank to keep the current token" : "leave blank for none";
   $("#gitremote-title").textContent = `Git remote — ${name}`;
   $("#gitremote-hint").textContent = "Set as origin in the VM's workdir, so the agent can fetch and push."
+    + " A token is kept in the vault; the VM only gets a placeholder."
     + (cloned === "1" && current ? " Rebuild re-clones from this URL." : "");
   $("#gitremote-status").textContent = "";
   gitremote.showModal();
@@ -1646,9 +1647,11 @@ function hostAccess(host) {
   const m = activeRules().filter((r) => !r.path && !r.method && hostCovers(r.host, host));
   const block = m.find((r) => r.action === "block");
   if (block) return { kind: "blocked", rule: block };
-  const own = m.find((r) => r.action === "allow" && r.scope === "project");
+  const own = m.find((r) => r.action === "allow" && r.scope === "project" && r.source !== "vault");
   const glob = m.find((r) => r.action === "allow" && r.scope === "global");
-  if (own || glob) return { kind: "allowed", rule: own || glob };
+  // a proxy vault item allows the hosts it is bound to, after the rules people wrote
+  const vault = m.find((r) => r.action === "allow" && r.source === "vault");
+  if (own || glob || vault) return { kind: "allowed", rule: own || glob || vault };
   return { kind: "ask" };
 }
 
@@ -1760,6 +1763,9 @@ function accessCell(host) {
   if (a.kind === "allowed") {
     const exp = a.rule.expires_at ? ` until ${fmtClock(Date.parse(a.rule.expires_at))}` : "";
     const via = a.rule.host !== host ? ` via ${escapeHtml(a.rule.host)}` : "";
+    if (a.rule.source === "vault") {
+      return `<span class="acc allowed" title="allowed because vault item ${escapeHtml(a.rule.secret_name)} is bound to ${escapeHtml(a.rule.host)}">allowed · 🔑 ${escapeHtml(a.rule.secret_name)}</span><span class="hint">${via}${exp}</span>`;
+    }
     return `<span class="acc allowed" title="allow rule ${escapeHtml(a.rule.host)}${exp}">allowed · ${a.rule.scope === "global" ? "all projects" : "this project"}</span><span class="hint">${via}${exp}</span>`;
   }
   return `<span class="acc ask" title="no rule — each new request waits for approval">asks</span>`;
@@ -1769,6 +1775,9 @@ function hostActions(host) {
   const a = hostAccess(host);
   const h = escapeHtml(host);
   const btn = (attrs, label, title) => `<button type="button" class="mini" ${attrs} title="${title}">${label}</button>`;
+  if (a.kind === "allowed" && a.rule.source === "vault") {
+    return btn(`data-host-rule="block" data-host="${h}" data-scope="project"`, "Block", `Block ${h} for this project`);
+  }
   if (a.kind === "allowed") {
     // this project's allow rule can be widened to every project, and a global one narrowed to this project
     return a.rule.host === host
@@ -1838,6 +1847,14 @@ function ruleRow(r) {
   const parts = [r.host];
   if (r.path) parts.push("path:" + r.path);
   if (r.method) parts.push(r.method);
+  if (r.source === "vault") {
+    // derived from a proxy vault item's binding: it goes when the binding or the access does
+    return `<div class="rule${live ? "" : " expired"}">
+    <span class="ract ${r.action}">${r.action}</span>
+    <span class="rspec">${escapeHtml(parts.join(" · "))}${exp}</span>
+    <span class="rsrc" title="Allowed because vault item ${escapeHtml(r.secret_name)} is bound to this host. Remove the binding, or this project's access to the item, to take it away.">🔑 vault · ${escapeHtml(r.secret_name)}</span>
+  </div>`;
+  }
   const move = r.scope === "global"
     ? `<button type="button" class="mini" data-move-rule="${r.id}" data-to="project" title="Make this rule apply to this project only">→ this project</button>`
     : `<button type="button" class="mini" data-move-rule="${r.id}" data-to="global" title="Make this rule apply to every project">→ all projects</button>`;

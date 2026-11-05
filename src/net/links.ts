@@ -11,6 +11,7 @@ import { getDriver } from "../driver";
 import type { ByteStream } from "../driver/types";
 import { recordRequest } from "./events";
 import { ensureGuestTools, guestConnectCmd } from "./guest";
+import { VAULT_HOST } from "./vaultfetch";
 
 const driver = getDriver();
 // local copy of core/projects' refFor to avoid an import cycle
@@ -19,9 +20,11 @@ const refFor = (name: string) => `sadbox-${name}`;
 /** The name a VM uses for another project: <project-name>.sadbox.internal */
 export const LINK_DOMAIN = "sadbox.internal";
 const LINK_HOST = /^([a-z0-9-]+)\.sadbox\.internal\.?$/i;
-/** The project name a host means, if it is a link name (any *.sadbox.internal). */
+/** The project name a host means, if it is a link name (any *.sadbox.internal
+ *  but the vault's own, which the proxy answers itself — net/vaultfetch.ts). */
 export function linkTarget(host: string): string | null | undefined {
-  const h = host.toLowerCase();
+  const h = host.toLowerCase().replace(/\.$/, "");
+  if (h === VAULT_HOST) return undefined;
   if (h !== LINK_DOMAIN && !h.endsWith("." + LINK_DOMAIN) && !h.endsWith("." + LINK_DOMAIN + ".")) return undefined;
   return LINK_HOST.exec(h)?.[1] ?? null; // null: in the domain, but not a project name
 }

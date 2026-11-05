@@ -161,8 +161,9 @@
               </label></legend>
               <div id="git-fields" hidden>
                 <label>Remote URL <input name="gitRemote" placeholder="https://github.com/you/repo.git"></label>
-                <label>Access token <input name="gitToken" type="password" placeholder="ghp_… (stored encrypted, write-only)"></label>
-                <p class="hint">The project's <code>origin</code> points here and uses this token to push / pull and sync back.</p>
+                <label>Access token <input name="gitToken" type="password" placeholder="ghp_… (kept in the vault, write-only)"></label>
+                <p class="hint">The project's <code>origin</code> points here. The token is kept in the vault
+                  (<code>GITHUB_TOKEN</code> for GitHub): the VM gets a placeholder, and the proxy swaps in the real token.</p>
               </div>
             </fieldset>
           </div>
@@ -172,7 +173,7 @@
               <input name="cloneRemote" placeholder="https://github.com/you/repo.git">
             </label>
             <label>Access token <span class="hint">— optional, required for private repos</span>
-              <input name="cloneToken" type="password" placeholder="ghp_… (stored encrypted, write-only)">
+              <input name="cloneToken" type="password" placeholder="ghp_… (kept in the vault, write-only)">
             </label>
             <p class="hint">The VM clones this repository into its workdir. Commit and
               <code>git push</code> from inside the VM — there's no local folder to sync back into.</p>

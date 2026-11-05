@@ -5,6 +5,7 @@ import { startServer } from "./api/http";
 import { startProxy } from "./net/proxy";
 import { startLoginLoop } from "./core/logins";
 import { startClaudeRefresher } from "./net/claudeoauth";
+import { migrateGitTokens } from "./core/gittoken";
 import { startForwards } from "./net/forwards";
 import { MIN_PASSWORD, authEnabled, ensurePassword, initialPasswordFile, setPassword } from "./core/auth";
 
@@ -127,6 +128,8 @@ export async function main(argv: string[]) {
       // agent logins: capture from running VMs, and Claude's refresh, owned by sadbox
       startLoginLoop();
       startClaudeRefresher();
+      // git remote tokens stored the old way (real, in the VM) move to the vault
+      migrateGitTokens().catch((e) => console.error(`⚠ git token migration: ${e instanceof Error ? e.message : e}`));
       break;
     case "setup": await setup(); break;
     case "doctor": await doctor(); break;

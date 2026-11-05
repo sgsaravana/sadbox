@@ -74,3 +74,20 @@ describe("/api/vault", () => {
     expect(r.body.error).toMatch(/not a number/);
   });
 });
+
+describe("a proxy item's hosts in the project's rules", () => {
+  test("listed as read-only allows: refused to delete or move, gone with the access", async () => {
+    const it = (await call("POST", "/api/vault", { name: "GITHUB_TOKEN", value: "ghp_x", mode: "proxy", bindings: [{ host: "github.com" }], projectIds: [A] })).body;
+    const rules = (await call("GET", `/api/projects/${A}/net/rules`)).body as any[];
+    const v = rules.find((r) => r.source === "vault");
+    expect(v).toMatchObject({ host: "github.com", action: "allow", secret_name: "GITHUB_TOKEN" });
+    for (const [m, b] of [["DELETE", undefined], ["PATCH", { scope: "global" }]] as const) {
+      const r = await call(m, `/api/projects/${A}/net/rules/${v.id}`, b);
+      expect(r.status).toBe(409);
+      expect(r.body.error).toMatch(/vault item GITHUB_TOKEN/);
+    }
+    expect((await call("DELETE", `/api/projects/${A}/net/rules/vault-nope`)).status).toBe(404);
+    await call("PUT", `/api/vault/${it.id}/projects`, { projectIds: [] });
+    expect(((await call("GET", `/api/projects/${A}/net/rules`)).body as any[]).some((r) => r.source === "vault")).toBe(false);
+  });
+});

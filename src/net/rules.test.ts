@@ -314,3 +314,59 @@ describe("moveRule", () => {
     expect(() => moveRule("missing", "global")).toThrow(/not found/);
   });
 });
+
+describe("vault rules: a proxy item allows the hosts it is bound to", () => {
+  function bound(id: string, host: string, opts: { path?: string; method?: string; expiresAt?: string; mode?: string; projectIds?: string[] } = {}) {
+    if (!db.query("SELECT 1 FROM secrets WHERE id=?").get(id)) secret(id, "real", opts.projectIds ?? [A]);
+    db.query("UPDATE secrets SET delivery=? WHERE id=?").run(opts.mode ?? "proxy", id);
+    db.query("INSERT INTO secret_bindings (id, secret_id, host, path, method, expires_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(`b${Math.random().toString(36).slice(2, 9)}`, id, host, opts.path ?? null, opts.method ?? null, opts.expiresAt ?? null);
+  }
+
+  test("a project with access is allowed to the bound host, unauthenticated requests too", () => {
+    bound("gh", "github.com");
+    const v = evaluate(A, req("github.com", "/o/r.git/info/refs?service=git-upload-pack"));
+    expect(v.decision).toBe("allow");
+    expect(v.rule?.source).toBe("vault");
+    expect(v.rule?.secret_name).toBe("S_gh");
+    expect(evaluate(A, req("api.github.com")).decision).toBe("ask"); // only what it is bound to
+  });
+
+  test("only projects with access, only proxy items", () => {
+    bound("gh", "github.com");
+    expect(evaluate(B, req("github.com")).decision).toBe("ask");
+    bound("f", "fetch.example", { mode: "fetch" });
+    expect(evaluate(A, req("fetch.example")).decision).toBe("ask");
+    expect(evaluate(null, req("github.com")).decision).toBe("ask");
+  });
+
+  test("the binding's path (query string ignored), method and expiry narrow it", () => {
+    bound("x", "api.example", { path: "/v1/*", method: "POST" });
+    expect(evaluate(A, req("api.example", "/v1/a?q=1", "POST")).decision).toBe("allow");
+    expect(evaluate(A, req("api.example", "/v1/a", "GET")).decision).toBe("ask");
+    expect(evaluate(A, req("api.example", "/v2/a", "POST")).decision).toBe("ask");
+    bound("old", "old.example", { expiresAt: new Date(Date.now() - 1000).toISOString() });
+    expect(evaluate(A, req("old.example")).decision).toBe("ask");
+  });
+
+  test("the rules people write decide first: a block wins, an own allow is reported", () => {
+    bound("gh", "github.com");
+    const allow = createRule({ scope: "project", projectId: A, action: "allow", host: "github.com" });
+    expect(evaluate(A, req("github.com")).rule?.id).toBe(allow.id);
+    createRule({ scope: "global", action: "block", host: "*.github.com" });
+    expect(evaluate(A, req("github.com")).decision).toBe("block");
+  });
+
+  test("listRules shows them for the project, read-only and labelled; gone with the access", () => {
+    bound("gh", "github.com");
+    const shown = listRules(A).filter((r) => r.source === "vault");
+    expect(shown).toHaveLength(1);
+    expect(shown[0]).toMatchObject({ scope: "project", project_id: A, action: "allow", host: "github.com", note: "vault item S_gh" });
+    expect(shown[0].id.startsWith("vault-")).toBe(true);
+    expect(listRules().some((r) => r.source === "vault")).toBe(false);
+    expect(listRules(B).some((r) => r.source === "vault")).toBe(false);
+    db.query("DELETE FROM project_secrets WHERE project_id=? AND secret_id='gh'").run(A);
+    expect(listRules(A).some((r) => r.source === "vault")).toBe(false);
+    expect(evaluate(A, req("github.com")).decision).toBe("ask");
+  });
+});
