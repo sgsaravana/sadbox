@@ -78,6 +78,8 @@ Design: [`research/12-vaults.md`](research/12-vaults.md),
 | Env files ✓ | `.env` / `.env.*` never copied into a VM (create, rebuild, push) |
 | Push to VM ✓ | Copy the folder's changed files into a running VM |
 | Service status ✓ | Home page shows whether Apple's container service is up, and why not |
+| Git remote tokens in the vault ✓ | The token given for a project's remote becomes a proxy vault item (`GITHUB_TOKEN` with GitHub's hosts, `GITLAB_TOKEN`, or `GIT_TOKEN`), reused by name + value; the VM gets a placeholder via git's credential helper. Older projects' `~/.git-credentials` (a real token in the VM) are moved over and deleted on the next supervisor start |
+| `vault.sadbox.internal` vs links ✓ | The proxy took the vault's own name for a link to a project called "vault", so `sadbox-vault`, `/v1/NAME` and git's credential helper got a 403 inside VMs. Fixed in `linkTarget`; covered by e2e.ts |
 | Bindings allow their hosts ✓ | A project with access to a proxy item is allowed to the item's bound hosts (host, path, method, expiry) without a network rule, so the first, unauthenticated `git clone` request isn't held. Derived at request time, shown read-only in Rules (🔑 vault · NAME); a block rule still wins |
 
 ## Then: Linux support

@@ -106,9 +106,10 @@ esac
 // For an https host it asks the proxy for the vault's proxy item bound to that
 // host and hands git its placeholder as the password — git sends it in Basic
 // auth and the proxy swaps in the real token. So `git clone https://github.com/…`
-// works with the vault's GITHUB_TOKEN, and the token never enters the VM. A
-// token given to the project itself (~/.git-credentials) is left to go first;
-// with nothing in the vault for the host, git carries on as it would without.
+// works with the vault's GITHUB_TOKEN, and the token never enters the VM (a
+// project's own remote token is such an item too — core/gittoken.ts). A
+// ~/.git-credentials someone wrote in the VM is left to go first; with nothing
+// in the vault for the host, git carries on as it would without.
 const GIT_CREDENTIAL_SH = `#!/bin/sh
 [ "$1" = get ] || exit 0
 proto= host=

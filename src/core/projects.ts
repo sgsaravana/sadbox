@@ -2,7 +2,6 @@ import { existsSync, realpathSync, statSync } from "fs";
 import { rm } from "fs/promises";
 import { join } from "path";
 import { config } from "../config";
-import { encrypt, decrypt } from "../crypto";
 import { db, logEvent } from "../db";
 import { getDriver } from "../driver";
 import { LONG_TASK_MS, type ProjectInfo, type ProjectStats } from "../driver/types";
@@ -22,6 +21,7 @@ import { isEnvFile } from "./envfiles";
 import { copyOutHistory, historyOf, linkHistory, prepareHistory } from "./history";
 import { applyLoginsQuietly, purgeProjectLogins } from "./logins";
 import { forgetVitals, liveStats, liveToolchain, QUERY_TIMEOUT_MS } from "./vitals";
+import { gitTokenForCreate, hasGitToken, migrateGitToken, setProjectGitToken } from "./gittoken";
 
 const driver = getDriver();
 
@@ -147,27 +147,9 @@ export function getProject(id: string): ProjectRow | null {
   return db.query<ProjectRow, [string]>("SELECT * FROM projects WHERE id = ?").get(id);
 }
 
-/** Store an access token via git's credential helper so pushes/pulls/clones
- *  authenticate. The token lives at ~/.git-credentials (0600) inside the VM —
- *  reliable for agent-driven git regardless of shell env — and encrypted on the
- *  host. Written before any clone so private repos can be fetched. */
-async function writeGitCredentials(ref: string, url: string, token: string) {
-  const host = hostFromUrl(url);
-  // credential line matched by protocol+host; username x-access-token works
-  // for GitHub PAT/App tokens, and token-as-password works broadly elsewhere
-  const credLine = `https://x-access-token:${token}@${host}\n`;
-  const write = await driver.execWithStdin(
-    ref,
-    `umask 077 && cat > ~/.git-credentials && ` +
-    `git config --global credential.helper store && ` +
-    `git config --global credential.https://${host}.username x-access-token`,
-    new TextEncoder().encode(credLine),
-  );
-  if (write.exitCode !== 0) throw new Error(`git credential setup failed: ${write.stderr}`);
-}
-
-/** Point the workdir's `origin` at an external remote and, if a token was
- *  given, store it via git's credential helper so pushes/pulls authenticate. */
+/** Point the workdir's `origin` at an external remote. Its token, if any, is a
+ *  proxy vault item (core/gittoken.ts): git's credential helper signs in with
+ *  the placeholder, and the real token never enters the VM. */
 async function configureGitRemote(ref: string, project: ProjectRow) {
   if (!project.git_remote) return;
   const url = project.git_remote;
@@ -178,7 +160,6 @@ async function configureGitRemote(ref: string, project: ProjectRow) {
     `|| git remote add origin ${shellArg(url)})`;
   const r = await driver.exec(ref, ["sh", "-c", setRemote]);
   if (r.exitCode !== 0) throw new Error(`git remote setup failed: ${r.stderr}`);
-  if (project.git_token_enc) await writeGitCredentials(ref, url, decrypt(project.git_token_enc));
 }
 
 /** Clone an external repo into the guest workdir (the "git only" create mode).
@@ -271,6 +252,13 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
     if (isolated) throw new Error(`could not connect the VM to the egress proxy: ${e instanceof Error ? e.message : e}`);
   }
 
+  // vault access (create only), and the env file with its placeholders — before
+  // git runs, since the credential helper asks the proxy for the git token's
+  // placeholder. A token stored the old way moves to the vault first.
+  if (opts.assignSecretIds?.length) setProjectItems(p.id, opts.assignSecretIds);
+  await migrateGitToken(p, { fresh: true });
+  await injectVault(p.id);
+
   if (empty) {
     // nothing to seed: the workdir is where repositories get cloned, and commits
     // in them need an author
@@ -282,8 +270,7 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
     db.query("UPDATE projects SET base_sha = NULL, last_synced_sha = NULL, source_branch = NULL WHERE id = ?").run(p.id);
   } else if (cloneMode) {
     if (!p.git_remote) throw new Error("no git remote to clone from");
-    // creds first (private repos), then clone straight into the workdir
-    if (p.git_token_enc) await writeGitCredentials(ref, p.git_remote, decrypt(p.git_token_enc));
+    // clone straight into the workdir (a private repo signs in through the vault)
     const remote = p.git_remote;
     const info = await duringSetup(p.id, () => cloneIntoWorkdir(ref, remote, p.name));
     db.query("UPDATE projects SET base_sha = ?, last_synced_sha = ?, source_branch = ? WHERE id = ?")
@@ -316,8 +303,7 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   // secrets + proxy env source-hooks for the guest's shells (both modes)
   await installShellHooks(ref);
 
-  // external git remote + credentials — local mode only; clone mode already has
-  // origin (from the clone) and credentials written above.
+  // external git remote — local mode only; clone mode already has origin (from the clone)
   if (!cloneMode && !empty) await configureGitRemote(ref, p);
 
   // The base image is built once and its agents go stale, so bring claude, omp
@@ -354,9 +340,6 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
     });
   }
 
-  // assign (create only) then (re)write the env file from whatever's assigned
-  if (opts.assignSecretIds?.length) setProjectItems(p.id, opts.assignSecretIds);
-  await injectVault(p.id);
   // the agents' logins sadbox keeps (Claude's as placeholders)
   await applyLoginsQuietly(p);
 
@@ -401,20 +384,26 @@ export async function createProject(opts: {
   const notes: string[] = []; // logged once the project's row exists
   const image = await resolveImage((m) => notes.push(m));
   const gitRemote = opts.git?.remote ?? null;
-  const gitTokenEnc = opts.git?.token ? encrypt(opts.git.token) : null;
+  // the remote's token becomes a proxy vault item the project is given (core/gittoken.ts)
+  const token = opts.git?.token?.trim();
+  const secretIds = [...new Set(opts.secretIds ?? [])];
+  if (gitRemote && token) {
+    const tokenItem = gitTokenForCreate(gitRemote, token, secretIds);
+    if (!secretIds.includes(tokenItem)) secretIds.push(tokenItem);
+  }
   // base_sha/source_branch recorded by provisionVM once the workdir is seeded
   db.query(
     `INSERT INTO projects (id, name, image, state, source_path, source_branch, base_sha, last_synced_sha, apps, git_remote, git_token_enc, empty)
      VALUES (?, ?, ?, 'creating', ?, NULL, NULL, NULL, ?, ?, ?, ?)`,
   ).run(id, name, image, opts.sourcePath && !empty ? opts.sourcePath : "",
-        JSON.stringify(opts.apps ?? []), gitRemote, gitTokenEnc, empty ? 1 : 0);
+        JSON.stringify(opts.apps ?? []), gitRemote, null, empty ? 1 : 0);
   for (const n of notes) logEvent(id, "image", n);
   const earlier = historyOf(name);
   if (earlier) logEvent(id, "history", `agent history of an earlier ${name} mounted (${earlier.tools.map((t) => t.tool).join(", ")}, ${mb(earlier.bytes)})`);
   logEvent(id, "create.start", empty ? `${name}, empty workdir` : cloneMode ? `${name} cloning ${gitRemote}` : `${name} from ${opts.sourcePath}`);
 
   try {
-    await provisionVM(getProject(id)!, { assignSecretIds: opts.secretIds });
+    await provisionVM(getProject(id)!, { assignSecretIds: secretIds });
     db.query("UPDATE projects SET state = 'running' WHERE id = ?").run(id);
     logEvent(id, "create.done");
   } catch (e) {
@@ -506,7 +495,7 @@ async function loadDetails(id: string) {
     last_synced_sha: p.last_synced_sha,
     apps: JSON.parse(p.apps),
     git_remote: p.git_remote,
-    has_git_token: p.git_token_enc != null,
+    has_git_token: hasGitToken(p),
     net_cutoff: p.net_cutoff === 1,
     error: p.error,
     created_at: p.created_at,
@@ -593,12 +582,14 @@ export async function setGitRemote(id: string, git: { remote?: string; token?: s
   const ref = refFor(p.name);
   if ((await driver.inspect(ref)).state !== "running") throw new Error("start the VM first — the remote is set inside it");
   const token = git.token?.trim();
-  const sameHost = p.git_remote != null && hostFromUrl(p.git_remote) === hostFromUrl(remote);
-  const tokenEnc = token ? encrypt(token) : sameHost ? p.git_token_enc : null;
-  await configureGitRemote(ref, { ...p, git_remote: remote, git_token_enc: tokenEnc });
-  db.query("UPDATE projects SET git_remote = ?, git_token_enc = ? WHERE id = ?").run(remote, tokenEnc, id);
-  logEvent(id, "git.remote", `${p.git_remote ? `${p.git_remote} → ` : ""}${remote}${tokenEnc ? " (with token)" : ""}`);
-  return { git_remote: remote, has_git_token: tokenEnc != null };
+  await migrateGitToken(p); // a token stored the old way: to the vault, out of the VM
+  await configureGitRemote(ref, { ...p, git_remote: remote });
+  // without a new token, whatever the vault has for the new remote's host signs git in
+  if (token) await setProjectGitToken(id, remote, token);
+  db.query("UPDATE projects SET git_remote = ? WHERE id = ?").run(remote, id);
+  const after = getProject(id)!;
+  logEvent(id, "git.remote", `${p.git_remote ? `${p.git_remote} → ` : ""}${remote}${token ? " (with token, kept in the vault)" : ""}`);
+  return { git_remote: remote, has_git_token: hasGitToken(after) };
 }
 
 /** A VM created before history was mounted keeps its agents' history on its own
@@ -770,6 +761,7 @@ export async function startProject(id: string): Promise<ProjectRow> {
       await startGuestRelay(ref);
       redialProjectSocket(id); // carriers dialed before the shutdown are dead
     }
+    await migrateGitToken(p).catch((e) => logEvent(id, "vault.git.migrate.error", String(e)));
     await injectVault(id).catch((e) => logEvent(id, "vault.inject.error", String(e)));
     await applyLoginsQuietly(p);
     const tmux = await driver.exec(ref, ["sh", "-c",
@@ -872,7 +864,7 @@ export async function projectsWithLiveState() {
     empty: isEmptyProject(r),
     source_branch: r.source_branch,
     git_remote: r.git_remote,
-    has_git_token: r.git_token_enc != null,
+    has_git_token: hasGitToken(r),
     error: r.error,
     created_at: r.created_at,
     apps: JSON.parse(r.apps),
@@ -886,6 +878,3 @@ function shellArg(v: string): string {
   return `'${v.replace(/'/g, `'\\''`)}'`;
 }
 
-function hostFromUrl(url: string): string {
-  try { return new URL(url).host; } catch { return url.replace(/^https?:\/\//, "").split("/")[0]; }
-}

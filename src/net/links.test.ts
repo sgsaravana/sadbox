@@ -58,6 +58,8 @@ describe("link names", () => {
     expect(linkTarget("API.Sadbox.Internal")).toBe("api");
     expect(linkTarget("my-api.sadbox.internal.")).toBe("my-api");
     expect(linkTarget("x.api.sadbox.internal")).toBeNull();   // in the domain, but no such name
+    expect(linkTarget("vault.sadbox.internal")).toBeUndefined(); // the vault, answered by the proxy
+    expect(linkTarget("Vault.Sadbox.Internal.")).toBeUndefined();
     expect(linkTarget("sadbox.internal")).toBeNull();
     expect(linkTarget("api.sadbox.internal.evil.com")).toBeUndefined();
     expect(linkTarget("example.com")).toBeUndefined();

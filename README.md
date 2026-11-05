@@ -460,10 +460,18 @@ Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent us
   this has its history copied out on its first rebuild. Stored history is
   listed on the Agents page with **Delete** (not while a project of that name
   exists). Logins are never part of it.
-- **Git setup** (optional, at create): give a remote URL + access token and the
-  project's `origin` is pointed there with the token stored via git's credential
-  helper (`~/.git-credentials`, 0600) so the agent can push/pull. The token is
-  encrypted at rest on the host.
+- **Git setup** (optional, at create or later from the project page): give a
+  remote URL + access token and the project's `origin` is pointed there. The
+  token becomes a **proxy vault item** the project is given — `GITHUB_TOKEN`
+  bound to `github.com`, `api.github.com` and `uploads.github.com`;
+  `GITLAB_TOKEN` to `gitlab.com`; `GIT_TOKEN` to any other remote's host —
+  so the VM holds only its placeholder: git's credential helper signs in with
+  it and the proxy swaps in the real token (and `gh` finds the placeholder in
+  `GITHUB_TOKEN`). An item with the same name and value is reused; a new token
+  updates the project's own item, or moves the project to a new one when the
+  item is shared. Projects from before this had the token in the VM's
+  `~/.git-credentials`: it moves to the vault, and the file is deleted, at the
+  supervisor's next start (a stopped VM: when it starts).
 - **Sync-back**: the guest records its workdir as a snapshot commit on a hidden
   ref (throwaway index — branch and working state untouched) → `git bundle`
   over exec stdout → fetched into a private repo whose work tree is the folder

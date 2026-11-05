@@ -778,6 +778,7 @@ function openGitRemote({ gitRemote: id, name, current, token, cloned }) {
   f.token.placeholder = token === "1" ? "leave blank to keep the current token" : "leave blank for none";
   $("#gitremote-title").textContent = `Git remote — ${name}`;
   $("#gitremote-hint").textContent = "Set as origin in the VM's workdir, so the agent can fetch and push."
+    + " A token is kept in the vault; the VM only gets a placeholder."
     + (cloned === "1" && current ? " Rebuild re-clones from this URL." : "");
   $("#gitremote-status").textContent = "";
   gitremote.showModal();
