@@ -78,6 +78,7 @@ Design: [`research/12-vaults.md`](research/12-vaults.md),
 | Env files ✓ | `.env` / `.env.*` never copied into a VM (create, rebuild, push) |
 | Push to VM ✓ | Copy the folder's changed files into a running VM |
 | Service status ✓ | Home page shows whether Apple's container service is up, and why not |
+| Bindings allow their hosts ✓ | A project with access to a proxy item is allowed to the item's bound hosts (host, path, method, expiry) without a network rule, so the first, unauthenticated `git clone` request isn't held. Derived at request time, shown read-only in Rules (🔑 vault · NAME); a block rule still wins |
 
 ## Then: Linux support
 

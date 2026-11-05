@@ -419,6 +419,7 @@ dd .spinner { display: inline-block; vertical-align: -3px; margin-right: 4px; }
 .ract.allow { background: #143326; color: var(--ok); }
 .ract.block { background: #3a1414; color: var(--bad); }
 .rscope { font-size: 11px; color: var(--dim); min-width: 52px; }
+.rsrc { font-size: 11px; color: var(--dim); white-space: nowrap; cursor: help; }
 .rspec { flex: 1; font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
 .secref { color: var(--ok); }
 .link-del { background: none; border: none; color: var(--dim); padding: 2px 6px; cursor: pointer; }

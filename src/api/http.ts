@@ -15,7 +15,7 @@ import { baseImageToolchain } from "../core/toolchain";
 import { deleteHistory, listHistory } from "../core/history";
 import { applyToRunning, forgetLogin, listLogins } from "../core/logins";
 import { claudeLogin, refreshClaude } from "../net/claudeoauth";
-import { createRule, deleteRule, listRules, moveRule, createHeaderRule, deleteHeaderRule, listHeaderRules } from "../net/rules";
+import { createRule, deleteRule, isVaultRule, listRules, moveRule, createHeaderRule, deleteHeaderRule, listHeaderRules } from "../net/rules";
 import { isCutOff, setCutoff } from "../net/cutoff";
 import { resolveApproval, listPending, pendingCounts } from "../net/approvals";
 import { hostSummary, recentRequests, requestsBefore, subscribe } from "../net/events";
@@ -218,6 +218,11 @@ export function startServer() {
           return json(createRule({ scope: "project", projectId: m[1], action: b.action, host: b.host, path: b.path, method: b.method, note: b.note }), 201);
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/net\/rules\/([\w-]+)$/);
+        // an allow that comes from a vault item goes with the item's binding or the project's access
+        if (m && (req.method === "DELETE" || req.method === "PATCH") && isVaultRule(m[2])) {
+          const r = listRules(m[1]).find((x) => x.id === m![2]);
+          return err(r ? `allowed by vault item ${r.secret_name}: remove its binding for ${r.host}, or this project's access to it` : "rule not found", r ? 409 : 404);
+        }
         if (m && req.method === "DELETE") { deleteRule(m[2]); return json({ ok: true }); }
         // move a rule between this project and all projects: {scope: "global" | "project"}
         if (m && req.method === "PATCH") {

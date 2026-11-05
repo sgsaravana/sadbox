@@ -178,9 +178,10 @@ public clone, gh install all fine; 401s where a token is needed).
 
 1. Start a throwaway supervisor (short data path; leaves the real one on 7070 alone):
    `SADBOX_DATA=/tmp/sbxd2 SADBOX_PORT=17070 SADBOX_PROXY_PORT=17071 SADBOX_PASSWORD=spike-d2 bun run src/index.ts serve`
-   and create an empty project `spike-d2`. Allow (this project) `github.com`,
-   `api.github.com`, `uploads.github.com`, `codeload.github.com`,
-   `deb.debian.org`, `security.debian.org`: a binding does not allow its host.
+   and create an empty project `spike-d2`. Allow (this project)
+   `deb.debian.org` and `security.debian.org` for installing `gh`. The GitHub
+   and Anthropic hosts need no rule: a proxy item's bindings allow them
+   (expect "allowed · 🔑 GITHUB_TOKEN" in Activity).
 2. Make **least-privilege, short-lived** tokens, revoked afterwards: a GitHub
    fine-grained PAT (one private test repo, contents read/write, metadata read,
    pull requests read) and an `ANTHROPIC_API_KEY` from a throwaway workspace.

@@ -414,7 +414,11 @@ Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent us
     response headers **and bodies** (streamed, so SSE is not delayed). Sending a
     placeholder to any other host **asks first** (🔑 approval: allowing for a
     window or always adds a binding); over plain http it is refused. Changing
-    the value takes effect on the next request.
+    the value takes effect on the next request. A project with access to a
+    proxy item is also **allowed to its bound hosts** (same host, path, method
+    and expiry), so `git clone` works without adding network rules; these
+    allows show read-only under Network → Rules (🔑 vault · NAME) and go with
+    the binding or the access. A block rule still wins over them.
   - **fetch at runtime**: nothing is in the VM until a program asks —
     `sadbox-vault get NAME` (`--json` for the typed value; `sadbox-vault list`
     shows what the VM may use, without values), or
@@ -622,7 +626,7 @@ Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent us
 | GET | `/api/history` | stored agent history per project name |
 | GET | `/api/system/status` | whether the VM backend's service (Apple's `container` API server) is up, and why not |
 | PUT | `/api/projects/:id/network` | `{cutoff: true\|false}` — cut the VM off from every network, or let it out again |
-| PATCH | `/api/projects/:id/net/rules/:rid` | `{scope: "global"\|"project"}` — move a rule between this project and all projects |
+| PATCH | `/api/projects/:id/net/rules/:rid` | `{scope: "global"\|"project"}` — move a rule between this project and all projects (a `source: "vault"` allow, id `vault-…`, is read-only: 409) |
 | GET/PUT | `/api/settings` | default VM resources (CPUs, memory, disk) for new projects |
 | GET | `/api/toolchain` | agents/tools + versions baked into the base image (`?refresh=1` to re-probe) |
 | GET | `/api/fs/dirs?path=` | folder picker (lists subdirs, flags git repos) |
