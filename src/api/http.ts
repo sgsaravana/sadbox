@@ -5,7 +5,7 @@ import { config } from "../config";
 import { staticRoutes, aceFiles } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
-import { addBinding, createItem, deleteBinding, deleteItem, getItem, injectVault, listItems, projectVaultView, revealItem, revokeFetchGrant, setItemProjects, setProjectItems, updateItem } from "../core/vault";
+import { addBinding, applyItem, createItem, deleteBinding, deleteItem, getItem, injectVault, listItems, projectVaultView, revealItem, revokeFetchGrant, setItemProjects, setProjectItems, updateItem } from "../core/vault";
 import { connectSyncFolder, listProjects, setGitRemote, createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject, setProjectMemory, startProject, stopProject } from "../core/projects";
 import { syncStatus, syncProject } from "../core/sync";
 import { pushProject } from "../core/push";
@@ -422,10 +422,11 @@ export function startServer() {
         if (p === "/api/vault" && req.method === "GET") return json(listItems());
         if (p === "/api/vault" && req.method === "POST") {
           const b = await req.json();
-          return json(createItem({
+          const made = createItem({
             name: b.name, value: b.value, kind: b.kind, type: b.type, mode: b.mode, inEnv: b.inEnv,
             askOnFetch: b.askOnFetch, swapUrl: b.swapUrl, swapBody: b.swapBody, bindings: b.bindings, projectIds: b.projectIds,
-          }), 201);
+          });
+          return json(await applyItem(made.id), 201); // into the running VMs it was given to
         }
         m = p.match(/^\/api\/vault\/([\w-]+)$/);
         if (m && req.method === "GET") return json(getItem(m[1]));

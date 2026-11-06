@@ -91,3 +91,17 @@ describe("a proxy item's hosts in the project's rules", () => {
     expect(((await call("GET", `/api/projects/${A}/net/rules`)).body as any[]).some((r) => r.source === "vault")).toBe(false);
   });
 });
+
+describe("a new item given to a running project", () => {
+  test("reaches its VM at once: env file written with the placeholder, access no longer pending", async () => {
+    exec.mockClear();
+    const made = (await call("POST", "/api/vault", { name: "GITHUB_TOKEN", value: "ghp_new", mode: "proxy", bindings: [{ host: "github.com" }], projectIds: [A] })).body;
+    expect(made.projectIds).toEqual([A]);
+    const env = exec.mock.calls.find((c) => String(c[1]).includes(".sadbox/env"));
+    expect(env).toBeDefined();
+    const written = new TextDecoder().decode(env![2] as Uint8Array);
+    expect(written).toMatch(/^GITHUB_TOKEN='ghp_sbx/m);
+    expect(written).not.toContain("ghp_new");
+    expect(db.query("SELECT status FROM project_secrets WHERE secret_id = ?").get(made.id)).toEqual({ status: "injected" });
+  });
+});
