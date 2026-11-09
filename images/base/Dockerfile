@@ -5,7 +5,7 @@ FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git tmux ncurses-term procps unzip ripgrep \
-      openssh-client locales sudo less jq libatomic1 \
+      openssh-client locales sudo less jq libatomic1 bash-completion \
  && rm -rf /var/lib/apt/lists/* \
  && sed -i 's/# en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen && locale-gen
 
