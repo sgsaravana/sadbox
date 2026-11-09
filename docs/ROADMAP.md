@@ -80,6 +80,7 @@ Design: [`research/12-vaults.md`](research/12-vaults.md),
 | Service status ✓ | Home page shows whether Apple's container service is up, and why not |
 | Git remote tokens in the vault ✓ | The token given for a project's remote becomes a proxy vault item (`GITHUB_TOKEN` with GitHub's hosts, `GITLAB_TOKEN`, or `GIT_TOKEN`), reused by name + value; the VM gets a placeholder via git's credential helper. Older projects' `~/.git-credentials` (a real token in the VM) are moved over and deleted on the next supervisor start |
 | `vault.sadbox.internal` vs links ✓ | The proxy took the vault's own name for a link to a project called "vault", so `sadbox-vault`, `/v1/NAME` and git's credential helper got a 403 inside VMs. Fixed in `linkTarget`; covered by e2e.ts |
+| Forwarded ports behind sign-in ✓ | A forward is HTTP for a browser signed in to sadbox by default: the UI hands out a one-time ticket, the forward trades it for a cookie for that port only (ends with the UI session), and sadbox's cookies never reach the app. WebSockets included. A forward can be opened to anyone (raw TCP) for non-HTTP servers. Existing forwards move behind sign-in |
 | Bindings allow their hosts ✓ | A project with access to a proxy item is allowed to the item's bound hosts (host, path, method, expiry) without a network rule, so the first, unauthenticated `git clone` request isn't held. Derived at request time, shown read-only in Rules (🔑 vault · NAME); a block rule still wins |
 
 ## Then: Linux support
@@ -161,11 +162,10 @@ Ordered roughly by priority. Each item is independent of Linux unless noted.
 
 | # | Item | Notes |
 |---|---|---|
-| 1 | **Forwarded ports behind sign-in** | Today they are raw TCP open to anyone who reaches the host. Route through the authenticated HTTP server (or bind to loopback + Caddy). Security gap. |
-| 2 | **Outbound WebSockets through the proxy** | Upgrade passthrough in `src/net/proxy.ts`, subject to the same rules/approvals. |
-| 3 | **Vault KEK in Keychain** | Replace the data-dir keyfile on macOS (`research/05`); it now also protects the agent logins. Pairs with L4 on Linux. |
-| 4 | **Non-git local folders** | tar-in copy + tar-out sync-back with `git diff --no-index` preview and backed-up apply (`research/06`). |
-| 5 | **Live env-file / proxy-env rotation** | Items still written to the env file, and the proxy env, reach new shells only. |
-| 6 | **Workdir `.env` writer** | Write a project's placeholder lines into `~/workdir/.env` for apps that read `.env` directly (sadbox-managed keys only). |
-| 7 | **DB backup** | Litestream (or periodic snapshot) of the SQLite file (`research/07`). |
-| 8 | **Scale measurements** | RAM/balloon behavior with 10+ idle VMs; workdir copy-in throughput for 1–2 GB repos (open questions #4, #5). |
+| 1 | **Outbound WebSockets through the proxy** | Upgrade passthrough in `src/net/proxy.ts`, subject to the same rules/approvals. |
+| 2 | **Vault KEK in Keychain** | Replace the data-dir keyfile on macOS (`research/05`); it now also protects the agent logins. Pairs with L4 on Linux. |
+| 3 | **Non-git local folders** | tar-in copy + tar-out sync-back with `git diff --no-index` preview and backed-up apply (`research/06`). |
+| 4 | **Live env-file / proxy-env rotation** | Items still written to the env file, and the proxy env, reach new shells only. |
+| 5 | **Workdir `.env` writer** | Write a project's placeholder lines into `~/workdir/.env` for apps that read `.env` directly (sadbox-managed keys only). |
+| 6 | **DB backup** | Litestream (or periodic snapshot) of the SQLite file (`research/07`). |
+| 7 | **Scale measurements** | RAM/balloon behavior with 10+ idle VMs; workdir copy-in throughput for 1–2 GB repos (open questions #4, #5). |

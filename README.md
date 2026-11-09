@@ -562,10 +562,21 @@ Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent us
   removed with the project. They listen on all interfaces of the host, so a
   forward is reachable on the **same domain as the web UI** with just the port
   changed (`http://sadbox.internal.example.com:8080`), even when the UI itself
-  is on localhost behind a reverse proxy. They are plain, unauthenticated TCP —
-  not behind that proxy's TLS or sadbox's sign-in — so anyone who can reach the
-  host can reach a forwarded port; set `SADBOX_FORWARD_HOST=localhost` to keep
-  forwards on this machine only.
+  is on localhost behind a reverse proxy. Set `SADBOX_FORWARD_HOST=localhost`
+  to keep forwards on this machine only. A forward is one of two kinds:
+  - **🔒 sign-in** (the default): HTTP, for a browser signed in to sadbox
+    only. Open it from its link on the detail view: the UI hands your browser
+    a one-time ticket, which the forward trades for a cookie good for that
+    port alone, ending when you sign out of sadbox (or the password changes).
+    A page loaded without one is sent to the UI to get it (signing in first if
+    need be); other requests get 401, WebSockets included. sadbox's own
+    cookies are removed from every request before it reaches the app, and the
+    app cannot set them. The path `/__sadbox/auth` is sadbox's, not the app's.
+  - **🔓 anyone**: raw TCP for anyone who can reach the host — for a database
+    or another non-HTTP server, or an API that another forward's browser code
+    calls (a `fetch` from one port to another sends no cookies). Click the
+    lock on a forward to switch it.
+  Either way the port is plain HTTP/TCP, not behind a reverse proxy's TLS.
 - **Project links** (VM to VM): VMs cannot reach each other or the host, so
   one project calling another — a UI's server-side code calling an API in
   another VM — needs a link. On the calling project's detail view, under
@@ -592,8 +603,9 @@ Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent us
     Clients that ignore the proxy — database drivers, raw TCP — cannot use a
     link.
   - If the UI's **browser** code calls the API, the request comes from your
-    browser on the host, not from the VM: give the API a port forward and
-    point the UI at that (e.g. `http://localhost:3000`). No link needed.
+    browser on the host, not from the VM: give the API a port forward open
+    to anyone and point the UI at that (e.g. `http://localhost:3000`). No
+    link needed.
 - **Sign-in**: the UI and API require a password (one user). A session is an
   HttpOnly, `SameSite=Strict` cookie, valid 30 days; only the login page and
   static scripts are served without one, and that includes the terminal
@@ -661,7 +673,8 @@ Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent us
 | POST | `/api/projects/:id/files/rename` | rename or move (`{from, to}`) |
 | GET/PUT/DELETE | `/api/projects/:id/file?path=` | read / save (`{path, content, baseHash, force?}` — 409 if it changed in the VM) / delete |
 | GET/POST | `/api/projects/:id/links`, DELETE `…/:lid` | project links: `{outgoing, incoming}` / allow this VM to reach another project's port (`{to, port}`, `to` = id or name) / remove (from either end) |
-| GET/POST | `/api/projects/:id/forwards`, DELETE `…/:fid` | port forwards (`{hostPort, guestPort}`) — host port → VM port |
+| GET/POST | `/api/projects/:id/forwards`, PATCH/DELETE `…/:fid` | port forwards (`{hostPort, guestPort, access}`) — host port → VM port; `access` is `signin` (default) or `open`, and PATCH `{access}` switches it |
+| GET | `/forwards/:fid/open?next=/path` | open a forward in the browser: a sign-in forward gets a one-time ticket at its own address |
 | GET/POST | `/api/net/rules`, DELETE `/api/net/rules/:id` | global allow/block rules |
 | GET/POST | `/api/net/headers`, DELETE `/api/net/headers/:id` | global header rewrites |
 | GET | `/api/net/pending` | `{projectId: count}` pending approvals (nav badges) |
@@ -766,8 +779,9 @@ Notes:
   other machines put a TLS reverse proxy in front (see the Caddy setup under
   [Deploying](#deploying)) rather than exposing `SADBOX_HOST=0.0.0.0` directly,
   or the password and session cookie cross the network unencrypted.
-- **Forwarded ports are not covered by sign-in**: they are raw TCP to the app
-  in the VM, reachable by anyone who can reach this machine on that port.
+- **Forwarded ports are plain HTTP**: a sign-in forward's cookie crosses the
+  network unencrypted when it is opened from another machine, and a forward
+  opened to anyone is raw TCP that anyone who can reach this machine can use.
 - Apple silicon + macOS 26 only (see [Supported platforms](#supported-platforms));
   the Linux/Cloud Hypervisor driver and docker-compose packaging are designed
   (`docs/research/02`) but not built.

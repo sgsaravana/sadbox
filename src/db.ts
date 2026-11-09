@@ -306,6 +306,23 @@ db.run(`
     guest_port INTEGER NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
+// access: 'signin' = HTTP, only for a browser signed in to sadbox (net/forwards.ts);
+// 'open' = raw TCP for anyone who reaches the port. Forwards made before this
+// were open; they move behind sign-in.
+{
+  const has = db.query<{ name: string }, []>("PRAGMA table_info(port_forwards)").all()
+    .some((c) => c.name === "access");
+  if (!has) db.run("ALTER TABLE port_forwards ADD COLUMN access TEXT NOT NULL DEFAULT 'signin'");
+}
+// A browser's pass to one sign-in forward, handed out by a signed-in session of
+// the web UI and ending with it (core/auth.ts). Only hashes are stored.
+db.run(`
+  CREATE TABLE IF NOT EXISTS forward_sessions (
+    token_hash TEXT PRIMARY KEY,
+    forward_id TEXT NOT NULL,
+    session_hash TEXT,                         -- the UI session it came from (NULL with sign-in off)
+    expires_at INTEGER NOT NULL                -- ms since epoch
+  )`);
 
 // Agent logins kept by the supervisor (core/logins.ts, research/13 A4 / A7):
 // one per tool and provider, for every project. 'api' logins (an API key) are
