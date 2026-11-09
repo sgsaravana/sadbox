@@ -14,7 +14,9 @@
 //   --since <epoch ms>   also report bootMs: from then (the VMM's launch) to the first answer
 //   --ping-only          stop after the first answer (a restart's boot time)
 //   --poweroff           power the VM off at the end
+//   --vmm-pid <pid>      give up waiting as soon as that process (the VMM) has exited
 import net from "node:net";
+import { readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Duplex } from "node:stream";
 import { createHash, randomBytes } from "node:crypto";
@@ -31,6 +33,7 @@ const jsonOut = arg("--json");
 const since = Number(arg("--since") ?? 0);
 const pingOnly = process.argv.includes("--ping-only");
 const powerOff = process.argv.includes("--poweroff");
+const vmmPid = Number(arg("--vmm-pid") ?? 0);
 if (!vsockPath && !tcp && !relay) { console.error("usage: bun probe.ts --vsock <ch.vsock> | --tcp host:port | --relay <container>"); process.exit(2); }
 
 // ---- transport + framing ----
@@ -174,12 +177,19 @@ async function until(get: () => string, re: RegExp, limit: number, what: string)
   }
 }
 
+/** Running, not gone or a zombie (an exited child stays one until its parent waits). */
+function alive(pid: number): boolean {
+  try { return !/^\d+ \(.*\) Z/.test(readFileSync(`/proc/${pid}/stat`, "utf8")); }
+  catch { return false; }
+}
+
 // first contact (with --wait: the boot measurement, from now until the agent answers)
 const t0 = performance.now();
 let hello: any;
 for (;;) {
   try { hello = await request({ op: "ping" }); break; }
   catch (e) {
+    if (vmmPid && !alive(vmmPid)) { console.error(`the VMM (pid ${vmmPid}) exited before the agent answered`); process.exit(1); }
     if (performance.now() - t0 > waitMs) { console.error(`agent not reachable: ${(e as Error).message}`); process.exit(1); }
     await Bun.sleep(20);
   }

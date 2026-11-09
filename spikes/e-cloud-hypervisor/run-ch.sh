@@ -44,7 +44,7 @@ boot() {
   "$CH" --api-socket "path=$W/api.sock" \
     --kernel "$KERNEL" \
     --cmdline "console=hvc0 root=/dev/vda rw init=/sbin/sadbox-agent sadbox.hostname=spike-e quiet" \
-    --disk "path=$W/disk.ext4" \
+    --disk "path=$W/disk.ext4,image_type=raw" \
     --cpus boot=2 --memory size=2048M \
     --vsock "cid=3,socket=$W/ch.vsock" \
     --console "file=$W/console-$1.log" --serial off \
@@ -66,16 +66,18 @@ await_exit() {
 status=0
 echo '{}' >"$W/probe.json"; echo '{}' >"$W/restart.json" # if the agent never answers
 launch=$(now); boot first
-bun probe.ts --vsock "$W/ch.vsock" --wait 60000 --since "$launch" --poweroff --json "$W/probe.json" || status=$?
+bun probe.ts --vsock "$W/ch.vsock" --wait 60000 --since "$launch" --vmm-pid "$ch_pid" --poweroff --json "$W/probe.json" || status=$?
 await_exit >"$W/shutdown"; shutdown_ms=$(cat "$W/shutdown")
 
 launch=$(now); boot second
-bun probe.ts --vsock "$W/ch.vsock" --wait 60000 --since "$launch" --ping-only --poweroff --json "$W/restart.json" || status=$?
+bun probe.ts --vsock "$W/ch.vsock" --wait 60000 --since "$launch" --vmm-pid "$ch_pid" --ping-only --poweroff --json "$W/restart.json" || status=$?
 await_exit >/dev/null
 
 if [ "$status" -ne 0 ]; then
   echo "--- console (first boot), last 40 lines"; tail -40 "$W/console-first.log" || true
-  echo "--- cloud-hypervisor"; cat "$W/ch-first.log" || true
+  echo "--- cloud-hypervisor (first boot)"; cat "$W/ch-first.log" || true
+  echo "--- console (restart), last 20 lines"; tail -20 "$W/console-second.log" || true
+  echo "--- cloud-hypervisor (restart)"; cat "$W/ch-second.log" || true
 fi
 
 jq -n --slurpfile p "$W/probe.json" --slurpfile r "$W/restart.json" \
