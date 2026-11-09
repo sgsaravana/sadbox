@@ -142,24 +142,39 @@ async function exec(argv: string[], opts: { user?: string; stdin?: Uint8Array } 
   return { ...r, stdout: Buffer.concat(out), stderr: Buffer.concat(err) };
 }
 
-async function request(req: Record<string, unknown>): Promise<any> {
-  const s = await dial();
-  return new Promise((resolve, reject) => {
-    frames(s, (f) => {
-      if (f.t === F.ok) { resolve(JSON.parse(f.p.toString())); s.destroy(); }
-      else if (f.t === F.error) { reject(new Error(JSON.parse(f.p.toString()).message)); s.destroy(); }
-    }, () => reject(new Error("connection closed")));
-    s.write(jframe(F.req, req));
-  });
+/** One request → ok. With `limit`, give up (and hang up) after that many ms:
+ *  CH can accept a CONNECT before anything in the guest listens, and then
+ *  the connection just sits there. */
+async function request(req: Record<string, unknown>, limit = 0): Promise<any> {
+  let s: net.Socket | undefined;
+  const attempt = (async () => {
+    s = await dial();
+    return new Promise((resolve, reject) => {
+      frames(s!, (f) => {
+        if (f.t === F.ok) { resolve(JSON.parse(f.p.toString())); s!.destroy(); }
+        else if (f.t === F.error) { reject(new Error(JSON.parse(f.p.toString()).message)); s!.destroy(); }
+      }, () => reject(new Error("connection closed")));
+      s!.write(jframe(F.req, req));
+    });
+  })();
+  if (!limit) return attempt;
+  let timer: Timer | undefined;
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => { s?.destroy(); reject(new Error(`no answer in ${limit} ms`)); }, limit); });
+  try { return await Promise.race([attempt, timeout]); }
+  finally { clearTimeout(timer); }
 }
 
 // ---- checks ----
 type Result = { name: string; ok: boolean; detail: string };
 const results: Result[] = [];
 const timings: Record<string, number> = {};
+const CHECK_LIMIT_MS = 180_000;
 async function check(name: string, fn: () => Promise<string>) {
-  try { results.push({ name, ok: true, detail: await fn() }); }
+  let timer: Timer | undefined;
+  const limit = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`timed out after ${CHECK_LIMIT_MS / 1000} s`)), CHECK_LIMIT_MS); });
+  try { results.push({ name, ok: true, detail: await Promise.race([fn(), limit]) }); }
   catch (e) { results.push({ name, ok: false, detail: e instanceof Error ? e.message : String(e) }); }
+  finally { clearTimeout(timer); }
   const r = results.at(-1)!;
   console.log(`${r.ok ? "PASS" : "FAIL"}  ${name} — ${r.detail}`);
 }
@@ -187,7 +202,7 @@ function alive(pid: number): boolean {
 const t0 = performance.now();
 let hello: any;
 for (;;) {
-  try { hello = await request({ op: "ping" }); break; }
+  try { hello = await request({ op: "ping" }, 2000); break; }
   catch (e) {
     if (vmmPid && !alive(vmmPid)) { console.error(`the VMM (pid ${vmmPid}) exited before the agent answered`); process.exit(1); }
     if (performance.now() - t0 > waitMs) { console.error(`agent not reachable: ${(e as Error).message}`); process.exit(1); }
@@ -200,7 +215,7 @@ console.log(`agent: ${JSON.stringify(hello)} (first answer after ${timings.first
 
 async function finish(failed: number): Promise<never> {
   if (jsonOut) await Bun.write(jsonOut, JSON.stringify({ agent: hello, results, timings }, null, 2));
-  if (powerOff) await request({ op: "poweroff" }).catch(() => {});
+  if (powerOff) await request({ op: "poweroff" }, 5000).catch(() => {});
   process.exit(failed ? 1 : 0);
 }
 if (pingOnly) await finish(0);
