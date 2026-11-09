@@ -145,17 +145,17 @@
       if (term.hasSelection()) copySelection();
     });
     // ⌘C / Ctrl+Shift+C copy (only when there's a selection — Ctrl+C stays SIGINT);
-    // ⌘V / Ctrl+Shift+V paste
+    // ⌘V / Ctrl+Shift+V paste: xterm leaves the key alone (no ^V sent) and the
+    // browser's own paste event, which xterm listens for, delivers the text.
+    // Reading navigator.clipboard here as well pasted twice, and in Safari
+    // showed a "Paste" prompt for the read.
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== "keydown") return true;
       const combo = e.metaKey || (e.ctrlKey && e.shiftKey);
       if (!combo) return true;
       const k = e.key.toLowerCase();
       if (k === "c" && term.hasSelection()) { copySelection(); return false; }
-      if (k === "v") {
-        navigator.clipboard.readText().then((t) => { if (t) term.paste(t); }).catch(() => {});
-        return false;
-      }
+      if (k === "v") return false;
       return true;
     });
 
