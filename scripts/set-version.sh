@@ -25,7 +25,8 @@ V="$VERSION" perl -pi -e 's/(SADBOX_VERSION=)v[0-9][0-9A-Za-z.\-]*/$1v$ENV{V}/g'
 
 grep -q "^export const VERSION = \"$VERSION\";" src/config.ts || { echo "src/config.ts: VERSION line not found" >&2; exit 1; }
 grep -q "\"version\": \"$VERSION\"" package.json || { echo "package.json: version field not found" >&2; exit 1; }
-if grep -q "SADBOX_VERSION=v" README.md && grep "SADBOX_VERSION=v" README.md | grep -qv "SADBOX_VERSION=v$VERSION\b"; then
+# only examples with a real version — "SADBOX_VERSION=vX.Y.Z" is a placeholder
+if grep "SADBOX_VERSION=v[0-9]" README.md | grep -qv "SADBOX_VERSION=v$VERSION\b"; then
   echo "README.md: a SADBOX_VERSION example was not updated" >&2; exit 1
 fi
 echo "version set to $VERSION"
