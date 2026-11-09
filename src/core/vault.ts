@@ -198,6 +198,15 @@ export function createItem(input: ItemInput): ItemView {
   return getItem(id);
 }
 
+/** Bring a new item into the running VMs of the projects given it at
+ *  create: their env file (with its placeholder) is rewritten. createItem only
+ *  records the access, so a VM that is running would not see the item until it
+ *  starts again. */
+export async function applyItem(id: string): Promise<ItemView> {
+  await reinject(projectsOf(id));
+  return getItem(id);
+}
+
 /** Change an item. The projects using it get their env file rewritten. */
 export async function updateItem(id: string, patch: ItemPatch): Promise<ItemView> {
   const r = itemRow(id);
