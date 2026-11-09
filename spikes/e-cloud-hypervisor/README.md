@@ -91,12 +91,43 @@ Bugs fixed along the way:
   is idle.
 - In the test relay, its stdout must be flushed before it exits.
 
-### Cloud Hypervisor on KVM (GitHub Actions)
+### Cloud Hypervisor on KVM (GitHub Actions, x86_64) — 2026-11-09
 
-_Not run yet._ Push `feature/linux`, or run the **Spike E — Cloud
-Hypervisor** workflow by hand. Then record the summary here: boot and restart
-times, per-project disk clone, exec latency, throughput, and whether the arm64
-runner has `/dev/kvm`.
+AMD EPYC 7763, CH v54.0, guest kernel 7.2.8, 2 vCPUs, 2 GB. **All 15 checks
+pass**, Claude Code's TUI under tmux included.
+
+| Measure | Value |
+|---|---|
+| image build (docker) | 43 s |
+| rootfs (export + mkfs.ext4) | 33 s, 1.8 GB used of 3.3 GB |
+| per-project disk clone (full copy, ext4) | 0.8 s |
+| boot: launch → agent answers | 6.2 s (inflated, see below) |
+| restart: launch → agent answers | 2.1 s (inflated, see below) |
+| poweroff → VMM exit | 1.06 s (the agent's 1 s SIGTERM grace) |
+| ping | 0.73 ms |
+| exec `true` p50 / p95 | 1.7 / 2.3 ms |
+| stdin / stdout | 94 / 234 MB/s |
+
+For comparison, `container exec` on macOS costs ≈ 90 ms per exec, so vsock
+exec is ~50× faster.
+
+**The boot times are an upper bound.** CH accepts a hybrid-vsock `CONNECT`
+before the guest listens, and the connection then sits unanswered. The probe
+gave each attempt 2 s before retrying, so the boot times are rounded up to that
+(the restart's 2055 ms is one 2 s timeout plus ~50 ms). Each attempt now gets
+250 ms. The next run measures boot properly.
+
+**arm64:** `ubuntu-24.04-arm` has no `/dev/kvm`, so the job stops after
+checking for it.
+
+Follow-ups for L1:
+- Poweroff: wait for processes to exit, not a flat 1 s.
+- Boot readiness: the host can't tell "not up yet" from "stuck", so the
+  driver needs short attempts, or the agent should announce itself (e.g.
+  dial the host on vsock when ready).
+- stdin at 94 MB/s is below stdout. It's 1 MB frames through a pipe into
+  `sha256sum`, so it's fine for the driver's uses, but larger frames are worth
+  trying.
 
 **Exit criterion** (ROADMAP L0): Claude Code's TUI usable in the browser
 through a CH guest. In CI this is the TUI check above: alt-screen and Claude
@@ -105,7 +136,7 @@ L3 (a real `driver/kvm`) or a Linux box.
 
 ## Not covered yet
 
-- arm64 KVM, if GitHub's arm runner has none: needs a Graviton `.metal` or an
+- arm64 KVM: GitHub's arm runner has none. Needs a Graviton `.metal` or an
   M3+ Mac with nested virtualization.
 - Copy-on-write disks: the runner's ext4 makes `cp --reflink=auto` a full
   copy. qcow2 overlays or a reflink filesystem are L2's job.

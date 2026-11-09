@@ -104,7 +104,9 @@ compose is just Linux packaging).
 **L0 — Spike E: CH + guest agent (de-risk)** — in progress on `feature/linux`
 ([`spikes/e-cloud-hypervisor/`](../spikes/e-cloud-hypervisor/README.md)). The guest
 agent is chosen (option 2, a Go PID 1) and passes all 15 protocol checks
-locally. The CH boot runs on GitHub's KVM runners (`spike-e.yml`) and has not run yet.
+locally. Under CH on GitHub's x86_64 KVM runner (`spike-e.yml`) it passes all
+15 too, Claude Code's TUI included: exec p50 1.7 ms, ping 0.7 ms. Boot time is
+still to be measured cleanly. GitHub's arm64 runner has no KVM, so arm64 waits for other hardware.
 - Boot the sadbox image under Cloud Hypervisor on an x86_64 and an arm64 KVM host.
 - Pick the guest agent:
   1. Run Apple's `vminitd` under CH (one protocol on both platforms; open question #2 in `research/README`), or

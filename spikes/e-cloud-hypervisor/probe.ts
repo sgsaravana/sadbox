@@ -202,7 +202,7 @@ function alive(pid: number): boolean {
 const t0 = performance.now();
 let hello: any;
 for (;;) {
-  try { hello = await request({ op: "ping" }, 2000); break; }
+  try { hello = await request({ op: "ping" }, 250); break; }
   catch (e) {
     if (vmmPid && !alive(vmmPid)) { console.error(`the VMM (pid ${vmmPid}) exited before the agent answered`); process.exit(1); }
     if (performance.now() - t0 > waitMs) { console.error(`agent not reachable: ${(e as Error).message}`); process.exit(1); }
