@@ -20,9 +20,9 @@ import { isCutOff, setCutoff } from "../net/cutoff";
 import { resolveApproval, listPending, pendingCounts } from "../net/approvals";
 import { hostSummary, recentRequests, requestsBefore, subscribe } from "../net/events";
 import { caCertPem } from "../net/ca";
-import { createForward, deleteForward, listForwards } from "../net/forwards";
+import { AUTH_PATH, createForward, deleteForward, getForward, listForwards, noteUiOrigin, setForwardAccess } from "../net/forwards";
 import { createLink, deleteLink, listLinks } from "../net/links";
-import { AuthError, authEnabled, clearCookie, crossOrigin, login, logout, safeNext, sessionCookie, signedIn, tokenFrom } from "../core/auth";
+import { AuthError, authEnabled, clearCookie, crossOrigin, forwardTicket, login, logout, safeNext, sessionCookie, signedIn, tokenFrom } from "../core/auth";
 import { FileError, commitStaged, deletePath, discardPaths, listStashes, stash, fileIndex, gitStatus, headFile, lastCommit, listBranches, listDir, makeDir, pushBranch, readFile, renamePath, stageFile, stagePaths, switchBranch, writeFile } from "../core/files";
 
 const liveProjectNames = () => listProjects().map((p) => p.name);
@@ -104,13 +104,31 @@ export function startServer() {
       }
       // Everything else needs a session, except the login page and the static
       // script/style/vendor files (which are just this public repo's assets).
-      const page = p === "/" || p === "/terminal" || p === "/editor";
+      const forwardOpen = p.match(/^\/forwards\/([\w-]+)\/open$/);
+      const page = p === "/" || p === "/terminal" || p === "/editor" || forwardOpen != null;
       const needsSession = page || termMatch != null || p.startsWith("/api/");
       if (needsSession && !signedIn(req)) {
         if (page) {
           return new Response(null, { status: 302, headers: { location: `/login?next=${encodeURIComponent(p + url.search)}` } });
         }
         return json({ error: "not signed in" }, 401);
+      }
+      // the address the UI is opened at: where a forward sends a browser to sign in
+      const uiHost = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? "";
+      if (page && uiHost) noteUiOrigin(`${req.headers.get("x-forwarded-proto") === "https" ? "https" : url.protocol.slice(0, -1)}://${uiHost}`);
+
+      // open a port forward: a sign-in forward gets a one-time ticket, traded at
+      // the forward's own address for its cookie (core/auth.ts, net/forwards.ts)
+      if (forwardOpen) {
+        const f = getForward(forwardOpen[1]);
+        if (!f) return new Response("no such port forward", { status: 404 });
+        let hostname = "localhost";
+        try { hostname = new URL(`http://${uiHost}`).hostname; } catch {}
+        const base = `http://${hostname}:${f.host_port}`;
+        const next = safeNext(url.searchParams.get("next"));
+        const location = f.access === "open" ? base + next
+          : `${base}${AUTH_PATH}?t=${forwardTicket(req, f.id)}&next=${encodeURIComponent(next)}`;
+        return new Response(null, { status: 302, headers: { location, "cache-control": "no-store" } });
       }
       if (p === "/login" && signedIn(req)) {
         return new Response(null, { status: 302, headers: { location: safeNext(url.searchParams.get("next")) } });
@@ -326,10 +344,11 @@ export function startServer() {
         if (m && req.method === "GET") return json({ host: config.forwardHost, forwards: listForwards(m[1]) });
         if (m && req.method === "POST") {
           const b = await req.json();
-          return json(await createForward(m[1], { hostPort: b.hostPort, guestPort: b.guestPort }), 201);
+          return json(await createForward(m[1], { hostPort: b.hostPort, guestPort: b.guestPort, access: b.access }), 201);
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/forwards\/([\w-]+)$/);
         if (m && req.method === "DELETE") { deleteForward(m[1], m[2]); return json({ ok: true }); }
+        if (m && req.method === "PATCH") return json(await setForwardAccess(m[1], m[2], (await req.json()).access));
 
         // --- global network rules + shared proxy endpoints ---
         if (p === "/api/net/rules" && req.method === "GET") return json(listRules());

@@ -35,8 +35,9 @@ export const config = {
   // where inbound port forwards (host port → VM port) listen. All interfaces by
   // default, so a forwarded app is reachable at <web UI's domain>:<port> from
   // wherever the UI is — including when the UI itself sits on localhost behind
-  // a reverse proxy. Forwards are served as-is (no TLS, no auth in front);
-  // set SADBOX_FORWARD_HOST=localhost to keep them on this machine only.
+  // a reverse proxy. Plain HTTP (no TLS); a forward is for a browser signed
+  // in to sadbox unless it is opened to anyone (net/forwards.ts). Set
+  // SADBOX_FORWARD_HOST=localhost to keep them on this machine only.
   forwardHost: process.env.SADBOX_FORWARD_HOST ?? "0.0.0.0",
   // how long a blocked request is held awaiting an approve/deny decision
   approvalTimeoutMs: Number(process.env.SADBOX_APPROVAL_TIMEOUT_MS ?? 120_000),

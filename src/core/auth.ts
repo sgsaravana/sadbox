@@ -91,14 +91,65 @@ export function logout(token: string | null | undefined): void {
   if (token) db.query("DELETE FROM sessions WHERE token_hash = ?").run(sha(token).toString("hex"));
 }
 
+// ---- passes to sign-in port forwards (net/forwards.ts) ----
+// A forwarded app is on another port, so another origin: the UI's session
+// cookie is not the way in (it would reach the app itself, and a Secure one is
+// never sent to a plain-HTTP port). Instead the UI, for a signed-in browser,
+// hands out a one-time ticket in a redirect to the forward, which trades it for
+// a cookie good for that forward only. The pass ends with the UI session it came
+// from (sign-out, a new password).
+const TICKET_MS = 60_000;
+const tickets = new Map<string, { forwardId: string; sessionHash: string | null; expires: number }>();
+
+/** A one-time ticket for this forward, for the browser making `req`. */
+export function forwardTicket(req: Request, forwardId: string): string {
+  const now = Date.now();
+  for (const [t, v] of tickets) if (v.expires < now) tickets.delete(t);
+  const token = tokenFrom(req);
+  const ticket = randomBytes(24).toString("base64url");
+  tickets.set(ticket, { forwardId, sessionHash: token && authEnabled() ? sha(token).toString("hex") : null, expires: now + TICKET_MS });
+  return ticket;
+}
+
+/** Trade a ticket for a pass to the forward (its cookie value), or null. */
+export function redeemForwardTicket(forwardId: string, ticket: string | null): string | null {
+  const t = ticket ? tickets.get(ticket) : undefined;
+  if (!t) return null;
+  tickets.delete(ticket!);
+  if (t.forwardId !== forwardId || t.expires < Date.now()) return null;
+  const pass = randomBytes(32).toString("base64url");
+  db.run("DELETE FROM forward_sessions WHERE expires_at < ? OR (session_hash IS NOT NULL AND session_hash NOT IN (SELECT token_hash FROM sessions))", [Date.now()]);
+  db.query("INSERT INTO forward_sessions (token_hash, forward_id, session_hash, expires_at) VALUES (?, ?, ?, ?)")
+    .run(sha(pass).toString("hex"), forwardId, t.sessionHash, Date.now() + SESSION_DAYS * 86_400_000);
+  return pass;
+}
+
+/** Does this pass open this forward? With sign-in off, anything does. */
+export function forwardPassValid(forwardId: string, pass: string | null): boolean {
+  if (!authEnabled()) return true;
+  if (!pass) return false;
+  const now = Date.now();
+  return !!db.query<{ ok: number }, [string, string, number, number]>(
+    `SELECT 1 AS ok FROM forward_sessions f JOIN sessions s ON s.token_hash = f.session_hash
+     WHERE f.token_hash = ? AND f.forward_id = ? AND f.expires_at > ? AND s.expires_at > ?`,
+  ).get(sha(pass).toString("hex"), forwardId, now, now);
+}
+
+export function dropForwardPasses(forwardId: string): void {
+  db.query("DELETE FROM forward_sessions WHERE forward_id = ?").run(forwardId);
+}
+
 // ---- request helpers ----
-export function tokenFrom(req: Request): string | null {
-  for (const part of (req.headers.get("cookie") ?? "").split(";")) {
+/** A cookie's value from a Cookie header. */
+export function cookieValue(header: string | null | undefined, name: string): string | null {
+  for (const part of (header ?? "").split(";")) {
     const i = part.indexOf("=");
-    if (i > 0 && part.slice(0, i).trim() === COOKIE) return part.slice(i + 1).trim();
+    if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
   }
   return null;
 }
+
+export const tokenFrom = (req: Request): string | null => cookieValue(req.headers.get("cookie"), COOKIE);
 
 export const signedIn = (req: Request) => !authEnabled() || sessionValid(tokenFrom(req));
 

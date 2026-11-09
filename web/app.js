@@ -1272,11 +1272,21 @@ async function openPorts(id) {
         <input name="guestPort" type="number" min="1" max="65535" placeholder="VM port (e.g. 8000)" required>
         <span class="hint">→</span>
         <input name="hostPort" type="number" min="1024" max="65535" placeholder="port on this host" required>
+        <label class="hint" title="Raw TCP that anyone who reaches this machine can use: for databases and other non-HTTP servers, or an API called from another forward's browser code. Otherwise the port is HTTP for a browser signed in to sadbox only."><input name="open" type="checkbox"> open to anyone</label>
         <button type="submit">Forward</button>
       </form>
     </div>
   </div>`;
   el.addEventListener("click", async (e) => {
+    const acc = e.target.closest("[data-port-access]");
+    if (acc) {
+      const open = acc.dataset.portAccess === "open";
+      if (open && !confirm("Open this port to anyone who can reach this machine, without signing in?")) return;
+      try { await api(`/api/projects/${id}/forwards/${acc.dataset.portId}`, { method: "PATCH", body: { access: acc.dataset.portAccess } }); }
+      catch (err) { alert(err.message); }
+      renderPorts(id);
+      return;
+    }
     const del = e.target.closest("[data-del-port]");
     if (!del) return;
     try { await api(`/api/projects/${id}/forwards/${del.dataset.delPort}`, { method: "DELETE" }); } catch {}
@@ -1288,7 +1298,7 @@ async function openPorts(id) {
     try {
       await api(`/api/projects/${id}/forwards`, {
         method: "POST",
-        body: { guestPort: Number(f.get("guestPort")), hostPort: Number(f.get("hostPort")) },
+        body: { guestPort: Number(f.get("guestPort")), hostPort: Number(f.get("hostPort")), access: f.get("open") ? "open" : "signin" },
       });
       e.target.reset(); renderPorts(id);
     } catch (err) { alert(err.message); }
@@ -1304,11 +1314,16 @@ async function renderPorts(id) {
   catch (e) { el.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
   if (!data.forwards.length) { el.innerHTML = `<div class="empty">no ports forwarded</div>`; return; }
   el.innerHTML = data.forwards.map((f) => {
-    const url = `http://${location.hostname}:${f.host_port}`;
+    // a sign-in forward is opened through the UI, which hands the browser its pass
+    const url = f.access === "open" ? `http://${location.hostname}:${f.host_port}` : `/forwards/${f.id}/open`;
+    const other = f.access === "open" ? "signin" : "open";
     return `<div class="rule">
-      <span class="ract ${f.active ? "allow" : "block"}">${f.active ? "open" : "down"}</span>
+      <span class="ract ${f.active ? "allow" : "block"}">${f.active ? "up" : "down"}</span>
       <span class="rspec"><a href="${url}" target="_blank" rel="noopener">${escapeHtml(location.hostname)}:${f.host_port}</a> → VM port ${f.guest_port}${
         f.active ? "" : ` <span class="hint">host port was in use at startup</span>`}</span>
+      <button class="link-del" data-port-id="${f.id}" data-port-access="${other}" title="${f.access === "open"
+        ? "Open to anyone who reaches this machine (raw TCP). Click to require sign-in."
+        : "HTTP, for a browser signed in to sadbox only. Click to open it to anyone."}">${f.access === "open" ? "🔓 anyone" : "🔒 sign-in"}</button>
       <button class="link-del" data-del-port="${f.id}" title="remove">✕</button>
     </div>`;
   }).join("");
