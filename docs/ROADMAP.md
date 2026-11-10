@@ -129,20 +129,48 @@ the client against the real agent.
 - Linux-only: the macOS driver keeps `vminitd`. L2 bakes the agent into the
   Linux disk image, not into `images/base`.
 
-**L2 — Image pipeline**
-- Dockerfile → OCI → ext4 rootfs (`docker export` + `mkfs.ext4 -d`, or a
-  build with buildkit only) + a guest kernel (CH-compatible `vmlinux`), multi-arch.
+**L2 — Image pipeline** — built on `feature/linux`, waiting on its first KVM run (`kvm.yml`)
+- Dockerfile → OCI → ext4 rootfs + a guest kernel, multi-arch. Built: Docker builds
+  the image, then [`images/disk`](../images/disk/Dockerfile) turns it into ext4
+  with BuildKit alone (a bind mount of the image, `mkfs.ext4 -d`, output to a
+  folder). It compiles the agent from the source embedded in the binary, so the host
+  needs neither root nor Go. Checked on arm64 with Apple's builder: owners, setuid
+  bits and the agent intact, `e2fsck` clean. The kernel is CH's pinned build, fetched by `sadbox setup`.
 - Store under the data dir, versioned like the macOS image; replaces `container build` on Linux.
+  Built: `~/.sadbox/kvm/images/<image>/` with the image's recipe hash, so
+  `ensureBaseImage` rebuilds it when the Dockerfile changes, as on macOS.
 - Per-project disk: copy-on-write clone of the base rootfs (reflink / qcow2 overlay) + workdir.
+  Built: `cp --reflink=auto` (a sparse full copy on ext4), grown sparsely by
+  the project's disk size, and the agent grows the filesystem at boot. One disk,
+  not a separate workdir volume: the size caps the whole VM.
+- Image operations (build, recipe, toolchain probe) moved behind the driver (`driver.images`).
 
-**L3 — `driver/kvm`**
+**L3 — `driver/kvm`** — built on `feature/linux` ([`src/driver/kvm/`](../src/driver/kvm/index.ts)),
+waiting on its first KVM run (`kvm.yml`)
 - Full `ProjectDriver` over the CH REST API: create / destroy / start / stop /
-  `setMemory` / inspect / list / stats.
+  `setMemory` / inspect / list / stats. Built. Picked on Linux, or with `SADBOX_DRIVER=kvm`.
 - One CH process per VM, supervised by sadbox; state reconciled on supervisor restart.
+  Built: CH runs detached, a VM is a folder (`~/.sadbox/kvm/vms/<ref>`), and
+  "running" means its API answers, so VMs outlive a supervisor restart.
+  Stop asks the agent to power off, then CH, then kills it.
 - `network: "none"` + vsock socket channel, so the existing proxy, approvals and
-  port forwards work unchanged.
-- Stats from CH counters + the VMM's cgroup.
+  port forwards work unchanged. Built: the host socket is served in the supervisor
+  and spliced onto the agent's `connect`, and it survives the VM stopping.
+- Stats from CH counters + the VMM's cgroup. Built: CH's disk counters, the VMM's
+  CPU time, and the guest's memory and process count through the agent.
 - Capability flags: `snapshot: true` (CH supports it), `sharedMount` optional (virtiofs).
+  `sharedMount` when virtiofsd is installed and the guest user can write what it shares:
+  virtiofsd 1.11+ maps ids, or the host user is uid 1000 like the image's.
+  There is one virtiofsd per shared folder (a file is shared through its folder),
+  bind-mounted by the agent. Without virtiofsd, agent history stays on the
+  VM's disk and is copied out before the VM is destroyed, but it isn't copied
+  into a new project of the same name. `snapshot` is still false (L7).
+- Tested on any machine with a stand-in VMM (`test/fake-ch.ts`, which runs the real
+  agent): create, exec, the socket, stats, stop / start, `setMemory`, destroy, and a
+  VMM that fails to start. Real VMs: `kvm.it.test.ts`, run by `kvm.yml` after a
+  `sadbox setup`.
+- `sadbox setup` / `doctor` on Linux: they check `/dev/kvm` and docker, fetch CH
+  and the kernel, build the image and its disk, and report virtiofsd.
 
 **L4 — De-macOS the rest of the supervisor**
 - Driver selection in `src/driver/index.ts` by platform / `SADBOX_DRIVER`.

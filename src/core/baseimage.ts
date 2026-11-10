@@ -9,10 +9,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { config } from "../config";
 import { baseImageFiles } from "../assets";
-
-const BIN = config.containerBin;
-const LABEL = "sadbox.recipe";
-const BUILD_MS = 30 * 60_000; // installs packages, Node and the agents over the network
+import { getDriver } from "../driver";
 
 /** A short hash of the embedded Dockerfile and the files next to it. */
 export async function recipeHash(): Promise<string> {
@@ -25,21 +22,6 @@ export async function recipeHash(): Promise<string> {
   return h.digest("hex").slice(0, 16);
 }
 
-// `image inspect` (container CLI 1.4.1): [{ variants: [{ config: { config: { Labels } } }] }]
-/** The recipe an image was built from: null if it does not say, undefined if there is no such image. */
-async function imageRecipe(image: string): Promise<string | null | undefined> {
-  const proc = Bun.spawn([BIN, "image", "inspect", image], { stdout: "pipe", stderr: "ignore" });
-  const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-  if (code !== 0) return undefined;
-  try {
-    for (const v of JSON.parse(out)?.[0]?.variants ?? []) {
-      const label = v?.config?.config?.Labels?.[LABEL];
-      if (label) return label;
-    }
-  } catch {}
-  return null;
-}
-
 /** Build the base image from the embedded recipe. `inherit` shows the build
  *  output on this terminal (sadbox setup); otherwise its tail is in the error. */
 export async function buildBaseImage(opts: { inherit?: boolean } = {}): Promise<void> {
@@ -48,20 +30,7 @@ export async function buildBaseImage(opts: { inherit?: boolean } = {}): Promise<
     for (const [name, embeddedPath] of Object.entries(baseImageFiles)) {
       await Bun.write(join(ctx, name), Bun.file(embeddedPath));
     }
-    const out = opts.inherit ? "inherit" : "pipe";
-    // not --quiet: on container 1.4.1 a quiet build never finishes
-    const proc = Bun.spawn([BIN, "build", "--progress", "plain", "-t", config.baseImage,
-      "--label", `${LABEL}=${await recipeHash()}`, ctx], { stdout: out, stderr: out });
-    const timer = setTimeout(() => proc.kill("SIGKILL"), BUILD_MS);
-    const [stdout, stderr, code] = await Promise.all([
-      proc.stdout instanceof ReadableStream ? new Response(proc.stdout).text() : "",
-      proc.stderr instanceof ReadableStream ? new Response(proc.stderr).text() : "",
-      proc.exited,
-    ]).finally(() => clearTimeout(timer));
-    if (code !== 0) {
-      const tail = `${stdout}\n${stderr}`.trim().split("\n").slice(-6).join("\n");
-      throw new Error(`base image build failed${tail ? `:\n${tail}` : ""}`);
-    }
+    await getDriver().images.build(ctx, config.baseImage, await recipeHash(), opts);
   } finally {
     rmSync(ctx, { recursive: true, force: true });
   }
@@ -74,7 +43,7 @@ let building: Promise<void> | null = null;
  *  named by SADBOX_BASE_IMAGE is someone else's and is left alone. */
 export async function ensureBaseImage(note: (msg: string) => void = () => {}): Promise<void> {
   if (process.env.SADBOX_BASE_IMAGE) return;
-  const have = await imageRecipe(config.baseImage);
+  const have = await getDriver().images.recipe(config.baseImage);
   if (have === (await recipeHash())) return;
   note(have === undefined ? `building the base image ${config.baseImage}` : `the base image ${config.baseImage} is out of date — rebuilding it`);
   building ??= buildBaseImage().finally(() => { building = null; });

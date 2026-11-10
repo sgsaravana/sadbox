@@ -4,13 +4,16 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/mdlayher/vsock"
 	"golang.org/x/sys/unix"
@@ -57,6 +60,8 @@ func initSystem() {
 	for name, target := range map[string]string{"/dev/fd": "/proc/self/fd", "/dev/stdin": "/proc/self/fd/0", "/dev/stdout": "/proc/self/fd/1", "/dev/stderr": "/proc/self/fd/2"} {
 		_ = os.Symlink(target, name)
 	}
+
+	growRoot()
 
 	host := kernelParams()["hostname"]
 	if host == "" {
@@ -111,4 +116,72 @@ func othersRunning() bool {
 		}
 	}
 	return false
+}
+
+// growRoot: the host makes a project's disk bigger than the image's filesystem
+// (a sparse file, so it costs nothing until used); grow the filesystem to fill
+// it. ext4 grows online, mounted.
+func growRoot() {
+	dev := "vda"
+	cmdline, _ := os.ReadFile("/proc/cmdline")
+	for _, f := range strings.Fields(string(cmdline)) {
+		if v, ok := strings.CutPrefix(f, "root=/dev/"); ok {
+			dev = v
+		}
+	}
+	b, err := os.ReadFile("/sys/class/block/" + dev + "/size")
+	if err != nil {
+		return
+	}
+	sectors, _ := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	var st unix.Statfs_t
+	if unix.Statfs("/", &st) != nil || st.Bsize <= 0 {
+		return
+	}
+	blocks := sectors * 512 / uint64(st.Bsize)
+	if blocks <= st.Blocks+st.Blocks/50 { // f_blocks leaves out ext4's overhead: within 2% is full size
+		return
+	}
+	fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return
+	}
+	defer unix.Close(fd)
+	const ext4IocResizeFs = 0x40086610 // _IOW('f', 16, __u64)
+	if _, _, e := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), ext4IocResizeFs, uintptr(unsafe.Pointer(&blocks))); e != 0 {
+		log.Printf("init: grow /: %v", e)
+		return
+	}
+	log.Printf("init: / grown to %d MB", blocks*uint64(st.Bsize)>>20)
+}
+
+// mountShare puts a virtiofs share (or a file or folder in it) at path. Each
+// share is mounted once under /run/sadbox/fs and bind-mounted from there.
+func mountShare(tag, sub, path string, file bool) error {
+	if tag == "" || !filepath.IsAbs(path) || strings.Contains(tag, "/") {
+		return fmt.Errorf("bad mount %q → %q", tag, path)
+	}
+	base := "/run/sadbox/fs/" + tag
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return err
+	}
+	var st unix.Statfs_t
+	if unix.Statfs(base, &st) != nil || st.Type != unix.FUSE_SUPER_MAGIC {
+		if err := unix.Mount(tag, base, "virtiofs", 0, ""); err != nil && !errors.Is(err, unix.EBUSY) {
+			return fmt.Errorf("mount share %s: %w", tag, err)
+		}
+	}
+	src := filepath.Join(base, filepath.Clean("/"+sub))
+	if file {
+		_ = os.MkdirAll(filepath.Dir(path), 0o755)
+		if f, err := os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o644); err == nil {
+			f.Close()
+		}
+	} else if err := os.MkdirAll(path, 0o755); err != nil {
+		return err
+	}
+	if err := unix.Mount(src, path, "", unix.MS_BIND, ""); err != nil {
+		return fmt.Errorf("bind %s → %s: %w", src, path, err)
+	}
+	return nil
 }

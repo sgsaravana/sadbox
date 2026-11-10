@@ -49,6 +49,11 @@ type request struct {
 	Cwd  string   `json:"cwd"`
 	TTY  *winsize `json:"tty"`
 	Path string   `json:"path"`
+	// mount: a virtiofs share (Tag), and what of it (Sub, "" = all) goes at
+	// Path; File when that is a single file
+	Tag  string `json:"tag"`
+	Sub  string `json:"sub"`
+	File bool   `json:"file"`
 }
 
 type conn struct {

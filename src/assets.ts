@@ -81,6 +81,17 @@ import ace_mode_yaml from "../node_modules/ace-builds/src-min-noconflict/mode-ya
 import ace_mode_zig from "../node_modules/ace-builds/src-min-noconflict/mode-zig.js" with { type: "file" };
 import baseDockerfile from "../images/base/Dockerfile" with { type: "file" };
 import baseTmuxConf from "../images/base/tmux.conf" with { type: "file" };
+// the Linux driver's disk recipe, and the guest agent's source it compiles
+import diskDockerfile from "../images/disk/Dockerfile" with { type: "file" };
+import agentGoMod from "../guest/agent/go.mod" with { type: "file" };
+import agentGoSum from "../guest/agent/go.sum" with { type: "file" };
+import agentMainGo from "../guest/agent/main.go" with { type: "file" };
+import agentProtoGo from "../guest/agent/proto.go" with { type: "file" };
+import agentServeGo from "../guest/agent/serve.go" with { type: "file" };
+import agentExecGo from "../guest/agent/exec.go" with { type: "file" };
+import agentProcGo from "../guest/agent/proc.go" with { type: "file" };
+import agentSystemLinuxGo from "../guest/agent/system_linux.go" with { type: "file" };
+import agentSystemOtherGo from "../guest/agent/system_other.go" with { type: "file" };
 
 // route path -> [embedded file path, content-type]
 export const staticRoutes: Record<string, [string, string]> = {
@@ -165,4 +176,19 @@ export const aceFiles: Record<string, string> = {
 export const baseImageFiles: Record<string, string> = {
   Dockerfile: baseDockerfile,
   "tmux.conf": baseTmuxConf,
+};
+
+// build-context files for the Linux driver's disk (src/driver/kvm/images.ts):
+// images/disk and the guest agent's source (every non-test file in guest/agent)
+export const diskImageFiles: Record<string, string> = {
+  Dockerfile: diskDockerfile,
+  "agent/go.mod": agentGoMod,
+  "agent/go.sum": agentGoSum,
+  "agent/main.go": agentMainGo,
+  "agent/proto.go": agentProtoGo,
+  "agent/serve.go": agentServeGo,
+  "agent/exec.go": agentExecGo,
+  "agent/proc.go": agentProcGo,
+  "agent/system_linux.go": agentSystemLinuxGo,
+  "agent/system_other.go": agentSystemOtherGo,
 };

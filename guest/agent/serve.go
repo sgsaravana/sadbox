@@ -49,6 +49,12 @@ func serve(c *conn) {
 		}
 		go func() { _, _ = io.Copy(up, c.r); _ = up.(*net.UnixConn).CloseWrite() }()
 		_, _ = io.Copy(c, up)
+	case "mount":
+		if err := mountShare(req.Tag, req.Sub, req.Path, req.File); err != nil {
+			c.fail(err)
+			return
+		}
+		_ = c.sendJSON(fOK, map[string]any{})
 	case "poweroff":
 		_ = c.sendJSON(fOK, map[string]any{})
 		c.Close()

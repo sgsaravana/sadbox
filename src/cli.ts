@@ -1,6 +1,15 @@
 import { mkdirSync } from "fs";
 import { config, VERSION } from "./config";
 import { buildBaseImage } from "./core/baseimage";
+import { getDriver } from "./driver";
+import { CH_VERSION, ensureVmm, virtiofsdBin, vmmProblems } from "./driver/kvm/vmm";
+
+/** Whether agent history can be kept on this machine (shared into VMs), and why not. */
+function sharingNote(): string {
+  if (getDriver().capabilities.sharedMount) return "✓ virtiofsd (agent history is kept on this machine)";
+  if (virtiofsdBin()) return "· virtiofsd cannot map the VM user's id (needs 1.11+) and this user is not uid 1000 — agent history stays in each VM";
+  return "· virtiofsd not found — agent history stays in each VM (install the virtiofsd package to keep it here)";
+}
 import { startServer } from "./api/http";
 import { startProxy } from "./net/proxy";
 import { startLoginLoop } from "./core/logins";
@@ -25,8 +34,33 @@ async function has(bin: string) {
   return (await sh(["sh", "-c", `command -v ${bin}`])).code === 0;
 }
 
+/** Linux: KVM, Cloud Hypervisor and its kernel, docker for the image. */
+async function setupKvm() {
+  const host = vmmProblems().filter((p) => !p.fix?.startsWith("sadbox setup"));
+  for (const p of host) console.error(`✗ ${p.error}${p.fix ? `\n    fix: ${p.fix}` : ""}`);
+  if (host.length) process.exit(1);
+  console.log("✓ /dev/kvm");
+  if (!(await has(process.env.SADBOX_DOCKER_BIN || "docker"))) {
+    console.error("✗ docker not found — it builds the VM image (https://docs.docker.com/engine/install/)");
+    process.exit(1);
+  }
+  console.log("✓ docker");
+  await ensureVmm((msg) => console.log(`→ ${msg}…`));
+  console.log(`✓ Cloud Hypervisor ${CH_VERSION} and its guest kernel`);
+  console.log(sharingNote());
+}
+
 async function setup() {
   console.log(`sadbox setup (v${VERSION})\n`);
+  if (getDriver().name === "kvm") {
+    await setupKvm();
+    mkdirSync(config.dataDir, { recursive: true });
+    console.log(`✓ data dir ${config.dataDir}`);
+    console.log(`→ building base image ${config.baseImage} and its VM disk (a few minutes)…`);
+    await buildBaseImage({ inherit: true });
+    console.log("\n✓ setup complete — run 'sadbox serve' and open http://localhost:7070");
+    return;
+  }
 
   if (!(await has(BIN))) {
     console.error(`✗ Apple '${BIN}' CLI not found. Install it:  brew install container`);
@@ -56,6 +90,18 @@ async function doctor() {
   console.log(`sadbox v${VERSION}`);
   console.log(`data dir:      ${config.dataDir}`);
   console.log(`base image:   ${config.baseImage}`);
+  const driver = getDriver();
+  if (driver.name === "kvm") {
+    const problems = vmmProblems();
+    for (const p of problems) console.log(`✗ ${p.error}${p.fix ? ` (fix: ${p.fix})` : ""}`);
+    if (!problems.length) console.log(`✓ KVM and Cloud Hypervisor ${CH_VERSION}`);
+    console.log(`${(await driver.images.recipe(config.baseImage)) !== undefined ? "✓" : "✗"} VM disk built (${config.baseImage})`);
+    console.log(`${(await has(process.env.SADBOX_DOCKER_BIN || "docker")) ? "✓" : "✗"} docker (builds the VM image)`);
+    console.log(sharingNote());
+    console.log(`${(await has("openssl")) ? "✓" : "✗"} openssl (egress proxy TLS interception)`);
+    console.log(`proxy port:   ${config.proxyPort}`);
+    return;
+  }
   const bin = await has(BIN);
   console.log(`${bin ? "✓" : "✗"} ${BIN} CLI`);
   if (bin) {
@@ -97,14 +143,15 @@ const HELP = `sadbox v${VERSION} — supervisor for microVM AI-agent sandboxes
 Usage: sadbox <command>
 
   serve      Start the web supervisor (default)   http://localhost:${config.port}
-  setup      Check deps, start container system, build the base image
+  setup      Check deps, start the VM backend, build the base image
   doctor     Report environment health
   passwd     Set the sign-in password (signs every browser out)
   version    Print version
   help       Show this help
 
 Env: SADBOX_PORT, SADBOX_HOST, SADBOX_PASSWORD, SADBOX_AUTH=off, SADBOX_NETWORK, SADBOX_PROXY_PORT, SADBOX_PROXY_HOST,
-     SADBOX_FORWARD_HOST, SADBOX_DATA, SADBOX_BASE_IMAGE, SADBOX_NET_LOG_DAYS (network log retention, ≥ 7)`;
+     SADBOX_FORWARD_HOST, SADBOX_DATA, SADBOX_BASE_IMAGE, SADBOX_NET_LOG_DAYS (network log retention, ≥ 7)
+Linux: SADBOX_DRIVER (kvm | container), SADBOX_CH_BIN, SADBOX_KVM_KERNEL, SADBOX_VIRTIOFSD, SADBOX_DOCKER_BIN, SADBOX_KVM_RUN`;
 
 export async function main(argv: string[]) {
   const cmd = argv[2] ?? "serve";

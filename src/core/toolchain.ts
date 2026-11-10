@@ -71,15 +71,13 @@ export async function vmToolchain(ref: string, timeoutMs?: number): Promise<Tool
 }
 
 // --- base-image toolchain (for the new-project form) ------------------------
-// Probed once via an ephemeral `container run`, then cached by image ref for a
+// Probed once in a throwaway instance of the image, then cached by image ref for a
 // short TTL (the base image only changes on `sadbox setup`).
 const CACHE_TTL_MS = 10 * 60_000;
 let cache: { image: string; at: number; tools: ToolInfo[] } | null = null;
 
 async function imageExists(image: string): Promise<boolean> {
-  return (await Bun.spawn([config.containerBin, "image", "inspect", image], {
-    stdout: "ignore", stderr: "ignore",
-  }).exited) === 0;
+  return (await getDriver().images.recipe(image)) !== undefined;
 }
 
 /** The image a new project would boot from (base image, or a fallback for
@@ -98,13 +96,9 @@ export async function baseImageToolchain(force = false): Promise<{ image: string
   if (!force && cache && cache.image === image && Date.now() - cache.at < CACHE_TTL_MS) {
     return { image, tools: cache.tools };
   }
-  const proc = Bun.spawn(
-    [config.containerBin, "run", "--rm", image, "sh", "-c", probeScript()],
-    { stdout: "pipe", stderr: "ignore" },
-  );
-  const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-  if (code !== 0) throw new Error(`could not probe base image ${image}`);
-  const tools = parseToolchain(out);
+  const r = await getDriver().images.probe(image, probeScript());
+  if (r.exitCode !== 0) throw new Error(`could not probe base image ${image}`);
+  const tools = parseToolchain(r.stdout);
   cache = { image, at: Date.now(), tools };
   return { image, tools };
 }

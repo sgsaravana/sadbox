@@ -73,9 +73,7 @@ async function hostGit(repo: string, args: string[]): Promise<{ code: number; ou
 }
 
 async function imageExists(image: string): Promise<boolean> {
-  return (await Bun.spawn([config.containerBin, "image", "inspect", image], {
-    stdout: "ignore", stderr: "ignore",
-  }).exited) === 0;
+  return (await driver.images.recipe(image)) !== undefined;
 }
 
 /** The image a new VM boots from: the base image, first brought up to date
@@ -225,20 +223,23 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   if (empty) db.query("UPDATE projects SET branch = NULL WHERE id = ?").run(p.id);
   else noteBranch(p.id, branchFor(p.name));
   // the agents' history for this project name, kept on the host (and whatever
-  // an earlier project of the same name left there)
-  const mounts = prepareHistory(p.name);
+  // an earlier project of the same name left there) — where the backend can
+  // share folders into VMs; otherwise it stays on the VM's disk and is copied
+  // out before the VM goes (rescueHistory)
+  const shared = driver.capabilities.sharedMount;
+  const mounts = shared ? prepareHistory(p.name) : [];
   await driver.create(ref, p.image, {
     cpus: s.defaultCpus, memoryMB, diskGB: s.defaultDiskGB, network: config.network,
     socket: isolated ? { host: openProjectSocket(p.id), guest: config.guestCarrierSocket } : undefined,
     mounts,
   });
-  db.query("UPDATE projects SET history_mounted = 1 WHERE id = ?").run(p.id);
+  db.query("UPDATE projects SET history_mounted = ? WHERE id = ?").run(shared ? 1 : 0, p.id);
 
   // a sized workdir volume mounts root-owned — hand it to the agent user
   if (s.defaultDiskGB) {
     await driver.exec(ref, ["chown", "agent:agent", config.guestWorkdir], { user: "root" });
   }
-  await linkHistory(ref);
+  if (shared) await linkHistory(ref);
 
   // Trust the proxy CA + point the guest's tools at the proxy — before anything
   // below needs the network. For a network-less VM the proxy is the only way
