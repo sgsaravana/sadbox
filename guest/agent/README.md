@@ -8,8 +8,11 @@ connects the host to unix sockets in the guest. Its host side is
 it; Apple's `vminitd` does that job there.
 
 It's a static Go binary of about 3 MB. As init, it mounts `/proc`, `/sys`,
-`/dev`, `/dev/pts`, `/dev/shm`, `/run`, `/tmp` and cgroup2, sets the hostname,
-brings up loopback, reaps orphans, and serves on vsock.
+`/dev`, `/dev/pts`, `/dev/shm`, `/run`, `/tmp` and cgroup2, grows the root
+filesystem to fill its disk (the host hands each project a bigger, sparse copy
+of the image's), sets the hostname, brings up loopback, reaps orphans, and
+serves on vsock. The disk it boots from is built by
+[`images/disk`](../../images/disk/Dockerfile), which compiles it from this source.
 
 ## Settings
 
@@ -41,6 +44,7 @@ Each connection carries one operation. Frames are
 | `{"op":"ping"}` | ok `{agent, protocol, pid1, uptimeMs, kernel, machine}` |
 | `{"op":"exec","argv":[…],"user":"…","env":["K=V"],"cwd":"…","tty":{"cols":80,"rows":24}}` | started, then output, then exit (or an error if the command never started) |
 | `{"op":"connect","path":"/run/…/x.sock"}` | ok, then raw bytes both ways |
+| `{"op":"mount","tag":"sbx0","sub":"history.jsonl","path":"/home/agent/.claude/history.jsonl","file":true}` | ok, once the virtiofs share `tag` (or the file or folder `sub` in it) is bind-mounted at `path` |
 | `{"op":"poweroff"}` | ok; then everything gets SIGTERM and up to 2 s to exit, the disk is synced and the VM turned off |
 
 How `exec` behaves:

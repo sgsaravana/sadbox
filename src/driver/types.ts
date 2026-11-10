@@ -1,7 +1,7 @@
 // ProjectDriver — the swappable boundary between the supervisor and a
 // virtualization backend (docs/research/01, decision #3).
-// Implementations: container.ts (Apple container CLI, macOS — done),
-// driver/kvm (Cloud Hypervisor REST, Linux — future).
+// Implementations: container.ts (Apple container CLI, macOS) and kvm/
+// (Cloud Hypervisor on KVM, Linux).
 
 export interface DriverCapabilities {
   snapshot: boolean;
@@ -71,9 +71,24 @@ export interface ByteStream {
   onClose(cb: () => void): void;
 }
 
+/** The images VMs boot from, as this backend keeps them. */
+export interface ImageStore {
+  /** The recipe an image was built from (its `sadbox.recipe` label): null if
+   *  it does not say, undefined if there is no such image. */
+  recipe(image: string): Promise<string | null | undefined>;
+  /** Build `image` from a Dockerfile in `contextDir`, labelled with `recipe`.
+   *  `inherit` shows the build on this terminal; otherwise its tail is in the
+   *  error. */
+  build(contextDir: string, image: string, recipe: string, opts?: { inherit?: boolean }): Promise<void>;
+  /** Run a shell snippet once against the image, in something thrown away
+   *  afterwards (the toolchain probe for the new-project form). */
+  probe(image: string, shellCmd: string): Promise<ExecResult>;
+}
+
 export interface ProjectDriver {
   readonly name: string;
   readonly capabilities: DriverCapabilities;
+  readonly images: ImageStore;
 
   /** Whether the backend's service is up. Never throws. */
   serviceStatus(): Promise<ServiceStatus>;

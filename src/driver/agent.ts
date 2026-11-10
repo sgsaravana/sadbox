@@ -218,6 +218,8 @@ export interface AgentClient {
   execCaptureBytes(shellCmd: string, opts?: { timeoutMs?: number }): Promise<{ exitCode: number; stdout: Uint8Array }>;
   stream(shellCmd: string): ByteStream;
   terminal(argv: string[], size: { cols: number; rows: number }): TerminalHandle;
+  /** Put a virtiofs share (or the file or folder `sub` in it) at `guestPath`. */
+  mount(m: { tag: string; sub?: string; guestPath: string; file?: boolean }, timeoutMs?: number): Promise<void>;
   /** A raw byte connection to a unix socket in the guest (the proxy's
    *  carriers). It comes back paused, so nothing is lost before it is used:
    *  pipe() it, or resume() it after adding a "data" listener. */
@@ -263,6 +265,10 @@ export function agentClient(dial: Dial): AgentClient {
 
     async poweroff(timeoutMs = 5_000) {
       await request({ op: "poweroff" }, timeoutMs);
+    },
+
+    async mount(m, timeoutMs = QUICK_MS) {
+      await request({ op: "mount", tag: m.tag, sub: m.sub ?? "", path: m.guestPath, file: !!m.file }, timeoutMs);
     },
 
     exec(argv, opts) {

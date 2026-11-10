@@ -3,7 +3,7 @@
 import { readFile, rename, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { config } from "../config";
-import type { ByteStream, ExecResult, TerminalHandle, ProjectDriver, ProjectInfo, ProjectStats, ServiceStatus } from "./types";
+import type { ByteStream, ExecResult, ImageStore, TerminalHandle, ProjectDriver, ProjectInfo, ProjectStats, ServiceStatus } from "./types";
 
 const BIN = config.containerBin;
 const volname = (ref: string) => `${ref}-workdir`;
@@ -105,9 +105,55 @@ function parseInfo(c: any): ProjectInfo | null {
   };
 }
 
+const RECIPE_LABEL = "sadbox.recipe";
+const BUILD_MS = 30 * 60_000; // installs packages, Node and the agents over the network
+
+/** Run an image build, its output on this terminal or kept for the error. */
+export async function runBuild(cmd: string[], what: string, inherit = false): Promise<void> {
+  const out = inherit ? "inherit" : "pipe";
+  const proc = Bun.spawn(cmd, { stdout: out, stderr: out });
+  const timer = setTimeout(() => proc.kill("SIGKILL"), BUILD_MS);
+  const [stdout, stderr, code] = await Promise.all([
+    proc.stdout instanceof ReadableStream ? new Response(proc.stdout).text() : "",
+    proc.stderr instanceof ReadableStream ? new Response(proc.stderr).text() : "",
+    proc.exited,
+  ]).finally(() => clearTimeout(timer));
+  if (code !== 0) {
+    const tail = `${stdout}\n${stderr}`.trim().split("\n").slice(-6).join("\n");
+    throw new Error(`${what} failed${tail ? `:\n${tail}` : ""}`);
+  }
+}
+
+const images: ImageStore = {
+  // `image inspect` (container CLI 1.4.1): [{ variants: [{ config: { config: { Labels } } }] }]
+  async recipe(image) {
+    const proc = Bun.spawn([BIN, "image", "inspect", image], { stdout: "pipe", stderr: "ignore" });
+    const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    if (code !== 0) return undefined;
+    try {
+      for (const v of JSON.parse(out)?.[0]?.variants ?? []) {
+        const label = v?.config?.config?.Labels?.[RECIPE_LABEL];
+        if (label) return label;
+      }
+    } catch {}
+    return null;
+  },
+
+  async build(contextDir, image, recipe, opts) {
+    // not --quiet: on container 1.4.1 a quiet build never finishes
+    await runBuild([BIN, "build", "--progress", "plain", "-t", image, "--label", `${RECIPE_LABEL}=${recipe}`, contextDir],
+      "base image build", opts?.inherit);
+  },
+
+  async probe(image, shellCmd) {
+    return run(["run", "--rm", image, "sh", "-c", shellCmd], undefined, LIFECYCLE_MS);
+  },
+};
+
 export const containerDriver: ProjectDriver = {
   name: "container",
   capabilities: { snapshot: false, sharedMount: true, routableIp: true },
+  images,
 
   // `system status --format json` (container CLI 1.4.1):
   // { status: "running", server: { version }, resources: { containersRunning, containersTotal } }

@@ -70,6 +70,7 @@ process.env.SADBOX_TEST_IMAGE_RECIPE = join(dir, "image-recipe"); // the label o
 process.env.SADBOX_TEST_BUILDS_LOG = join(dir, "builds.log");
 process.env.SADBOX_TEST_SERVICE_DOWN = join(dir, "service-down"); // touch it to take the container service down
 process.env.SADBOX_DATA = join(dir, "data");
+process.env.SADBOX_DRIVER = "container"; // the stub above, on Linux too (the KVM driver has its own tests)
 process.env.SADBOX_CONTAINER_BIN = bin;
 process.env.SADBOX_CONTAINER_DATA = containerData;
 process.env.SADBOX_FORWARD_HOST = "127.0.0.1";

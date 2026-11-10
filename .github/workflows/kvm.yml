@@ -1,0 +1,88 @@
+# The Linux driver (src/driver/kvm) on real Cloud Hypervisor VMs: `sadbox
+# setup` on a KVM runner (Cloud Hypervisor, its kernel, the base image and its
+# disk), the driver's integration test (kvm.it.test.ts), then sadbox itself end
+# to end — the compiled binary serving real VMs (test/e2e-linux.ts). GitHub's x86_64
+# runners have /dev/kvm; their arm64 ones do not (spike E).
+name: KVM driver
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "guest/agent/**"
+      - "images/**"
+      - "test/fake-ch.ts"
+      - "test/e2e-linux.ts"
+      - "src/**"
+      - ".github/workflows/kvm.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  kvm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: KVM for this user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: virtiofsd (shared folders)
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q virtiofsd || echo "::warning::virtiofsd not installed: shared folders go untested"
+          for p in virtiofsd /usr/libexec/virtiofsd; do command -v $p && $p --version || true; done
+
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: guest/agent/go.mod
+          cache-dependency-path: guest/agent/go.sum
+      - run: bun install --frozen-lockfile
+
+      - name: Driver tests with a stand-in VMM (and the agent client)
+        run: bun test src/driver/
+
+      - name: sadbox setup
+        run: SADBOX_DATA="$RUNNER_TEMP/sbx" bun run src/index.ts setup
+
+      - name: The driver on real VMs
+        run: |
+          SADBOX_KVM_IT="$RUNNER_TEMP/sbx" SADBOX_KVM_IT_TIMINGS="$RUNNER_TEMP/timings.json" \
+            bun test src/driver/kvm/kvm.it.test.ts
+
+      - name: Build the Linux binary
+        run: bun run compile:linux-x64
+
+      - name: sadbox end to end on real VMs (the binary, its API and terminal)
+        run: |
+          SADBOX_BIN=dist/sadbox-linux-x64 SADBOX_DATA="$RUNNER_TEMP/sbx" SADBOX_E2E_JSON="$RUNNER_TEMP/e2e.json" \
+            bun test/e2e-linux.ts
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### KVM driver — $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2-)"
+            if [ -f "$RUNNER_TEMP/timings.json" ]; then
+              echo '| Step | ms |'; echo '|---|---|'
+              jq -r 'to_entries[] | "| \(.key) | \(.value) |"' "$RUNNER_TEMP/timings.json"
+            fi
+            if [ -f "$RUNNER_TEMP/e2e.json" ]; then
+              echo; echo '| End to end | | |'; echo '|---|---|---|'
+              jq -r '.results[] | "| \(.name) | \(if .ok then "✅" else "❌" end) | \(.detail | gsub("\\|"; "\\|")) |"' "$RUNNER_TEMP/e2e.json"
+              echo; echo "timings: $(jq -c .timings "$RUNNER_TEMP/e2e.json")"
+            fi
+            m="$RUNNER_TEMP/sbx/kvm/images/sadbox-base_latest/meta.json"
+            [ -f "$m" ] && echo && echo "disk: $(jq -r '"\(.sizeBytes / 1048576 | floor) MB, user \(.uid):\(.gid)"' "$m")"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: VM logs
+        if: failure()
+        run: |
+          for f in $(find /tmp "$RUNNER_TEMP" -path '*kvm/vms/*' -name '*.log' 2>/dev/null); do echo "--- $f"; tail -40 "$f"; done
