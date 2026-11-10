@@ -4,8 +4,9 @@
 #   docker compose run --rm sadbox sadbox setup     # builds the VM image (a few minutes)
 #   docker compose up -d                            # http://localhost:7070
 #
-# Project VMs run inside this container, on the host's /dev/kvm. They stop
-# when the container does (an upgrade, `docker compose down`), keeping their
+# Each project is a microVM on the host's /dev/kvm; the Cloud Hypervisor
+# processes that run them live in this container, so the VMs stop when the
+# container does (an upgrade, `docker compose down`), keeping their
 # disks; start them again from the UI. Not for macOS hosts — run sadbox
 # natively there.
 services:
