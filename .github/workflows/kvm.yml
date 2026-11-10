@@ -1,6 +1,7 @@
 # The Linux driver (src/driver/kvm) on real Cloud Hypervisor VMs: `sadbox
 # setup` on a KVM runner (Cloud Hypervisor, its kernel, the base image and its
-# disk), then the driver's integration test (kvm.it.test.ts). GitHub's x86_64
+# disk), the driver's integration test (kvm.it.test.ts), then sadbox itself end
+# to end — the compiled binary serving real VMs (test/e2e-linux.ts). GitHub's x86_64
 # runners have /dev/kvm; their arm64 ones do not (spike E).
 name: KVM driver
 
@@ -8,11 +9,11 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - "src/driver/**"
-      - "src/core/baseimage.ts"
       - "guest/agent/**"
       - "images/**"
       - "test/fake-ch.ts"
+      - "test/e2e-linux.ts"
+      - "src/**"
       - ".github/workflows/kvm.yml"
 
 permissions:
@@ -55,6 +56,14 @@ jobs:
           SADBOX_KVM_IT="$RUNNER_TEMP/sbx" SADBOX_KVM_IT_TIMINGS="$RUNNER_TEMP/timings.json" \
             bun test src/driver/kvm/kvm.it.test.ts
 
+      - name: Build the Linux binary
+        run: bun run compile:linux-x64
+
+      - name: sadbox end to end on real VMs (the binary, its API and terminal)
+        run: |
+          SADBOX_BIN=dist/sadbox-linux-x64 SADBOX_DATA="$RUNNER_TEMP/sbx" SADBOX_E2E_JSON="$RUNNER_TEMP/e2e.json" \
+            bun test/e2e-linux.ts
+
       - name: Summary
         if: always()
         run: |
@@ -64,6 +73,11 @@ jobs:
               echo '| Step | ms |'; echo '|---|---|'
               jq -r 'to_entries[] | "| \(.key) | \(.value) |"' "$RUNNER_TEMP/timings.json"
             fi
+            if [ -f "$RUNNER_TEMP/e2e.json" ]; then
+              echo; echo '| End to end | | |'; echo '|---|---|---|'
+              jq -r '.results[] | "| \(.name) | \(if .ok then "✅" else "❌" end) | \(.detail | gsub("\\|"; "\\|")) |"' "$RUNNER_TEMP/e2e.json"
+              echo; echo "timings: $(jq -c .timings "$RUNNER_TEMP/e2e.json")"
+            fi
             m="$RUNNER_TEMP/sbx/kvm/images/sadbox-base_latest/meta.json"
             [ -f "$m" ] && echo && echo "disk: $(jq -r '"\(.sizeBytes / 1048576 | floor) MB, user \(.uid):\(.gid)"' "$m")"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -71,4 +85,4 @@ jobs:
       - name: VM logs
         if: failure()
         run: |
-          for f in $(find /tmp -path '*kvm/vms/*' \( -name '*.log' \) 2>/dev/null); do echo "--- $f"; tail -40 "$f"; done
+          for f in $(find /tmp "$RUNNER_TEMP" -path '*kvm/vms/*' -name '*.log' 2>/dev/null); do echo "--- $f"; tail -40 "$f"; done
