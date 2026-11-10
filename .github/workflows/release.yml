@@ -21,6 +21,25 @@ jobs:
       darwin-x64-sha: ${{ steps.sums.outputs.darwin-x64 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the whole history and its tags, for the release notes
+      - name: Release notes from the commits since the last release
+        run: |
+          # GitHub's generated notes list merged pull requests by title, and
+          # ours are all "Merge feature/… into main": say what the commits did.
+          prev=$(git describe --tags --abbrev=0 --match 'v*' "$GITHUB_REF_NAME^" 2>/dev/null || true)
+          range="${prev:+$prev..}$GITHUB_REF_NAME"
+          {
+            echo "## Changes"
+            echo
+            # not merges, and not the release bot's own version / README bumps
+            git log --no-merges --invert-grep --grep='\[skip ci\]' --format='- %s (%h)' "$range"
+            if [ -n "$prev" ]; then
+              echo
+              echo "**Full changelog:** https://github.com/${GITHUB_REPOSITORY}/compare/${prev}...${GITHUB_REF_NAME}"
+            fi
+          } > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
       - name: Stamp the version from the tag
         run: ./scripts/set-version.sh "$GITHUB_REF_NAME"
       - uses: oven-sh/setup-bun@v2
@@ -44,7 +63,7 @@ jobs:
             dist/sadbox-linux-arm64
             dist/sadbox-linux-x64
             dist/SHA256SUMS
-          generate_release_notes: true
+          body_path: ${{ runner.temp }}/notes.md
 
   # Record the released version on main, and point the Homebrew formula at the
   # binaries just published. Skipped for pre-release tags
