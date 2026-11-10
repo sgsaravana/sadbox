@@ -1,0 +1,95 @@
+# Spike E (docs/ROADMAP.md, Linux L0): boot the sadbox base image under Cloud
+# Hypervisor on a KVM runner and probe sadbox-agent over vsock. Results land in
+# the run summary and as an artifact. See spikes/e-cloud-hypervisor/README.md.
+name: Spike E — Cloud Hypervisor
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["feature/linux"]
+    paths:
+      - "spikes/e-cloud-hypervisor/**"
+      - "guest/agent/**"
+      - "images/base/**"
+      - ".github/workflows/spike-e.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  spike:
+    strategy:
+      fail-fast: false
+      matrix:
+        # GitHub's x86_64 runners expose /dev/kvm; the arm64 ones are tried to
+        # find out (the job reports "no /dev/kvm" and passes if they do not)
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: spikes/e-cloud-hypervisor
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: KVM
+        id: kvm
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "### $(uname -m): no /dev/kvm on ${{ matrix.runner }} — nothing to boot" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v6
+        if: steps.kvm.outputs.available == 'true'
+        with:
+          go-version-file: guest/agent/go.mod
+          cache-dependency-path: guest/agent/go.sum
+
+      - uses: oven-sh/setup-bun@v2
+        if: steps.kvm.outputs.available == 'true'
+
+      - name: Build the rootfs
+        if: steps.kvm.outputs.available == 'true'
+        run: ./build-rootfs.sh
+
+      - name: Boot under Cloud Hypervisor and probe
+        if: steps.kvm.outputs.available == 'true'
+        run: ./run-ch.sh
+
+      - name: Summary
+        if: always() && steps.kvm.outputs.available == 'true'
+        run: |
+          f=$(ls out/results-*.json 2>/dev/null | head -1)
+          [ -n "$f" ] || { echo "### $(uname -m): no results" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          jq -r '
+            "### \(.machine) — \(.cpu)",
+            "Cloud Hypervisor \(.cloudHypervisor), kernel \(.kernel), guest \(.agent.kernel // "?")",
+            "",
+            "| Measure | Value |", "|---|---|",
+            "| image build (docker) | \(.build.imageBuildMs // "?") ms |",
+            "| rootfs (export + mkfs.ext4) | \(.build.rootfsMs // "?") ms, \(.build.rootfsUsedMB // "?") MB used of \(.build.rootfsSizeMB // "?") MB |",
+            "| per-project disk clone | \(.diskCloneMs) ms |",
+            "| boot: launch → agent announces / answers | \(.timings.announceMs // "?") / \(.timings.bootMs // "?") ms |",
+            "| restart: launch → agent announces / answers | \(.restartAnnounceMs // "?") / \(.restartBootMs // "?") ms |",
+            "| poweroff → VMM exit | \(.shutdownMs) ms |",
+            "| ping | \(.timings.pingMs // "?") ms |",
+            "| exec `true` p50 / p95 | \(.timings.execP50Ms // "?") / \(.timings.execP95Ms // "?") ms |",
+            "| stdin / stdout | \(.timings.stdinMBps // "?") / \(.timings.stdoutMBps // "?") MB/s |",
+            "",
+            "| Check | | Detail |", "|---|---|---|",
+            (.results // [] | .[] | "| \(.name) | \(if .ok then "✅" else "❌" end) | \(.detail | gsub("\\|"; "\\|")) |")
+          ' "$f" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v5
+        if: always() && steps.kvm.outputs.available == 'true'
+        with:
+          name: spike-e-${{ matrix.runner }}
+          path: spikes/e-cloud-hypervisor/out/*.json
+          if-no-files-found: ignore
