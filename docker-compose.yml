@@ -1,23 +1,38 @@
-# sadbox supervisor — compose packaging.
-# Functional today for the web UI/API; worker (microVM) creation from inside a
-# container requires a LINUX host with KVM and the future kvm driver
-# (docs/research/02). On macOS hosts run natively instead (README: Deploying).
+# sadbox on a Linux host with KVM, as a container (README: Install → Linux, with docker compose).
+#
+#   docker compose build
+#   docker compose run --rm sadbox sadbox setup     # builds the VM image (a few minutes)
+#   docker compose up -d                            # http://localhost:7070
+#
+# Project VMs run inside this container, on the host's /dev/kvm. They stop
+# when the container does (an upgrade, `docker compose down`), keeping their
+# disks; start them again from the UI. Not for macOS hosts — run sadbox
+# natively there.
 services:
   sadbox:
-    image: ${SADBOX_IMAGE:-sadbox-app:latest}
+    image: ${SADBOX_IMAGE:-sadbox:latest}
     build: .
-    ports:
-      - "7070:7070"
+    # the host's network: port forwards listen on whatever host port you pick,
+    # and the UI stays on this machine's localhost unless SADBOX_HOST says otherwise
+    network_mode: host
+    devices:
+      - /dev/kvm
     volumes:
-      - sadbox-data:/data
+      - ${SADBOX_DATA_DIR:-sadbox-data}:/data
+      # the host's docker builds the VM image (`sadbox setup`, and after an
+      # upgrade that changes it). Whoever controls this container controls the host.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # local folders to create projects from, at the same path as on the host
+      - ${SADBOX_PROJECTS:-/srv/sadbox/projects}:${SADBOX_PROJECTS:-/srv/sadbox/projects}
+    environment:
+      - SADBOX_PASSWORD
+      - SADBOX_HOST
+      - SADBOX_PORT
+      - SADBOX_PROXY_PORT
+      - SADBOX_FORWARD_HOST
+      - SADBOX_APPROVAL_TIMEOUT_MS
+    init: true # reaps what the VMs leave behind
     restart: unless-stopped
-    # Uncomment on a Linux host with KVM once the kvm driver ships —
-    # this is all Firecracker/Cloud Hypervisor need (no privileged mode):
-    # devices:
-    #   - /dev/kvm
-    #   - /dev/net/tun
-    # cap_add:
-    #   - NET_ADMIN
 
 volumes:
   sadbox-data:

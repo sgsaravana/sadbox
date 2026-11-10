@@ -43,7 +43,42 @@ elif [ "$os" = "darwin" ]; then
   echo "  sadbox setup             # start container system + build worker image"
   echo "  sadbox serve             # http://localhost:7070"
 else
+  # Linux: project VMs are Cloud Hypervisor microVMs on KVM; `sadbox setup`
+  # fetches Cloud Hypervisor and its kernel and builds the VM disk with docker
   echo
-  echo "Note: on Linux, worker microVMs need the kvm driver (not yet shipped)."
-  echo "The UI/API run, but 'create worker' is macOS-only for now."
+  missing=0
+  if [ ! -e /dev/kvm ]; then
+    echo "✗ /dev/kvm is missing: this machine has no KVM (virtualization off in the firmware,"
+    echo "  or a cloud VM without nested virtualization — see README: Supported platforms)"
+    missing=1
+  elif [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+    echo "✗ /dev/kvm is not usable by $(id -un):  sudo usermod -aG kvm $(id -un)   (then log in again)"
+    missing=1
+  else
+    echo "✓ /dev/kvm"
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "✗ docker not found — it builds the VM image: https://docs.docker.com/engine/install/"
+    missing=1
+  elif ! docker info >/dev/null 2>&1; then
+    echo "✗ docker is installed but not usable by $(id -un):  sudo usermod -aG docker $(id -un)   (then log in again)"
+    missing=1
+  else
+    echo "✓ docker"
+  fi
+  for tool in git openssl curl; do
+    if command -v "$tool" >/dev/null 2>&1; then echo "✓ $tool"; else echo "✗ $tool not found"; missing=1; fi
+  done
+  if command -v virtiofsd >/dev/null 2>&1 || [ -x /usr/libexec/virtiofsd ] || [ -x /usr/lib/qemu/virtiofsd ]; then
+    echo "✓ virtiofsd (agent history is kept on this machine)"
+  else
+    echo "· virtiofsd not found (optional): without it agent history stays in each VM — install the virtiofsd package"
+  fi
+  [ "$arch" = "arm64" ] && echo "· arm64 Linux is built but not yet tested on a real KVM host"
+  echo
+  [ "$missing" = 1 ] && echo "Fix the ✗ items above, then:"
+  [ "$missing" = 1 ] || echo "Next:"
+  echo "  sadbox setup             # Cloud Hypervisor, its kernel, and the VM image (a few minutes)"
+  echo "  sadbox serve             # http://localhost:7070"
+  echo "  sadbox service install   # or: run it in the background, started at boot (systemd)"
 fi

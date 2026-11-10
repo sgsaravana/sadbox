@@ -10,6 +10,7 @@ import { join, resolve } from "node:path";
 import { config } from "../../config";
 import { kvmDriver as driver, chArgs, planMounts, type VmSpec } from "./index";
 import { diskPath, imageDir } from "./images";
+import { CH_VERSION, KERNEL_TAG } from "./vmm";
 import { diskImageFiles } from "../../assets";
 
 const go = Bun.which("go");
@@ -46,6 +47,12 @@ test("the binary carries all of the agent's source, for the disk build", () => {
     .filter((f) => f === "go.mod" || f === "go.sum" || (f.endsWith(".go") && !f.endsWith("_test.go")));
   expect(Object.keys(diskImageFiles).filter((k) => k.startsWith("agent/")).map((k) => k.slice(6)).sort()).toEqual(src.sort());
   expect(diskImageFiles.Dockerfile).toBeTruthy();
+});
+
+test("the container image pins the same Cloud Hypervisor and kernel", () => {
+  const dockerfile = readFileSync(resolve(import.meta.dir, "../../../Dockerfile"), "utf8");
+  expect(dockerfile).toContain(`ARG CH_VERSION=${CH_VERSION}\n`);
+  expect(dockerfile).toContain(`ARG KERNEL_TAG=${KERNEL_TAG}\n`);
 });
 
 describe("planning a VM", () => {

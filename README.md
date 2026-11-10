@@ -32,7 +32,8 @@ keeps the agents' logins (Claude's it owns and refreshes, handing VMs
 placeholders) and each project's agent history, which a new VM of the same
 name picks up. See `docs/research/` for the design research and `spikes/` for
 the de-risk experiments behind each piece, and [`docs/ROADMAP.md`](docs/ROADMAP.md)
-for what's next (Linux support first).
+for what's next. It runs on Apple silicon Macs, and on Linux hosts with KVM
+(newer: see [Supported platforms](#supported-platforms)).
 
 ## Releases
 
@@ -49,30 +50,35 @@ Browse them all on the [releases page](https://github.com/sgsaravana/sadbox/rele
 
 ## Supported platforms
 
-**sadbox fully works on one platform today: an Apple silicon Mac running
-macOS 26 (Tahoe) or later.** Everywhere else the binary starts and serves the
-web UI and API, but it cannot create project VMs — which is the whole point —
-so treat those platforms as unsupported.
+Every project is a real microVM. sadbox makes them with Apple's
+[`container`](https://github.com/apple/container) tool on a Mac, and with
+[Cloud Hypervisor](https://www.cloudhypervisor.org) on KVM on Linux. The rest
+(the proxy, vaults, agents, the UI) is the same on both.
 
 | Platform | Project VMs | Notes |
 |---|---|---|
-| **Mac, Apple silicon (M1 or later), macOS 26+** | ✅ **Supported** | The only fully working setup. |
+| **Mac, Apple silicon (M1 or later), macOS 26+** | ✅ **Supported** | Through Apple's `container` CLI. |
+| **Linux x86_64 with KVM** (bare metal, a home server, a cloud VM with nested virtualization) | ✅ **Supported, new** | Cloud Hypervisor microVMs. Tested on Ubuntu 24.04 in CI on real VMs. Runs natively or [in docker compose](#linux-with-docker-compose). |
+| Linux arm64 with KVM (e.g. Graviton `.metal`) | ⚠️ Untested | Built for it, but not yet run on an arm64 KVM host. |
+| Linux without `/dev/kvm` | ❌ | No hardware virtualization: see [EC2 and other clouds](#ec2-and-other-clouds). |
 | Mac, Apple silicon, macOS 15 or earlier | ❌ | Apple's `container` CLI requires macOS 26. Upgrade macOS. |
-| Mac, Intel | ❌ | Apple's `container` CLI is Apple silicon only; `brew install container` refuses to install. No Intel backend is planned. |
-| Linux (arm64 / x64) | ❌ Not yet | Needs the KVM / Cloud Hypervisor driver, which is designed (`docs/research/02`) but not built. |
-| Docker / any container, on any host | ❌ | A containerized supervisor cannot reach the host's hypervisor; see [Deploying](#deploying). |
+| Mac, Intel | ❌ | Apple's `container` CLI is Apple silicon only. No Intel backend is planned. |
+| Docker on a Mac | ❌ | A container there cannot reach the Mac's hypervisor; run sadbox natively. See [Deploying](#deploying). |
 | Windows | ❌ | No build, none planned. |
 
-Why so narrow: every project is a real microVM, and sadbox creates them through
-Apple's [`container`](https://github.com/apple/container) tool, which only
-exists for Apple silicon on macOS 26+. Release binaries are also published for
-Intel Macs and Linux (`sadbox-darwin-x64`, `sadbox-linux-*`) so the UI can be
-run or demoed there, and for the Linux driver to come — not because projects
-work on them.
+### EC2 and other clouds
+
+A cloud VM needs KVM inside it (`ls /dev/kvm`):
+
+- **AWS:** nested virtualization on the Intel C8i / M8i / R8i families, or any
+  `.metal` instance (the only way on Graviton).
+- **GCP / Azure:** instance types with nested virtualization enabled.
+- **GitHub Actions:** the x86_64 Ubuntu runners have `/dev/kvm` (sadbox's own CI
+  uses them); the arm64 ones do not.
 
 ## Requirements
 
-On a supported Mac:
+On a Mac:
 
 - Apple's [`container`](https://github.com/apple/container) CLI:
   `brew install container`
@@ -80,17 +86,30 @@ On a supported Mac:
   tools) — the egress proxy uses openssl to mint its CA and certificates
 - [Bun](https://bun.com) ≥ 1.3.5 — only if you run from source
 
+On Linux:
+
+- `/dev/kvm`, usable by your user (`sudo usermod -aG kvm $USER`, then log in again)
+- [Docker](https://docs.docker.com/engine/install/), usable by your user: it
+  builds the VM image (`sudo usermod -aG docker $USER`)
+- `git`, `openssl`, `curl`
+- optional: `virtiofsd` 1.11 or later (or your user being uid 1000), so agent
+  history is kept on the host. Without it the history stays in each VM and is
+  copied out before the VM is destroyed.
+- Cloud Hypervisor and its guest kernel are fetched by `sadbox setup` (pinned
+  versions, into `~/.sadbox/kvm`)
+
 ## Install
 
 ### Option 1 — install script (prebuilt binary)
 
 ```sh
-brew install container
+brew install container      # on a Mac
 curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh | sh
 ```
 
 This downloads the latest release binary for your platform into
-`~/.local/bin/sadbox`. If the script says that directory is not on your `PATH`,
+`~/.local/bin/sadbox`. On Linux it then checks `/dev/kvm`, docker and
+virtiofsd, and says how to fix what is missing. If the script says that directory is not on your `PATH`,
 add it as shown. To pin a version or change the location:
 
 ```sh
@@ -132,13 +151,36 @@ UI and base-image recipe are embedded, so it runs without the checkout.
 A Homebrew formula is kept in `packaging/homebrew/sadbox.rb`, but it is not
 published to a tap yet, so `brew install` of sadbox itself is not available.
 
+### Linux, with docker compose
+
+The supervisor and its VMs in one container, on the host's KVM:
+
+```sh
+git clone https://github.com/sgsaravana/sadbox.git && cd sadbox
+docker compose build
+docker compose run --rm sadbox sadbox setup   # builds the VM image (a few minutes, once)
+SADBOX_PASSWORD='choose-a-password' docker compose up -d   # http://localhost:7070
+```
+
+- It uses the host's network, so port forwards listen on the host directly, and the
+  UI stays on localhost unless you set `SADBOX_HOST`.
+- The host's docker socket is mounted in to build the VM image. Whoever controls the
+  container controls the host.
+- Local folders to create projects from must be under `SADBOX_PROJECTS` (default
+  `/srv/sadbox/projects`), which is mounted at the same path inside. Projects
+  cloned from a git URL need nothing.
+- The VMs run inside the container, so they stop when it does (an upgrade,
+  `docker compose down`). Their disks are kept in the `sadbox-data` volume:
+  start them again from the UI. A native install, below, keeps VMs running
+  across supervisor restarts.
+
 ### Updating
 
 Your projects, vault, agent logins and history live in `~/.sadbox` and are
 kept across updates; nothing there needs to be exported or migrated by hand.
 
 1. **Stop the supervisor**: Ctrl-C on `sadbox serve` (or unload its launchd
-   job). Running VMs keep running — agents and terminals in them carry on —
+   job; on Linux, `systemctl --user stop sadbox`). Running VMs keep running — agents and terminals in them carry on —
    and reconnect when the supervisor is back.
 2. **Install the new version** the way you installed it:
    - install script: run the same command again —
@@ -147,8 +189,9 @@ kept across updates; nothing there needs to be exported or migrated by hand.
    - downloaded binary: replace it with the new one, as in
      [Option 2](#option-2--download-the-binary-yourself);
    - from source: `git pull && bun install`.
-3. **Start it again** — `sadbox serve` (or load the launchd job) — and check
-   `sadbox version`.
+3. **Start it again** — `sadbox serve` (or load the launchd job, or
+   `systemctl --user start sadbox`) — and check `sadbox version`. With docker
+   compose: `git pull && docker compose build && docker compose up -d`.
 
 What happens on its own:
 
@@ -172,9 +215,14 @@ What does not:
 ## First run
 
 ```sh
-sadbox setup     # checks dependencies, starts the container system, builds the base image (a few minutes, once)
+sadbox setup     # checks dependencies, starts the VM backend, builds the base image (a few minutes, once)
 sadbox serve     # http://localhost:7070
 ```
+
+On Linux, `sadbox setup` also fetches Cloud Hypervisor and its kernel, and turns
+the base image into the disk VMs boot from. To keep sadbox running in the
+background and start it at boot, use `sadbox service install` (a systemd user
+unit; see [Deploying](#deploying)).
 
 The first `sadbox serve` generates a sign-in password, prints it once, and
 saves it in `~/.sadbox/initial-password` (see [Sign-in password](#sign-in-password)
@@ -234,8 +282,9 @@ The web UI and API need a password (one user). How it is set up:
 
 ```
 sadbox serve     start the supervisor (default)
-sadbox setup     check deps, start container system, build the base image
+sadbox setup     check deps, start the VM backend, build the base image
 sadbox doctor    report environment health
+sadbox service   install | uninstall | status — run at boot (Linux: a systemd user unit)
 sadbox passwd    set the sign-in password
 sadbox version
 ```
@@ -688,34 +737,44 @@ cookie (`401` otherwise). Inside a VM, `http://vault.sadbox.internal/v1/` and
 
 ## Deploying
 
-`Dockerfile` builds the supervisor image; `scripts/push-ecr.sh` builds and
-pushes it to ECR (defaults to `linux/arm64` for Apple-silicon / Graviton):
+Where the supervisor can run, and whether it can make project VMs there:
+
+| Where | Project microVMs? |
+|---|---|
+| **Mac, native** (`sadbox serve`, under launchd for boot) | ✅ through Apple `container` |
+| **Linux with KVM, native** (`sadbox serve`, or `sadbox service install`) | ✅ Cloud Hypervisor; VMs keep running across supervisor restarts |
+| **Linux with KVM, docker compose** ([above](#linux-with-docker-compose)) | ✅ Cloud Hypervisor, inside the container; VMs stop with it |
+| **Mac, in Docker/`container`** | ❌ web UI loads, but project create fails: no path to Virtualization.framework |
+
+### Linux: run at boot (systemd)
+
+```sh
+sadbox service install            # writes ~/.config/systemd/user/sadbox.service, enables and starts it
+sudo loginctl enable-linger $USER # so it starts at boot, before you log in
+journalctl --user -u sadbox -f    # its log
+sadbox service uninstall
+```
+
+The unit runs the same `sadbox` you installed it with, carrying your current
+`SADBOX_*` settings and `PATH`, but not `SADBOX_PASSWORD` (a unit file is
+readable by anyone; the service uses the stored password from `sadbox passwd`).
+It stops only the supervisor (`KillMode=process`): the VMs keep running across a
+restart or an upgrade, and the supervisor finds them again.
+
+### The container image
+
+`Dockerfile` builds the supervisor image for Linux hosts with KVM: the compiled
+binary on Debian, with Cloud Hypervisor, its kernel, virtiofsd and the docker
+CLI. `scripts/push-ecr.sh` builds and pushes it to ECR (defaults to
+`linux/arm64`):
 
 ```sh
 AWS_REGION=ap-southeast-1 AWS_ACCOUNT_ID=1234... ./scripts/push-ecr.sh v0.1.0
 ```
 
-**But read this before deploying to the Mac mini.** A container cannot create
-project microVMs on a macOS host — containers on macOS run inside a Linux VM
-that has no access to the host's Virtualization.framework, and Apple silicon
-has no nested virtualization (`docs/research/02`, `docs/research/09`). So:
-
-| Where the supervisor runs | Project microVMs? |
-|---|---|
-| **Mac mini, native** (`bun run start` under launchd) | ✅ via Apple `container` |
-| **Mac mini, in Docker/`container`** | ❌ web UI loads, but project create fails — no path to Virtualization.framework |
-| **Linux server, in Docker** with `/dev/kvm` | ✅ *once the `kvm` driver ships* (not built yet) |
-
-For your Mac mini today, run sadbox **natively**, not from the ECR image:
-
-```sh
-git clone https://github.com/sgsaravana/sadbox.git && cd sadbox && bun install
-bun run build:image          # bake the base image
-bun run start                # or a launchd plist for boot persistence
-```
-
-The ECR image is still worth pushing — it's the artifact for the Linux
-deployment path once the `kvm` driver lands, and it runs the UI/API anywhere.
+On a Mac, run sadbox natively instead: a container there cannot reach
+Virtualization.framework, and Apple silicon has no nested virtualization
+(`docs/research/02`, `docs/research/09`).
 
 ### Serving to the LAN behind Caddy (Mac mini home server)
 
@@ -782,9 +841,14 @@ Notes:
 - **Forwarded ports are plain HTTP**: a sign-in forward's cookie crosses the
   network unencrypted when it is opened from another machine, and a forward
   opened to anyone is raw TCP that anyone who can reach this machine can use.
-- Apple silicon + macOS 26 only (see [Supported platforms](#supported-platforms));
-  the Linux/Cloud Hypervisor driver and docker-compose packaging are designed
-  (`docs/research/02`) but not built.
+- Platforms: Apple silicon Macs on macOS 26+, and Linux with KVM (see
+  [Supported platforms](#supported-platforms)). On Linux:
+  - Creating a project copies the image's disk (about 2 GB), which takes a few seconds on ext4.
+    btrfs or xfs clone it instantly.
+  - The disk size in Settings caps the whole VM, not only its workdir.
+  - Agent history is kept on the host only with virtiofsd 1.11+ (or as uid 1000).
+  - The new-project form reads tool versions from the Docker image, so keep it.
+  - arm64 hosts are untested.
 - A change to an item still written to the env file reaches new shells/panes
   only — proxy items take effect on the next request, fetch items on the next
   read.

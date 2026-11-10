@@ -4,6 +4,11 @@
 //
 //   SADBOX_BIN=dist/sadbox-linux-x64 SADBOX_DATA=<setup's data dir> bun test/e2e-linux.ts
 //
+// Or against the container (docker-compose.yml): SADBOX_E2E_START / _STOP are
+// the commands that start and stop it, and SADBOX_E2E_WORK a folder mounted
+// into it at the same path (its SADBOX_PROJECTS). A container's VMs stop with
+// it, so there the restart check expects the project to start again instead.
+//
 // Creates a project from a local git folder, then checks: its files and a
 // shell in tmux; egress only through the proxy (allowed, blocked, no direct
 // route, logged); sync back to the folder; port forwards (open, and behind
@@ -14,19 +19,26 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const BIN = process.env.SADBOX_BIN ?? "dist/sadbox-linux-x64";
-const DATA = process.env.SADBOX_DATA;
-if (!DATA) { console.error("SADBOX_DATA: the data dir `sadbox setup` used"); process.exit(2); }
+const START = process.env.SADBOX_E2E_START, STOP = process.env.SADBOX_E2E_STOP;
+const CONTAINER = !!START;
+const DATA = process.env.SADBOX_DATA ?? "";
+if (!DATA && !CONTAINER) { console.error("SADBOX_DATA: the data dir `sadbox setup` used"); process.exit(2); }
 const PORT = 17070, PROXY_PORT = 17071, OPEN_PORT = 18080, SIGNIN_PORT = 18081, APP_PORT = 8080;
 const BASE = `http://127.0.0.1:${PORT}`;
 const PASSWORD = "e2e-password-0123456789";
-const work = mkdtempSync(join(tmpdir(), "sadbox-e2e-"));
+const work = mkdtempSync(join(process.env.SADBOX_E2E_WORK || tmpdir(), "sadbox-e2e-"));
 const timings: Record<string, number> = {};
 const results: { name: string; ok: boolean; detail: string }[] = [];
 
 // ---- the supervisor ----
 let server: ReturnType<typeof Bun.spawn> | null = null;
+async function sh(cmd: string) {
+  const p = Bun.spawn(["sh", "-c", cmd], { stdout: "inherit", stderr: "inherit" });
+  if (await p.exited !== 0) throw new Error(`${cmd}: failed`);
+}
 async function serve() {
-  server = Bun.spawn([BIN, "serve"], {
+  if (START) await sh(START);
+  else server = Bun.spawn([BIN, "serve"], {
     env: {
       ...process.env, SADBOX_DATA: DATA, SADBOX_PORT: String(PORT), SADBOX_HOST: "127.0.0.1",
       SADBOX_PROXY_PORT: String(PROXY_PORT), SADBOX_FORWARD_HOST: "127.0.0.1", SADBOX_PASSWORD: PASSWORD,
@@ -41,6 +53,7 @@ async function serve() {
   throw new Error("the supervisor did not come up");
 }
 async function stopServing() {
+  if (STOP) await sh(STOP);
   server?.kill("SIGTERM");
   await server?.exited;
   server = null;
@@ -221,12 +234,13 @@ try {
     return `stop ${timings.stopMs} ms, start ${timings.startMs} ms`;
   });
 
-  await check("a supervisor restart leaves the VM running and reachable", async () => {
+  await check(CONTAINER ? "a container restart: the project starts again, its disk kept" : "a supervisor restart leaves the VM running and reachable", async () => {
     term?.close();
     await stopServing();
     await serve();
     const p = (await api("GET", "/api/projects") as any[]).find((x) => x.id === id);
-    expect(p?.state === "running", `state ${p?.state}`);
+    if (CONTAINER && p?.state === "stopped") await api("POST", `/api/projects/${id}/start`);
+    else expect(p?.state === "running", `state ${p?.state}`);
     term = new Term(id);
     await term.open();
     await term.run("cat README.md", /e2e project from the host/);
@@ -238,7 +252,7 @@ try {
     await timed("destroyMs", () => api("DELETE", `/api/projects/${id}`));
     const left = (await api("GET", "/api/projects") as any[]).find((x) => x.id === id);
     expect(!left || left.state === "destroyed", `still ${left?.state}`);
-    expect(!existsSync(join(DATA, "kvm", "vms", "sadbox-e2e")), "the VM's folder is still there");
+    if (DATA) expect(!existsSync(join(DATA, "kvm", "vms", "sadbox-e2e")), "the VM's folder is still there");
     id = "";
   });
 } finally {
@@ -251,6 +265,6 @@ try {
     try { console.log(`--- ${f}\n${readFileSync(join(work, f), "utf8").split("\n").slice(-40).join("\n")}`); } catch {}
   }
   if (process.env.SADBOX_E2E_JSON) writeFileSync(process.env.SADBOX_E2E_JSON, JSON.stringify({ results, timings }, null, 2));
-  rmSync(work, { recursive: true, force: true });
+  try { rmSync(work, { recursive: true, force: true }); } catch {} // a container may have left root-owned files
   process.exit(failed.length ? 1 : 0);
 }
