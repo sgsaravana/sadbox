@@ -1,7 +1,8 @@
 # sadbox supervisor as a container, for a Linux host with KVM (docker-compose.yml).
 #
-# Project VMs are Cloud Hypervisor microVMs (src/driver/kvm), run inside this
-# container on the host's /dev/kvm. Cloud Hypervisor and its guest kernel are
+# Each project is a Cloud Hypervisor microVM on the host's /dev/kvm
+# (src/driver/kvm); the Cloud Hypervisor process that runs it lives in this
+# container, with the supervisor. Cloud Hypervisor and its guest kernel are
 # baked in; the VM image is built by `sadbox setup` through the host's docker
 # (the socket is mounted in). virtiofsd shares agent history into the VMs.
 #

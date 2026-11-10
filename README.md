@@ -1,21 +1,22 @@
 # sadbox
 
-Supervisor for **microVM AI-agent sandboxes** on macOS (Apple silicon, macOS 26+
-— see [Supported platforms](#supported-platforms)). Spin up isolated Linux
-microVMs — each one a **project** — with a copy of a source folder and Claude
-Code + toolchain baked in; watch and steer the agent through a browser terminal
-attached to tmux inside the VM; give it vault variables and secrets it can use
-but never read; keep agents' logins and history across VMs; pull the agent's
-work back into your repo as git commits — on demand, with a diff preview,
-without the agent ever touching your original folder.
+Supervisor for **microVM AI-agent sandboxes** on Apple silicon Macs and on
+Linux hosts with KVM (see [Supported platforms](#supported-platforms)). Spin up
+isolated Linux microVMs — each one a **project** — with a copy of a source
+folder and Claude Code + toolchain baked in; watch and steer the agent through
+a browser terminal attached to tmux inside the VM; give it vault variables and
+secrets it can use but never read; keep agents' logins and history across VMs;
+copy the agent's work back into your folder on demand, as uncommitted changes
+for you to review, without the agent ever touching your original folder.
 
-Projects are real VMs (own kernel, own memory, Apple Virtualization.framework
-via the open-source [`container`](https://github.com/apple/container) CLI) —
-not shared-kernel containers.
+Projects are real VMs (own kernel, own memory) — not shared-kernel containers:
+Apple's Virtualization.framework through the open-source
+[`container`](https://github.com/apple/container) CLI on a Mac, and
+[Cloud Hypervisor](https://www.cloudhypervisor.org) on KVM on Linux.
 
 ## Status
 
-v0 scaffold — the full vertical slice works: create → browser tmux terminal →
+v0 — the full vertical slice works: create → browser tmux terminal →
 vault → agent logins & history → git sync-back → destroy, with a browser editor that can stage,
 commit, push, switch branches, stash and discard inside the VM. The web UI opens on a **Home** overview
 (intro, feature tour, and quick-start) and has a side nav with a nested
@@ -134,6 +135,9 @@ The binary is not signed or notarized, so a copy downloaded with a browser is
 quarantined by macOS; the `xattr` line clears that. (`curl` downloads, including
 the install script, are not quarantined.)
 
+On Linux, take `sadbox-linux-x64` (or `-arm64`) the same way, with
+`sha256sum` to check it and no `xattr` step.
+
 ### Option 3 — from source
 
 For development, or to run changes that are not in a release yet:
@@ -153,7 +157,10 @@ published to a tap yet, so `brew install` of sadbox itself is not available.
 
 ### Linux, with docker compose
 
-The supervisor and its VMs in one container, on the host's KVM:
+The supervisor runs in a container. Each project is still its own Cloud
+Hypervisor microVM on the host's KVM, with its own kernel. Only the Cloud
+Hypervisor processes that run the VMs live in the container, alongside the
+supervisor:
 
 ```sh
 git clone https://github.com/sgsaravana/sadbox.git && cd sadbox
@@ -162,6 +169,8 @@ docker compose run --rm sadbox sadbox setup   # builds the VM image (a few minut
 SADBOX_PASSWORD='choose-a-password' docker compose up -d   # http://localhost:7070
 ```
 
+- Without `SADBOX_PASSWORD`, the first start generates a password: it is in
+  `docker compose logs sadbox` and in `/data/initial-password` in the container.
 - It uses the host's network, so port forwards listen on the host directly, and the
   UI stays on localhost unless you set `SADBOX_HOST`.
 - The host's docker socket is mounted in to build the VM image. Whoever controls the
@@ -169,8 +178,8 @@ SADBOX_PASSWORD='choose-a-password' docker compose up -d   # http://localhost:70
 - Local folders to create projects from must be under `SADBOX_PROJECTS` (default
   `/srv/sadbox/projects`), which is mounted at the same path inside. Projects
   cloned from a git URL need nothing.
-- The VMs run inside the container, so they stop when it does (an upgrade,
-  `docker compose down`). Their disks are kept in the `sadbox-data` volume:
+- The VMs' Cloud Hypervisor processes live in the container, so the VMs stop when it
+  does (an upgrade, `docker compose down`). Their disks are kept in the `sadbox-data` volume:
   start them again from the UI. A native install, below, keeps VMs running
   across supervisor restarts.
 
@@ -181,7 +190,8 @@ kept across updates; nothing there needs to be exported or migrated by hand.
 
 1. **Stop the supervisor**: Ctrl-C on `sadbox serve` (or unload its launchd
    job; on Linux, `systemctl --user stop sadbox`). Running VMs keep running — agents and terminals in them carry on —
-   and reconnect when the supervisor is back.
+   and reconnect when the supervisor is back. (Not under docker compose: there
+   the VMs stop with the container and are started again from the UI.)
 2. **Install the new version** the way you installed it:
    - install script: run the same command again —
      `curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh | sh`
@@ -306,11 +316,6 @@ version to edit by hand. The same commit points `packaging/homebrew/sadbox.rb`
 at the new release (version, download URLs and sha256s, via
 `scripts/set-formula.sh`); if you publish a tap, copy that file into it.
 
-Create a project from the dashboard (name + path to a local git repo), click
-**Terminal ↗** for its tmux in a new tab, run `claude` in it, and use
-**Sync back** when you like what you see — the VM's files are copied into
-your folder as uncommitted changes for you to review and commit.
-
 ## How it works
 
 ```
@@ -318,11 +323,17 @@ Browser (dashboard + xterm.js tabs)
    │ REST + WebSocket
 Supervisor (Bun/TS, this repo) ── SQLite state, AES-GCM vault + agent logins
    │ ProjectDriver interface
-Apple container CLI ── one microVM per project
-   │ vsock (exec)
+   ├─ macOS: Apple container CLI ── one microVM per project
+   │         │ vsock (container exec)
+   └─ Linux: Cloud Hypervisor on KVM ── one microVM per project
+             │ vsock (sadbox-agent, the guest's init: guest/agent)
 Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent user,
        workdir = your repo copy
 ```
+
+Everything below works the same on both. Where this section says `container
+exec` (how the supervisor runs a command in a VM), Linux uses the guest agent
+over vsock instead.
 
 - **Two source modes** at create: **(a) local folder** — `git ls-files
   --exclude-standard` → tar over exec stdin (only gitignored paths excluded, full
@@ -357,8 +368,9 @@ Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent us
 
   A connected folder is only where work goes: **Rebuild** still re-clones the
   remote.
-- **Terminal**: xterm.js ⇄ WS ⇄ `Bun.spawn({terminal})` PTY ⇄
-  `container exec -it <project> tmux new -A -s main`. Sessions live in the VM and
+- **Terminal**: xterm.js ⇄ WS ⇄ a PTY in the VM running `tmux new -A -s main`
+  (on a Mac, `container exec -it` under `Bun.spawn({terminal})`; on Linux, the
+  guest agent's PTY over vsock). Sessions live in the VM and
   survive supervisor restarts. **🔗 Links** in the toolbar lists every link
   currently on the terminal with **Open** and **Copy** buttons — use it for
   sign-in URLs (e.g. when authorizing an agent's provider): a long URL that a
@@ -375,7 +387,7 @@ Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent us
   file tree, tabs, syntax highlighting (One Dark, ~55 languages), find
   (**⌘F**), go-to-file (**⌘P**, over everything git tracks or would add), save
   (**⌘S**), and new/rename/delete. Like the terminal it needs nothing running
-  in the VM: each read or save is a short `container exec`. The agent edits the
+  in the VM: each read or save is a short command run in the VM. The agent edits the
   same files, so a save is refused if the file changed in the VM since you
   opened it (reload, or overwrite deliberately), and an unedited tab picks up
   the agent's changes when you return to it. It is an editor, not an IDE — no
@@ -506,7 +518,10 @@ Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent us
   machine under `~/.sadbox/agents/history/<project name>/`, mounted into the
   VM. They survive **Rebuild** and **Destroy**, and a new project with the
   same name gets them back (the create form says so). A VM created before
-  this has its history copied out on its first rebuild. Stored history is
+  this has its history copied out on its first rebuild. On Linux the mount
+  needs virtiofsd (see [Requirements](#requirements)); without it the history
+  stays on the VM's disk and is copied out to the same place before a rebuild
+  or destroy, but a new VM starts without it. Stored history is
   listed on the Agents page with **Delete** (not while a project of that name
   exists). Logins are never part of it.
 - **Git setup** (optional, at create or later from the project page): give a
@@ -527,7 +542,8 @@ Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent us
   → `git checkout` there writes the changed files; a diffstat is returned to
   the UI.
 - **Detail view**: per project, live CPU %/memory/disk/network/process usage
-  (via `container stats` + in-guest probes), workdir size, tmux session/window
+  (from the VM backend — `container stats` on a Mac, Cloud Hypervisor's
+  counters and the guest agent on Linux — plus in-guest probes), workdir size, tmux session/window
   counts and attached-terminal count, the branch the VM has checked out now
   and its dirty state (the projects list shows the live branch too; for a
   stopped VM it is the last one seen, kept in the database), folder/remote
@@ -596,16 +612,18 @@ Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent us
   supervisor's own setup traffic (cloning the repo, extra apt packages) goes
   through the proxy too, is logged, and skips the prompt only while setup
   runs. If the supervisor restarts, running VMs wait and carry on; if the
-  relay in a VM dies, it is restarted within about half a minute. Projects
-  created before this still sit on Apple's NAT network with direct internet —
-  the detail view marks them **not isolated** — until you **Rebuild** them.
-  `SADBOX_NETWORK=default` opts out for new projects.
+  relay in a VM dies, it is restarted within about half a minute. On a Mac,
+  projects created before this still sit on Apple's NAT network with direct
+  internet — the detail view marks them **not isolated** — until you
+  **Rebuild** them, and `SADBOX_NETWORK=default` opts new projects out. Linux
+  VMs are always isolated: the KVM driver has no VM networks to opt into.
 
 - **Port forwards** (inbound): on the detail view, map a port on the supervisor
   host to a port inside the VM (e.g. host `8080` → VM `8000`) and open the app
   the agent is running at `<supervisor-host>:8080`. Since a VM has no network
-  address, each connection is carried into the VM over `container exec` and
-  connected to the VM's own loopback — so it reaches whatever listens on that
+  address, each connection is carried into the VM by the supervisor (over
+  `container exec` on a Mac, the guest agent on Linux) and connected to the
+  VM's own loopback — so it reaches whatever listens on that
   port, bound to `127.0.0.1` or `0.0.0.0` alike, for HTTP, WebSockets or any
   other TCP. Forwards persist across supervisor restarts and rebuilds and are
   removed with the project. They listen on all interfaces of the host, so a
@@ -634,8 +652,8 @@ Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent us
   `http://<target-name>.sadbox.internal:<port>/…`; for example, a UI project
   linked to `api` on 3000 uses `API_URL=http://api.sadbox.internal:3000`.
   - The request goes through the calling VM's proxy, which checks for a link
-    naming exactly that project and port, then carries the connection over
-    `container exec` onto the target VM's own loopback (as a port forward
+    naming exactly that project and port, then carries the connection into the
+    target VM (as a port forward does) onto its own loopback (as a port forward
     does). The host's network and the host's own ports are never involved, and
     the target needs no port forward.
   - The target app sees an ordinary local caller (`Host: localhost:<port>`,
@@ -693,7 +711,7 @@ Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent us
 | POST | `/api/agents/apply`, `/api/agents/claude/refresh` | copy the logins into every running VM now / refresh the Claude login now |
 | DELETE | `/api/agents/logins/:tool/:provider`, `/api/agents/history/:name` | forget a login / delete a name's history (refused while that project exists) |
 | GET | `/api/history` | stored agent history per project name |
-| GET | `/api/system/status` | whether the VM backend's service (Apple's `container` API server) is up, and why not |
+| GET | `/api/system/status` | whether the VM backend is ready (Apple's `container` service on a Mac; KVM, Cloud Hypervisor and its kernel on Linux), and why not |
 | PUT | `/api/projects/:id/network` | `{cutoff: true\|false}` — cut the VM off from every network, or let it out again |
 | PATCH | `/api/projects/:id/net/rules/:rid` | `{scope: "global"\|"project"}` — move a rule between this project and all projects (a `source: "vault"` allow, id `vault-…`, is read-only: 409) |
 | GET/PUT | `/api/settings` | default VM resources (CPUs, memory, disk) for new projects |
@@ -743,7 +761,7 @@ Where the supervisor can run, and whether it can make project VMs there:
 |---|---|
 | **Mac, native** (`sadbox serve`, under launchd for boot) | ✅ through Apple `container` |
 | **Linux with KVM, native** (`sadbox serve`, or `sadbox service install`) | ✅ Cloud Hypervisor; VMs keep running across supervisor restarts |
-| **Linux with KVM, docker compose** ([above](#linux-with-docker-compose)) | ✅ Cloud Hypervisor, inside the container; VMs stop with it |
+| **Linux with KVM, docker compose** ([above](#linux-with-docker-compose)) | ✅ Cloud Hypervisor, its processes in the container; VMs stop with it |
 | **Mac, in Docker/`container`** | ❌ web UI loads, but project create fails: no path to Virtualization.framework |
 
 ### Linux: run at boot (systemd)
@@ -827,7 +845,8 @@ Notes:
 - Use a **dedicated hostname** (or the root), not a subpath — sadbox serves its
   assets and API from `/`.
 - Run it under **launchd** so it survives reboots (or `brew services` once the
-  formula is in use); Caddy keeps proxying to the same localhost port.
+  formula is in use; on Linux, `sadbox service install`); Caddy keeps proxying
+  to the same localhost port.
 
 ## Known limitations (v0)
 
@@ -846,7 +865,9 @@ Notes:
   - Creating a project copies the image's disk (about 2 GB), which takes a few seconds on ext4.
     btrfs or xfs clone it instantly.
   - The disk size in Settings caps the whole VM, not only its workdir.
-  - Agent history is kept on the host only with virtiofsd 1.11+ (or as uid 1000).
+  - Agent history is mounted from the host only with virtiofsd 1.11+ (or as
+    uid 1000); otherwise a new VM of the same name starts without it.
+  - Under docker compose, the VMs stop when the container does.
   - The new-project form reads tool versions from the Docker image, so keep it.
   - arm64 hosts are untested.
 - A change to an item still written to the env file reaches new shells/panes
@@ -865,12 +886,12 @@ Notes:
   `HTTP(S)_PROXY` (curl, git, bun, pip do; Node's built-in `fetch` does with
   `NODE_USE_ENV_PROXY=1`, which is set). A program that ignores those variables
   has no network at all. WebSockets *out of* a VM are not supported by the
-  proxy. Projects created before isolation stay on the NAT network until
-  rebuilt. Proxy env + CA reach new shells only (same env-file semantics as
+  proxy. On a Mac, projects created before isolation stay on the NAT network
+  until rebuilt. Proxy env + CA reach new shells only (same env-file semantics as
   env-file items).
-- VMs must be started by sadbox. One started by hand with `container start`
-  comes up without its proxy relay; sadbox restarts the relay within about
-  half a minute while the supervisor is running.
+- VMs must be started by sadbox. On a Mac, one started by hand with
+  `container start` comes up without its proxy relay; sadbox restarts the relay
+  within about half a minute while the supervisor is running.
 - Claude Code auth: `/login` once in any VM (see Agent logins). A
   `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or `ANTHROPIC_API_KEY`
   proxy item with the Anthropic preset still works instead. omp and opencode
