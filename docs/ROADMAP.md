@@ -184,12 +184,20 @@ ids, and the runner's user is uid 1001.
 - Secrets KEK: compose `secrets:` file on Linux (and Keychain on macOS), replacing the v0 keyfile (`src/crypto.ts`).
 - Settings / vitals text that says "container" where it means "VM".
 
-**L5 — Packaging & install**
+**L5 — Packaging & install** — built on `feature/linux-packaging`
 - docker-compose: uncomment `/dev/kvm`, `/dev/net/tun`, `NET_ADMIN`; ship CH and kernel in the image.
+  Built: a multi-stage `Dockerfile` (the compiled binary on Debian trixie, with CH, the
+  kernel, virtiofsd 1.13 and the docker CLI). The compose file passes `/dev/kvm` only:
+  VMs have no network, so `/dev/net/tun` and `NET_ADMIN` are not needed. It uses the
+  host's network, so port forwards listen on the host, and the host's docker socket
+  for image builds. `kvm.yml` runs the end-to-end test against the container too.
 - Native install: `install.sh` on Linux fetches CH + kernel and checks `/dev/kvm`;
-  optional systemd unit (counterpart of launchd).
+  optional systemd unit (counterpart of launchd). Built: `install.sh` checks `/dev/kvm`,
+  docker, git, openssl and virtiofsd, says how to fix each, and points to `sadbox setup`
+  (which fetches CH and the kernel). `sadbox service install` writes a systemd user unit
+  with `KillMode=process`, so VMs survive supervisor restarts.
 - README: supported-platforms table, Linux quick start, EC2 notes
-  (nested virt on Intel C8i/M8i/R8i; Graviton needs `.metal`).
+  (nested virt on Intel C8i/M8i/R8i; Graviton needs `.metal`). Built.
 
 **L6 — Testing & CI**
 - A driver contract test suite run against both drivers (lifecycle, exec, PTY,

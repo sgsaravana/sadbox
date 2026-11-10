@@ -2,6 +2,7 @@ import { mkdirSync } from "fs";
 import { config, VERSION } from "./config";
 import { buildBaseImage } from "./core/baseimage";
 import { getDriver } from "./driver";
+import { installService, serviceStatus, uninstallService } from "./core/service";
 import { CH_VERSION, ensureVmm, virtiofsdBin, vmmProblems } from "./driver/kvm/vmm";
 
 /** Whether agent history can be kept on this machine (shared into VMs), and why not. */
@@ -145,6 +146,7 @@ Usage: sadbox <command>
   serve      Start the web supervisor (default)   http://localhost:${config.port}
   setup      Check deps, start the VM backend, build the base image
   doctor     Report environment health
+  service    install | uninstall | status — run the supervisor at boot (Linux, systemd)
   passwd     Set the sign-in password (signs every browser out)
   version    Print version
   help       Show this help
@@ -180,6 +182,19 @@ export async function main(argv: string[]) {
       break;
     case "setup": await setup(); break;
     case "doctor": await doctor(); break;
+    case "service": {
+      const sub = argv[3] ?? "status";
+      try {
+        if (sub === "install") await installService(console.log);
+        else if (sub === "uninstall") await uninstallService(console.log);
+        else if (sub === "status") console.log(await serviceStatus());
+        else { console.error("usage: sadbox service install | uninstall | status"); process.exit(1); }
+      } catch (e) {
+        console.error(`✗ ${e instanceof Error ? e.message : e}`);
+        process.exit(1);
+      }
+      break;
+    }
     case "passwd": await passwd(); break;
     case "version": case "--version": case "-v": console.log(VERSION); break;
     case "help": case "--help": case "-h": console.log(HELP); break;

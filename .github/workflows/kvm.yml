@@ -15,6 +15,8 @@ on:
       - "test/e2e-linux.ts"
       - "src/**"
       - ".github/workflows/kvm.yml"
+      - "Dockerfile"
+      - "docker-compose.yml"
 
 permissions:
   contents: read
@@ -86,3 +88,50 @@ jobs:
         if: failure()
         run: |
           for f in $(find /tmp "$RUNNER_TEMP" -path '*kvm/vms/*' -name '*.log' 2>/dev/null); do echo "--- $f"; tail -40 "$f"; done
+
+  # the same end to end, with sadbox in its container (Dockerfile, docker-compose.yml)
+  compose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # what test/e2e-linux.ts talks to; passed into the container by the compose file
+      SADBOX_HOST: 127.0.0.1
+      SADBOX_PORT: "17070"
+      SADBOX_PROXY_PORT: "17071"
+      SADBOX_FORWARD_HOST: 127.0.0.1
+      SADBOX_PASSWORD: e2e-password-0123456789
+      SADBOX_APPROVAL_TIMEOUT_MS: "3000"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - name: A folder for projects, mounted into the container at the same path
+        run: |
+          echo "SADBOX_PROJECTS=$RUNNER_TEMP/e2e-projects" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/e2e-projects"
+
+      - name: Build the container image
+        run: docker compose build
+
+      - name: sadbox setup, in the container
+        run: docker compose run --rm sadbox sadbox setup
+
+      - name: sadbox end to end, in the container
+        run: |
+          SADBOX_E2E_START="docker compose up -d" SADBOX_E2E_STOP="docker compose stop" \
+          SADBOX_E2E_WORK="$SADBOX_PROJECTS" SADBOX_E2E_JSON="$RUNNER_TEMP/e2e.json" bun test/e2e-linux.ts
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/e2e.json" ]; then
+            {
+              echo "### sadbox in its container"
+              echo '| End to end | | |'; echo '|---|---|---|'
+              jq -r '.results[] | "| \(.name) | \(if .ok then "✅" else "❌" end) | \(.detail | gsub("\\|"; "\\|")) |"' "$RUNNER_TEMP/e2e.json"
+              echo; echo "timings: $(jq -c .timings "$RUNNER_TEMP/e2e.json")"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Container logs
+        if: failure()
+        run: docker compose logs --no-color --tail 150

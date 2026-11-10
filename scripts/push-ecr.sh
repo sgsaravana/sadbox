@@ -36,4 +36,7 @@ echo
 echo "On the server:"
 echo "  aws ecr get-login-password --region ${REGION} | docker login --username AWS --password-stdin ${REGISTRY}"
 echo "  docker pull ${IMAGE}"
-echo "  docker run -d --name sadbox -p 7070:7070 -v sadbox-data:/data ${IMAGE}"
+echo "  # on a Linux host with KVM (as docker-compose.yml does):"
+echo "  docker run -d --name sadbox --network host --device /dev/kvm --init \\"
+echo "    -v sadbox-data:/data -v /var/run/docker.sock:/var/run/docker.sock ${IMAGE}"
+echo "  docker exec sadbox sadbox setup   # once: builds the VM image"
