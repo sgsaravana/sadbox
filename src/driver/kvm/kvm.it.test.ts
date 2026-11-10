@@ -61,7 +61,7 @@ describe.skipIf(!it)("the KVM driver on real VMs", () => {
   }, 120_000);
 
   test("commands run as the image's user, in its workdir, with its PATH", async () => {
-    const r = await driver.exec(ref, ["sh", "-c", "id -un; pwd; command -v bun node claude tmux"]);
+    const r = await driver.exec(ref, ["sh", "-c", "id -un; pwd; for b in bun node claude tmux; do command -v $b; done"]);
     expect(r.exitCode).toBe(0);
     const [user, cwd, ...bins] = r.stdout.trim().split("\n");
     expect(user).toBe("agent");

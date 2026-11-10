@@ -129,7 +129,7 @@ the client against the real agent.
 - Linux-only: the macOS driver keeps `vminitd`. L2 bakes the agent into the
   Linux disk image, not into `images/base`.
 
-**L2 — Image pipeline** — built on `feature/linux`, waiting on its first KVM run (`kvm.yml`)
+**L2 — Image pipeline** — built on `feature/linux`; `sadbox setup` builds the disk on GitHub's KVM runner (`kvm.yml`)
 - Dockerfile → OCI → ext4 rootfs + a guest kernel, multi-arch. Built: Docker builds
   the image, then [`images/disk`](../images/disk/Dockerfile) turns it into ext4
   with BuildKit alone (a bind mount of the image, `mkfs.ext4 -d`, output to a
@@ -145,8 +145,12 @@ the client against the real agent.
   not a separate workdir volume: the size caps the whole VM.
 - Image operations (build, recipe, toolchain probe) moved behind the driver (`driver.images`).
 
-**L3 — `driver/kvm`** — built on `feature/linux` ([`src/driver/kvm/`](../src/driver/kvm/index.ts)),
-waiting on its first KVM run (`kvm.yml`)
+**L3 — `driver/kvm`** — built on `feature/linux` ([`src/driver/kvm/`](../src/driver/kvm/index.ts)).
+First run on real VMs (`kvm.yml`, GitHub x86_64, 2026-11-10): every check
+passes on CH. Create → ready takes 7.0 s (most of it copying the 2.3 GB
+disk onto ext4), a restart of a stopped VM 0.18 s, stop 0.05 s, destroy
+0.13 s. Shared folders went untested there: Ubuntu 24.04's virtiofsd can't map
+ids, and the runner's user is uid 1001.
 - Full `ProjectDriver` over the CH REST API: create / destroy / start / stop /
   `setMemory` / inspect / list / stats. Built. Picked on Linux, or with `SADBOX_DRIVER=kvm`.
 - One CH process per VM, supervised by sadbox; state reconciled on supervisor restart.
