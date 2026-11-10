@@ -1,4 +1,4 @@
-module sadbox/agent
+module sadbox/guest/agent
 
 go 1.26.0
 

@@ -15,6 +15,8 @@
 //   --ping-only          stop after the first answer (a restart's boot time)
 //   --poweroff           power the VM off at the end
 //   --vmm-pid <pid>      give up waiting as soon as that process (the VMM) has exited
+//   --announce <path>    also listen there for the agent's ready announcement
+//                        (sadbox.announce=PORT → CH's <vsock path>_PORT) and time it
 import net from "node:net";
 import { readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -34,6 +36,7 @@ const since = Number(arg("--since") ?? 0);
 const pingOnly = process.argv.includes("--ping-only");
 const powerOff = process.argv.includes("--poweroff");
 const vmmPid = Number(arg("--vmm-pid") ?? 0);
+const announcePath = arg("--announce");
 if (!vsockPath && !tcp && !relay) { console.error("usage: bun probe.ts --vsock <ch.vsock> | --tcp host:port | --relay <container>"); process.exit(2); }
 
 // ---- transport + framing ----
@@ -198,6 +201,14 @@ function alive(pid: number): boolean {
   catch { return false; }
 }
 
+// the agent's own word that it is up: one ok frame on a connection it opens
+let announcedAt = 0;
+if (announcePath) {
+  net.createServer((c) => {
+    c.once("data", (d: Buffer) => { if (d[0] === F.ok && !announcedAt) announcedAt = Date.now(); c.destroy(); });
+  }).listen(announcePath).unref();
+}
+
 // first contact (with --wait: the boot measurement, from now until the agent answers)
 const t0 = performance.now();
 let hello: any;
@@ -212,6 +223,11 @@ for (;;) {
 timings.firstPingMs = ms(t0);
 if (since) timings.bootMs = Date.now() - since;
 console.log(`agent: ${JSON.stringify(hello)} (first answer after ${timings.firstPingMs} ms${since ? `, ${timings.bootMs} ms after launch` : ""})`);
+if (announcePath && since) {
+  for (let i = 0; i < 150 && !announcedAt; i++) await Bun.sleep(20);
+  if (announcedAt) timings.announceMs = announcedAt - since;
+  console.log(announcedAt ? `announced ${timings.announceMs} ms after launch` : "no announcement within 3 s of answering");
+}
 
 async function finish(failed: number): Promise<never> {
   if (jsonOut) await Bun.write(jsonOut, JSON.stringify({ agent: hello, results, timings }, null, 2));

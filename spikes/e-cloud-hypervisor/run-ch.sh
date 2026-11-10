@@ -40,10 +40,10 @@ cp --reflink=auto "$OUT/rootfs.ext4" "$W/disk.ext4"
 clone_ms=$(( $(now) - t ))
 
 boot() {
-  rm -f "$W/ch.vsock" "$W/api.sock"
+  rm -f "$W/ch.vsock" "$W/ch.vsock_1025" "$W/api.sock"
   "$CH" --api-socket "path=$W/api.sock" \
     --kernel "$KERNEL" \
-    --cmdline "console=hvc0 root=/dev/vda rw init=/sbin/sadbox-agent sadbox.hostname=spike-e" \
+    --cmdline "console=hvc0 root=/dev/vda rw init=/sbin/sadbox-agent sadbox.hostname=spike-e sadbox.announce=1025" \
     --disk "path=$W/disk.ext4,image_type=raw" \
     --cpus boot=2 --memory size=2048M \
     --vsock "cid=3,socket=$W/ch.vsock" \
@@ -66,11 +66,11 @@ await_exit() {
 status=0
 echo '{}' >"$W/probe.json"; echo '{}' >"$W/restart.json" # if the agent never answers
 launch=$(now); boot first
-timeout -k 10 900 bun probe.ts --vsock "$W/ch.vsock" --wait 60000 --since "$launch" --vmm-pid "$ch_pid" --poweroff --json "$W/probe.json" || status=$?
+timeout -k 10 900 bun probe.ts --vsock "$W/ch.vsock" --wait 60000 --since "$launch" --vmm-pid "$ch_pid" --announce "$W/ch.vsock_1025" --poweroff --json "$W/probe.json" || status=$?
 await_exit >"$W/shutdown"; shutdown_ms=$(cat "$W/shutdown")
 
 launch=$(now); boot second
-timeout -k 10 120 bun probe.ts --vsock "$W/ch.vsock" --wait 60000 --since "$launch" --vmm-pid "$ch_pid" --ping-only --poweroff --json "$W/restart.json" || status=$?
+timeout -k 10 120 bun probe.ts --vsock "$W/ch.vsock" --wait 60000 --since "$launch" --vmm-pid "$ch_pid" --announce "$W/ch.vsock_1025" --ping-only --poweroff --json "$W/restart.json" || status=$?
 await_exit >/dev/null
 
 # the guest's own account of both boots, always: the agent logs to the console
@@ -88,7 +88,7 @@ jq -n --slurpfile p "$W/probe.json" --slurpfile r "$W/restart.json" \
   --argjson clone "$clone_ms" --argjson shutdown "$shutdown_ms" \
   --arg cpu "$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ //')" \
   '{machine: $machine, cpu: $cpu, cloudHypervisor: $ch, kernel: $kernel, build: $build,
-    diskCloneMs: $clone, shutdownMs: $shutdown, restartBootMs: $r[0].timings.bootMs,
+    diskCloneMs: $clone, shutdownMs: $shutdown, restartBootMs: $r[0].timings.bootMs, restartAnnounceMs: $r[0].timings.announceMs,
     agent: $p[0].agent, timings: $p[0].timings, results: $p[0].results}' \
   | tee "$OUT/results-$machine.json"
 exit "$status"

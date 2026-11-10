@@ -9,6 +9,7 @@ on:
     branches: ["feature/linux"]
     paths:
       - "spikes/e-cloud-hypervisor/**"
+      - "guest/agent/**"
       - "images/base/**"
       - ".github/workflows/spike-e.yml"
 
@@ -48,8 +49,8 @@ jobs:
       - uses: actions/setup-go@v6
         if: steps.kvm.outputs.available == 'true'
         with:
-          go-version-file: spikes/e-cloud-hypervisor/agent/go.mod
-          cache-dependency-path: spikes/e-cloud-hypervisor/agent/go.sum
+          go-version-file: guest/agent/go.mod
+          cache-dependency-path: guest/agent/go.sum
 
       - uses: oven-sh/setup-bun@v2
         if: steps.kvm.outputs.available == 'true'
@@ -75,8 +76,8 @@ jobs:
             "| image build (docker) | \(.build.imageBuildMs // "?") ms |",
             "| rootfs (export + mkfs.ext4) | \(.build.rootfsMs // "?") ms, \(.build.rootfsUsedMB // "?") MB used of \(.build.rootfsSizeMB // "?") MB |",
             "| per-project disk clone | \(.diskCloneMs) ms |",
-            "| boot: launch → agent answers | \(.timings.bootMs // "?") ms |",
-            "| restart: launch → agent answers | \(.restartBootMs // "?") ms |",
+            "| boot: launch → agent announces / answers | \(.timings.announceMs // "?") / \(.timings.bootMs // "?") ms |",
+            "| restart: launch → agent announces / answers | \(.restartAnnounceMs // "?") / \(.restartBootMs // "?") ms |",
             "| poweroff → VMM exit | \(.shutdownMs) ms |",
             "| ping | \(.timings.pingMs // "?") ms |",
             "| exec `true` p50 / p95 | \(.timings.execP50Ms // "?") / \(.timings.execP95Ms // "?") ms |",

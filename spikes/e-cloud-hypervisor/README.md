@@ -10,7 +10,7 @@ create → ready).
 
 | File | What it is |
 |---|---|
-| `agent/` | **sadbox-agent** (Go, static, ~3 MB): the VM's init and the host's way in. As PID 1 it mounts `/proc`, `/sys`, `/dev`, `/dev/pts`, `/run`, `/tmp`, cgroup2, sets the hostname (`sadbox.hostname=` on the kernel command line), brings up loopback and reaps orphans. It then serves vsock port 1024. |
+| [`guest/agent/`](../../guest/agent/README.md) | **sadbox-agent** (Go, static, ~3 MB): the VM's init and the host's way in. It started here and moved out for L1. |
 | `probe.ts` | The checks, from the host side (below). |
 | `build-rootfs.sh` | `images/base` → `docker build` → `docker export` → ext4, with the agent as `/sbin/sadbox-agent`. The image's ENV / USER / WORKDIR, which an export drops, go to `/etc/sadbox/image.json` for the agent. |
 | `run-ch.sh` | Fetches CH and the CH kernel (pinned), clones the disk, boots, probes, powers off, then boots the same disk again. Writes `out/results-<machine>.json`. |
@@ -70,11 +70,11 @@ Run it locally against any Linux box running the agent with
 `--relay <name>`, which carries each connection over `container exec`:
 
 ```sh
-cd spikes/e-cloud-hypervisor/agent && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o out/sadbox-agent-arm64 .
+cd guest/agent && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o out/sadbox-agent-arm64 .
 cfg=$(container image inspect sadbox-base:latest | jq -c '.[0].variants[] | select(.platform.architecture=="arm64") | .config.config | {Env, User, WorkingDir}')
 container run -d --name sbx-e-agent -u root -v "$PWD/out:/opt/agent" sadbox-base:latest \
   sh -c "mkdir -p /etc/sadbox && printf '%s' '$cfg' > /etc/sadbox/image.json && exec /opt/agent/sadbox-agent-arm64 -init off -listen tcp:127.0.0.1:1024"
-cd .. && bun probe.ts --relay sbx-e-agent
+cd ../../spikes/e-cloud-hypervisor && bun probe.ts --relay sbx-e-agent
 ```
 
 ## Results

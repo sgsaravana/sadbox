@@ -1,0 +1,56 @@
+# sadbox-agent (guest/agent), the guest agent for Linux VMs, and the host's
+# client for it (src/driver/agent.ts): Go tests, a cross-build for both Linux
+# architectures, and the client's tests against the real agent.
+name: Guest agent
+
+on:
+  push:
+    paths:
+      - "guest/agent/**"
+      - "src/driver/agent.ts"
+      - "src/driver/agent.test.ts"
+      - ".github/workflows/guest-agent.yml"
+  pull_request:
+    paths:
+      - "guest/agent/**"
+      - "src/driver/agent.ts"
+      - "src/driver/agent.test.ts"
+      - ".github/workflows/guest-agent.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-latest]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: guest/agent/go.mod
+          cache-dependency-path: guest/agent/go.sum
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Go vet and tests
+        working-directory: guest/agent
+        run: |
+          go vet ./...
+          GOOS=linux go vet ./...
+          go test -race ./...
+
+      - name: Build for the VMs (static, linux amd64 + arm64)
+        working-directory: guest/agent
+        run: |
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w" -o /dev/null .
+          done
+
+      - name: Client tests against the agent
+        run: |
+          bun install --frozen-lockfile
+          bun test src/driver/agent.test.ts

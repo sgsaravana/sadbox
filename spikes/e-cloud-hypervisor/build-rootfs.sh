@@ -19,7 +19,8 @@ case "$(uname -m)" in
 esac
 now() { date +%s%3N; }
 
-(cd agent && CGO_ENABLED=0 GOOS=linux GOARCH=$goarch go build -trimpath -ldflags "-s -w" -o "../$OUT/sadbox-agent" .)
+agent_src=../../guest/agent
+CGO_ENABLED=0 GOOS=linux GOARCH=$goarch go -C "$agent_src" build -trimpath -ldflags "-s -w -X main.version=spike-e" -o "$PWD/$OUT/sadbox-agent" .
 
 t=$(now)
 docker build -q -t sadbox-base:spike-e ../../images/base >/dev/null
