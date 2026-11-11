@@ -25,7 +25,8 @@ permissions:
   contents: write
 
 concurrency:
-  group: update-readme-release
+  # release.yml's bump-main writes to main too; keep the two apart.
+  group: main-writes
   cancel-in-progress: false
 
 jobs:
@@ -60,11 +61,13 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Leave the README alone for a pre-release
-        if: steps.rel.outputs.prerelease == 'true'
+        # Also by tag name: this workflow can start before release.yml has
+        # marked a dashed UI release as a pre-release.
+        if: steps.rel.outputs.prerelease == 'true' || contains(steps.rel.outputs.tag, '-')
         run: echo "::notice::${{ steps.rel.outputs.tag }} is a pre-release — not touching the README's latest-release line."
 
       - name: Rewrite README latest-release block
-        if: steps.rel.outputs.prerelease != 'true'
+        if: steps.rel.outputs.prerelease != 'true' && !contains(steps.rel.outputs.tag, '-')
         env:
           TAG: ${{ steps.rel.outputs.tag }}
           URL: ${{ steps.rel.outputs.url }}
@@ -93,7 +96,7 @@ jobs:
           EOF
 
       - name: Commit & push if changed
-        if: steps.rel.outputs.prerelease != 'true'
+        if: steps.rel.outputs.prerelease != 'true' && !contains(steps.rel.outputs.tag, '-')
         run: |
           set -euo pipefail
           if git diff --quiet -- README.md; then

@@ -1,20 +1,82 @@
 name: release
 
-# Tag a version to publish binaries:  git tag v0.1.0 && git push --tags
+# Cut a release either way:
 #
-# The tag is the version: the binaries are built with it stamped into
-# src/config.ts and package.json, and the same change is then committed to
-# main — along with the README's version-pinning examples and the Homebrew
-# formula, pointed at the new binaries — so nobody has to bump any of it by hand.
+#   * push a tag:        git tag v0.5.0 && git push origin v0.5.0
+#   * publish a release in the GitHub UI (it creates the tag and fires
+#     `release: published`)
+#
+# Both run this workflow, and so does a manual run (it takes the tag as input).
+# The tag is the version: the binaries are built with
+# it stamped into src/config.ts and package.json, and for a stable tag the same
+# change is committed to main — along with the README's version-pinning
+# examples and the Homebrew formula — so nobody bumps any of it by hand.
+#
+# A release created in the UI keeps its hand-written notes: the binaries are
+# attached to it instead of replacing it. A dash in the tag (v0.5.0-beta.1)
+# means pre-release, whichever way it was created.
 on:
   push:
     tags: ["v*"]
+  release:
+    types: [published]
+  # Re-run the build/attach for a tag whose release event failed or was missed.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and attach (e.g. v0.5.0-beta.1)"
+        required: true
 
 permissions:
   contents: write
 
+# One build per tag, whichever event arrives first (a UI release can also emit
+# a tag push). The second run sees the assets and skips the build.
+concurrency:
+  group: release-${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
+
 jobs:
+  # What this run has to do, before paying for a build.
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      exists: ${{ steps.release.outputs.exists }}
+      skip: ${{ steps.release.outputs.skip }}
+    steps:
+      - name: Does the release exist, and does it have its binaries?
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          exists=false
+          skip=false
+          if names=$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null); then
+            exists=true
+            if printf '%s\n' "$names" | grep -qx 'sadbox-darwin-x64'; then skip=true; fi
+          fi
+          echo "exists=$exists" >> "$GITHUB_OUTPUT"
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+          echo "$TAG: release exists=$exists, already has binaries=$skip"
+
+      - name: A dashed tag is a pre-release; a stable one is not
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            *-*) gh release edit "$TAG" --prerelease ;;
+            *)   gh release edit "$TAG" --prerelease=false ;;
+          esac
+
   build:
+    needs: check
+    if: needs.check.outputs.skip != 'true'
     runs-on: ubuntu-latest
     outputs:
       darwin-arm64-sha: ${{ steps.sums.outputs.darwin-arm64 }}
@@ -22,13 +84,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
           fetch-depth: 0 # the whole history and its tags, for the release notes
       - name: Release notes from the commits since the last release
+        # Only when this run creates the release. A release made in the UI
+        # keeps the notes written there; one made by an earlier run already has
+        # them too.
+        if: github.event_name != 'release' && needs.check.outputs.exists != 'true'
         run: |
           # GitHub's generated notes list merged pull requests by title, and
           # ours are all "Merge feature/… into main": say what the commits did.
-          prev=$(git describe --tags --abbrev=0 --match 'v*' "$GITHUB_REF_NAME^" 2>/dev/null || true)
-          range="${prev:+$prev..}$GITHUB_REF_NAME"
+          prev=$(git describe --tags --abbrev=0 --match 'v*' "$TAG^" 2>/dev/null || true)
+          range="${prev:+$prev..}$TAG"
           {
             echo "## Changes"
             echo
@@ -36,12 +103,12 @@ jobs:
             git log --no-merges --invert-grep --grep='\[skip ci\]' --format='- %s (%h)' "$range"
             if [ -n "$prev" ]; then
               echo
-              echo "**Full changelog:** https://github.com/${GITHUB_REPOSITORY}/compare/${prev}...${GITHUB_REF_NAME}"
+              echo "**Full changelog:** https://github.com/${GITHUB_REPOSITORY}/compare/${prev}...${TAG}"
             fi
           } > "$RUNNER_TEMP/notes.md"
           cat "$RUNNER_TEMP/notes.md"
       - name: Stamp the version from the tag
-        run: ./scripts/set-version.sh "$GITHUB_REF_NAME"
+        run: ./scripts/set-version.sh "$TAG"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
@@ -55,8 +122,20 @@ jobs:
           for target in darwin-arm64 darwin-x64; do
             echo "$target=$(awk -v f="sadbox-$target" '$2 == f { print $1 }' SHA256SUMS)" >> "$GITHUB_OUTPUT"
           done
-      - uses: softprops/action-gh-release@v2
+      - name: Attach the binaries to the release created in the UI
+        if: needs.check.outputs.exists == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$TAG" \
+            dist/sadbox-darwin-arm64 dist/sadbox-darwin-x64 \
+            dist/sadbox-linux-arm64 dist/sadbox-linux-x64 \
+            dist/SHA256SUMS --clobber
+      - name: Create the release
+        if: needs.check.outputs.exists != 'true'
+        uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
           files: |
             dist/sadbox-darwin-arm64
             dist/sadbox-darwin-x64
@@ -64,20 +143,20 @@ jobs:
             dist/sadbox-linux-x64
             dist/SHA256SUMS
           body_path: ${{ runner.temp }}/notes.md
-          # A dashed tag (v0.5.0-beta.1) is a pre-release: downloadable by tag,
-          # but never GitHub's "latest" — so install.sh keeps serving the stable
-          # release — and bump-main already skips it.
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          # Downloadable by tag, but never GitHub's "latest" — so install.sh
+          # keeps serving the stable release — and bump-main skips it.
+          prerelease: ${{ contains(inputs.tag || github.event.release.tag_name || github.ref_name, '-') }}
 
   # Record the released version on main, and point the Homebrew formula at the
   # binaries just published. Skipped for pre-release tags
   # (v1.2.3-rc.1) and for a tag older than what main already says.
   bump-main:
     needs: build
-    if: ${{ !contains(github.ref_name, '-') }}
+    if: ${{ !contains(inputs.tag || github.event.release.tag_name || github.ref_name, '-') }}
     runs-on: ubuntu-latest
+    # The README updater also writes to main for a UI release; one at a time.
     concurrency:
-      group: release-bump-main
+      group: main-writes
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
@@ -89,7 +168,7 @@ jobs:
           X64_SHA: ${{ needs.build.outputs.darwin-x64-sha }}
         run: |
           set -euo pipefail
-          new="${GITHUB_REF_NAME#v}"
+          new="${TAG#v}"
           current="$(sed -n 's/^export const VERSION = "\(.*\)";/\1/p' src/config.ts)"
           if [ "$(printf '%s\n%s\n' "$current" "$new" | sort -V | tail -n 1)" != "$new" ]; then
             echo "main is already at $current, newer than $new — leaving it."

@@ -44,10 +44,23 @@ with KVM (see [Supported platforms](#supported-platforms)).
 <!-- LATEST_RELEASE:END -->
 
 Every release ships prebuilt binaries for macOS/Linux (arm64/x64) plus
-`SHA256SUMS`, built by [`release.yml`](.github/workflows/release.yml). Cut one by
-pushing a tag — `git tag v0.1.0 && git push --tags`. Publishing a release runs
-[`update-readme-release.yml`](.github/workflows/update-readme-release.yml), which
-rewrites the line above with the newest tag, its date, and a link to the notes.
+`SHA256SUMS`, built by [`release.yml`](.github/workflows/release.yml). Cut one
+either way:
+
+- **push a tag** — `git tag v0.5.0 && git push origin v0.5.0`; or
+- **publish a release in the GitHub UI** — the tag can be created there, and the
+  build attaches the binaries to the release while keeping the notes you wrote.
+
+Both paths run the same build. A tag with a dash (`v0.5.0-beta.1`) is published
+as a **pre-release** either way: never `/releases/latest`, no version bump on
+`main`, no Homebrew update. If an event is missed, the workflow's manual run
+takes the tag as input.
+
+[`update-readme-release.yml`](.github/workflows/update-readme-release.yml)
+rewrites the line above when a release is published from the UI (pre-releases are
+ignored). A tag-push release is created with `GITHUB_TOKEN`, whose `release`
+event GitHub suppresses, so after one run that workflow once if you want the line
+updated.
 Browse them all on the [releases page](https://github.com/sgsaravana/sadbox/releases).
 
 ## Supported platforms
