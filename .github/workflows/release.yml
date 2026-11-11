@@ -64,6 +64,10 @@ jobs:
             dist/sadbox-linux-x64
             dist/SHA256SUMS
           body_path: ${{ runner.temp }}/notes.md
+          # A dashed tag (v0.5.0-beta.1) is a pre-release: downloadable by tag,
+          # but never GitHub's "latest" — so install.sh keeps serving the stable
+          # release — and bump-main already skips it.
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
   # Record the released version on main, and point the Homebrew formula at the
   # binaries just published. Skipped for pre-release tags

@@ -4,6 +4,9 @@ name: Update README on release
 # (between the LATEST_RELEASE markers) with the new tag, date, and notes link,
 # then commit it back to main.
 #
+# Pre-releases are ignored, whether they arrive as a release event or by a
+# manual dispatch for a tag: a beta must never become the README's latest.
+#
 # NOTE: releases created by another workflow using the default GITHUB_TOKEN
 # (e.g. `release.yml` via action-gh-release) do NOT trigger this — GitHub
 # suppresses event chains from GITHUB_TOKEN to avoid loops. Publishing a
@@ -47,15 +50,21 @@ jobs:
           if [ -z "$TAG" ]; then
             TAG="$(gh release view --json tagName --jq .tagName)"
           fi
-          data="$(gh release view "$TAG" --json tagName,name,url,publishedAt)"
+          data="$(gh release view "$TAG" --json tagName,name,url,publishedAt,isPrerelease)"
           {
             echo "tag=$(echo "$data"  | jq -r '.tagName')"
             echo "url=$(echo "$data"  | jq -r '.url')"
             echo "name=$(echo "$data" | jq -r '.name // .tagName')"
             echo "date=$(echo "$data" | jq -r '.publishedAt // ""' | cut -c1-10)"
+            echo "prerelease=$(echo "$data" | jq -r '.isPrerelease')"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Leave the README alone for a pre-release
+        if: steps.rel.outputs.prerelease == 'true'
+        run: echo "::notice::${{ steps.rel.outputs.tag }} is a pre-release — not touching the README's latest-release line."
+
       - name: Rewrite README latest-release block
+        if: steps.rel.outputs.prerelease != 'true'
         env:
           TAG: ${{ steps.rel.outputs.tag }}
           URL: ${{ steps.rel.outputs.url }}
@@ -84,6 +93,7 @@ jobs:
           EOF
 
       - name: Commit & push if changed
+        if: steps.rel.outputs.prerelease != 'true'
         run: |
           set -euo pipefail
           if git diff --quiet -- README.md; then

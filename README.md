@@ -64,7 +64,7 @@ Linux. The rest (the proxy, vaults, agents, the UI) is the same everywhere.
 | **Linux x86_64 with KVM** (bare metal, a home server, a cloud VM with nested virtualization) | ✅ **Supported, new** | Cloud Hypervisor microVMs. Tested on Ubuntu 24.04 in CI on real VMs. Runs natively or [in docker compose](#linux-with-docker-compose). |
 | Linux arm64 with KVM (e.g. Graviton `.metal`) | ⚠️ Untested | Built for it, but not yet run on an arm64 KVM host. |
 | Linux without `/dev/kvm` | ❌ | No hardware virtualization: see [EC2 and other clouds](#ec2-and-other-clouds). |
-| **Mac, Intel (2018+, macOS 15+)** | ⚠️ **Built, needs an Intel run** | Virtualization.framework through `vfkit`, so `container` is not needed; Docker is. The driver, vsock, shared folders, stop/start and stats are tested on Apple silicon with an arm64 guest; the amd64 kernel + disk pair has not yet been booted on Intel hardware. |
+| **Mac, Intel (2018+, macOS 15+)** | ⚠️ **Built, needs an Intel run** | Pre-release only for now ([install a beta](#installing-a-beta-pre-release)); Virtualization.framework through `vfkit`, so `container` is not needed; Docker is. The driver, vsock, shared folders, stop/start and stats are tested on Apple silicon with an arm64 guest; the amd64 kernel + disk pair has not yet been booted on Intel hardware. |
 | Mac, Apple silicon, macOS 15 | ⚠️ Opt-in | Apple's `container` CLI needs macOS 26; `SADBOX_DRIVER=vz` uses the same vfkit driver as Intel (arm64 guest), with Docker. |
 | Mac, macOS 14 or earlier | ❌ | Below vfkit's supported macOS floor (15) and Apple `container`'s (26). |
 | Docker on a Mac | ❌ | A container there cannot reach the Mac's hypervisor; run sadbox natively. See [Deploying](#deploying). |
@@ -90,8 +90,10 @@ On a Mac:
   (`brew install vfkit`; `sadbox setup` also fetches a pinned build) and
   [Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/)
   installed **and running** — `sadbox setup` builds the guest kernel and the VM
-  disk with it. This path is built but has not yet been run on Intel hardware;
-  see [Supported platforms](#supported-platforms)
+  disk with it. Until 0.5.0 is released this backend exists only in pre-release
+  builds: follow [Installing a beta (pre-release)](#installing-a-beta-pre-release),
+  not the plain install script. It is built but has not yet been run on Intel
+  hardware; see [Supported platforms](#supported-platforms)
 - **Apple silicon, macOS 15**: Apple's `container` CLI needs macOS 26; use the
   vfkit path instead by setting `SADBOX_DRIVER=vz` on every command (see
   [First run](#first-run)), with `vfkit` and Docker as above
@@ -145,6 +147,10 @@ curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh \
   | SADBOX_VERSION=v0.4.4 SADBOX_BIN_DIR=/usr/local/bin sh
 ```
 
+For a pre-release (including the current Intel Mac build), see
+[Installing a beta (pre-release)](#installing-a-beta-pre-release) — the plain
+command above always installs the last stable release.
+
 ### Option 2 — download the binary yourself
 
 Grab `sadbox-darwin-arm64` (Apple silicon) or `sadbox-darwin-x64` (Intel) from
@@ -188,6 +194,101 @@ embedded, so it runs without the checkout.
 
 A Homebrew formula is kept in `packaging/homebrew/sadbox.rb`, but it is not
 published to a tap yet, so `brew install` of sadbox itself is not available.
+
+### Installing a beta (pre-release)
+
+A tag with a dash — `v0.5.0-beta.1` — is published as a GitHub **pre-release**.
+It is not `/releases/latest`, so:
+
+- the plain install script keeps installing the last **stable** release;
+- the Homebrew formula and the README's "latest release" line stay on stable;
+- the beta is only reachable by its tag, from the
+  [releases page](https://github.com/sgsaravana/sadbox/releases) under
+  **Pre-releases**.
+
+**Intel Macs need a pre-release for now** — `0.4.4` has no Intel backend. The
+beta is the first binary that runs project VMs on an Intel Mac (through
+Virtualization.framework and `vfkit`).
+
+#### Intel Mac (macOS 15+) — beta
+
+Install it beside your stable copy, with its own state directory, so the two
+never share a database or VM disks:
+
+```sh
+# once: Docker Desktop installed and running, and vfkit
+brew install vfkit
+
+# the beta binary, in its own bin dir
+curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh \
+  | SADBOX_VERSION=v0.5.0-beta.1 SADBOX_BIN_DIR="$HOME/.local/bin-beta" sh
+
+export PATH="$HOME/.local/bin-beta:$PATH"
+sadbox version                      # 0.5.0-beta.1
+
+export SADBOX_DATA="$HOME/.sadbox-beta"
+export SADBOX_DRIVER=vz             # the default on Intel; explicit is fine
+sadbox setup                        # builds the Debian kernel + VM disk (Docker)
+sadbox serve                        # http://localhost:7070
+```
+
+`sadbox setup` takes a few minutes the first time (guest kernel + base image
+disk); later betas reuse Docker's build cache. Keep `SADBOX_DATA` and
+`SADBOX_DRIVER` set for every beta command — `doctor`, `serve`, a service, and
+so on. When you are done, open a new shell (or drop `~/.local/bin-beta` from
+`PATH` and unset both variables), then remove `~/.sadbox-beta` and
+`~/.local/bin-beta` to clean up.
+
+To move to a newer beta, rerun the install script with the new
+`SADBOX_VERSION` and the same `SADBOX_BIN_DIR`; the data dir is kept.
+
+#### Apple silicon and Linux — beta
+
+Same idea; only the backend differs (Apple `container` on Apple silicon,
+Cloud Hypervisor + `/dev/kvm` + Docker on Linux). On Apple silicon running
+macOS 15, also `export SADBOX_DRIVER=vz` — there is no Apple `container` there.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh \
+  | SADBOX_VERSION=v0.5.0-beta.1 SADBOX_BIN_DIR="$HOME/.local/bin-beta" sh
+
+export PATH="$HOME/.local/bin-beta:$PATH"
+export SADBOX_DATA="$HOME/.sadbox-beta"
+sadbox version
+sadbox setup
+sadbox serve
+```
+
+#### Or download the pre-release binary by hand
+
+```sh
+ver=v0.5.0-beta.1
+mkdir -p "$HOME/.local/bin-beta"
+curl -fLO "https://github.com/sgsaravana/sadbox/releases/download/$ver/sadbox-darwin-x64"
+curl -fLO "https://github.com/sgsaravana/sadbox/releases/download/$ver/SHA256SUMS"
+shasum -a 256 sadbox-darwin-x64    # compare with its line in SHA256SUMS
+chmod +x sadbox-darwin-x64
+xattr -d com.apple.quarantine sadbox-darwin-x64 2>/dev/null   # browser downloads only
+mv sadbox-darwin-x64 "$HOME/.local/bin-beta/sadbox"
+```
+
+Use `sadbox-darwin-arm64` on Apple silicon, `sadbox-linux-x64`/`-arm64` on
+Linux. The binaries are unsigned like the stable ones; the `xattr` line is only
+needed for a browser download.
+
+`gh release download "$ver" -p 'sadbox-darwin-x64'` does the same if you have
+the GitHub CLI.
+
+#### What a beta is, and is not
+
+- It reports the pre-release version (`sadbox version` → `0.5.0-beta.1`).
+- `install.sh` without `SADBOX_VERSION` still gives you stable; a beta never
+  becomes `/releases/latest`.
+- It may migrate `~/.sadbox` forward. That is why the steps above use
+  `SADBOX_DATA`; a beta pointed at your stable data dir can leave the stable
+  binary unable to open it.
+- Betas can be deleted later:
+  `gh release delete v0.5.0-beta.1 --cleanup-tag` (or the releases page).
 
 ### Linux, with docker compose
 
@@ -257,6 +358,9 @@ What does not:
   the proxy relay) are rewritten when the VM starts, not while it keeps
   running across the update: **Stop** then **Start** a project to give it
   the new ones without a Rebuild.
+
+Pre-releases are installed and updated on their own track — see
+[Installing a beta (pre-release)](#installing-a-beta-pre-release).
 
 ## First run
 
