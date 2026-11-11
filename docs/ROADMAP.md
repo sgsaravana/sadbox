@@ -1,7 +1,7 @@
 # sadbox — Roadmap
 
 > What has shipped, what is next, and the plan for Linux support.
-> Last updated 2026-11-04. Design background lives in [`research/`](research/README.md).
+> Last updated 2026-11-11. Design background lives in [`research/`](research/README.md).
 
 ## Shipped (v0, macOS)
 
@@ -208,6 +208,55 @@ ids, and the runner's user is uid 1001.
 **L7 — Linux-only extras (after parity)**
 - CH snapshot/restore for near-instant resume of stopped projects.
 - Optional virtiofs shared mounts.
+
+## Then: Intel Mac support — built 2026-11-11
+
+**Goal:** the same supervisor runs on an Intel Mac and makes its project microVMs
+locally. Intel Macs cannot use Apple's `container` CLI (Apple silicon only,
+macOS 26), but **Virtualization.framework runs Linux x86_64 guests on Intel
+hosts**, and [`vfkit`](https://github.com/crc-org/vfkit) drives it. Design and
+the alternatives that lost: [`research/14-intel-mac.md`](research/14-intel-mac.md).
+
+**Why a third driver:** there is no `vminitd`/OCI stack to reuse on Intel; vfkit
+boots a raw ext4 disk and exposes virtio-blk, virtio-vsock and virtio-fs — the
+same primitives the KVM driver already speaks. The vz driver is a close sibling
+of `driver/kvm`.
+
+**Built** (`src/driver/vz/`, `images/kernel/`):
+
+- create / destroy / start / stop / `setMemory` / inspect / list / stats — one
+  vfkit process per VM, detached; a VM is a folder, so it outlives a supervisor
+  restart. Liveness is vfkit's REST `GET /vm/state`.
+- vsock: agent port 1024 with `connect` (vfkit opens a fresh guest connection per
+  host connection, so the agent's one-operation-per-connection protocol is
+  unchanged), announcement port 1025 with `listen` onto the host socket the
+  supervisor already serves.
+- virtio-fs shares straight from Virtualization.framework — no `virtiofsd`;
+  `sharedMount: true`. The agent's existing `mount -t virtiofs` works.
+- **Kernel: Debian's, built locally with Docker** (`images/kernel`) for the
+  host's architecture, with virtio/vsock modules in the initramfs. The Cloud
+  Hypervisor kernel the KVM driver uses **does not start under VZ** (VZ refuses
+  its arm64 Image before the guest runs; proven 2026-11-11), so the two backends
+  have separate kernels.
+- Images: the same Docker → `images/disk` pipeline; Docker on an Intel Mac
+  builds linux/amd64 natively. Disk clones use APFS `clonefile` (the code the
+  KVM driver already had for macOS).
+- `sadbox setup` / `doctor`, `SADBOX_DRIVER=vz` (default on Intel), `install.sh`,
+  the Homebrew formula (`vfkit` on Intel, `container` on arm), README.
+- Shared VM-as-folder code moved to `src/driver/vm.ts` and `src/driver/diskimages.ts`
+  so the KVM and vz drivers cannot drift.
+- Tests: `vz.test.ts` with `test/fake-vfkit.ts` (runs the real guest agent), and
+  `vz.it.test.ts` against real VMs (`SADBOX_VZ_IT=<setup data dir>`). On Apple
+  silicon: 12/12 pass, create 0.46–0.99 s, stop 0.05–0.10 s, start 0.42–0.92 s,
+  destroy 0.06–0.11 s (with both Apple's Kata kernel and the built Debian one).
+
+**Still to do:**
+- Boot the amd64 kernel + disk on real Intel hardware (`vz.it.test.ts`); the
+  driver path is identical, but that pair has not run yet.
+- CI: GitHub's `macos-26-intel` runners have Virtualization.framework but no
+  Docker. Build the amd64 disk and kernel on the Linux x86_64 job, pass them as
+  artifacts, and run `vz.it.test.ts` there.
+- L6's contract suite now has three drivers to cover.
 
 ## Other planned work
 

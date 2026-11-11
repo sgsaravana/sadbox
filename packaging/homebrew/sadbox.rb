@@ -10,7 +10,8 @@ class Sadbox < Formula
   version "0.4.4"
   license "MIT"
 
-  depends_on "container"
+  depends_on "container" if Hardware::CPU.arm?
+  depends_on "vfkit" if Hardware::CPU.intel?
   depends_on :macos
 
   on_arm do
@@ -28,8 +29,12 @@ class Sadbox < Formula
 
   def caveats
     <<~EOS
-      Before first use, provision the worker image and container system:
+      Before first use, provision the VM image:
         sadbox setup
+
+      On an Intel Mac, `sadbox setup` also needs Docker (it builds the guest
+      kernel and the VM disk):
+        https://docs.docker.com/desktop/setup/install/mac-install/
 
       To run at login as a background service:
         brew services start sadbox

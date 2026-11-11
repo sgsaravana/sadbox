@@ -31,17 +31,69 @@ case ":$PATH:" in
   *) echo "⚠  add $BIN_DIR to your PATH:  echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.zshrc" ;;
 esac
 
-if [ "$os" = "darwin" ] && [ "$arch" != "arm64" ]; then
+# The vfkit path (Intel, or Apple silicon older than macOS 26): what it needs.
+check_vfkit() {
+  missing=0
+  if ! command -v vfkit >/dev/null 2>&1; then
+    echo "· vfkit not found — 'sadbox setup' fetches a pinned build (or: brew install vfkit)"
+  else
+    echo "✓ vfkit"
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "✗ docker not found — it builds the guest kernel and the VM image:"
+    echo "  https://docs.docker.com/desktop/setup/install/mac-install/"
+    missing=1
+  elif ! docker info >/dev/null 2>&1; then
+    echo "✗ docker is installed but not running — start Docker Desktop"
+    missing=1
+  else
+    echo "✓ docker"
+  fi
+  for tool in git openssl curl; do
+    if command -v "$tool" >/dev/null 2>&1; then echo "✓ $tool"; else echo "✗ $tool not found"; missing=1; fi
+  done
+  if [ "$missing" = 1 ]; then
+    echo "· tools ship with the Xcode command line tools:  xcode-select --install"
+  fi
+}
+
+if [ "$os" = "darwin" ]; then
+  macos=$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)
+  case "$macos" in ''|*[!0-9]*) macos=26 ;; esac
   echo
-  echo "Note: this is an Intel Mac. Project microVMs need Apple's 'container' CLI,"
-  echo "which only supports Apple silicon — 'brew install container' will not install here."
-  echo "The UI/API run ('sadbox serve'), but creating projects is not available."
-elif [ "$os" = "darwin" ]; then
-  echo
-  echo "Next:"
-  echo "  brew install container   # if not already installed"
-  echo "  sadbox setup             # start container system + build worker image"
-  echo "  sadbox serve             # http://localhost:7070"
+  if [ "$arch" != "arm64" ]; then
+    echo "Intel Mac: projects run on Virtualization.framework through vfkit."
+    check_vfkit
+    echo
+    [ "$missing" = 1 ] && echo "Fix the ✗ items above, then:"
+    echo "Next:"
+    echo "  sadbox setup             # build the guest kernel and VM image (a few minutes)"
+    echo "  sadbox serve             # http://localhost:7070"
+  elif [ "$macos" -lt 26 ]; then
+    echo "macOS $macos: Apple's 'container' CLI needs macOS 26."
+    echo "Projects can run on vfkit instead; prefix every command with SADBOX_DRIVER=vz."
+    check_vfkit
+    echo
+    [ "$missing" = 1 ] && echo "Fix the ✗ items above, then:"
+    echo "Next:"
+    echo "  SADBOX_DRIVER=vz sadbox setup"
+    echo "  SADBOX_DRIVER=vz sadbox serve"
+  else
+    if ! command -v container >/dev/null 2>&1; then
+      echo "✗ Apple's 'container' CLI not found:  brew install container"
+    else
+      echo "✓ container"
+    fi
+    for tool in git openssl; do
+      if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "✗ $tool not found (the Xcode command line tools:  xcode-select --install)"
+      fi
+    done
+    echo
+    echo "Next:"
+    echo "  sadbox setup             # start container system + build the VM image"
+    echo "  sadbox serve             # http://localhost:7070"
+  fi
 else
   # Linux: project VMs are Cloud Hypervisor microVMs on KVM; `sadbox setup`
   # fetches Cloud Hypervisor and its kernel and builds the VM disk with docker

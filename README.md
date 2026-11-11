@@ -1,7 +1,7 @@
 # sadbox
 
-Supervisor for **microVM AI-agent sandboxes** on Apple silicon Macs and on
-Linux hosts with KVM (see [Supported platforms](#supported-platforms)). Spin up
+Supervisor for **microVM AI-agent sandboxes** on Macs (Apple silicon and Intel)
+and on Linux hosts with KVM (see [Supported platforms](#supported-platforms)). Spin up
 isolated Linux microVMs — each one a **project** — with a copy of a source
 folder and Claude Code + toolchain baked in; watch and steer the agent through
 a browser terminal attached to tmux inside the VM; give it vault variables and
@@ -11,7 +11,8 @@ for you to review, without the agent ever touching your original folder.
 
 Projects are real VMs (own kernel, own memory) — not shared-kernel containers:
 Apple's Virtualization.framework through the open-source
-[`container`](https://github.com/apple/container) CLI on a Mac, and
+[`container`](https://github.com/apple/container) CLI on an Apple silicon Mac,
+through [`vfkit`](https://github.com/crc-org/vfkit) on an Intel Mac, and
 [Cloud Hypervisor](https://www.cloudhypervisor.org) on KVM on Linux.
 
 ## Status
@@ -33,8 +34,8 @@ keeps the agents' logins (Claude's it owns and refreshes, handing VMs
 placeholders) and each project's agent history, which a new VM of the same
 name picks up. See `docs/research/` for the design research and `spikes/` for
 the de-risk experiments behind each piece, and [`docs/ROADMAP.md`](docs/ROADMAP.md)
-for what's next. It runs on Apple silicon Macs, and on Linux hosts with KVM
-(newer: see [Supported platforms](#supported-platforms)).
+for what's next. It runs on Apple silicon and Intel Macs, and on Linux hosts
+with KVM (see [Supported platforms](#supported-platforms)).
 
 ## Releases
 
@@ -52,9 +53,10 @@ Browse them all on the [releases page](https://github.com/sgsaravana/sadbox/rele
 ## Supported platforms
 
 Every project is a real microVM. sadbox makes them with Apple's
-[`container`](https://github.com/apple/container) tool on a Mac, and with
-[Cloud Hypervisor](https://www.cloudhypervisor.org) on KVM on Linux. The rest
-(the proxy, vaults, agents, the UI) is the same on both.
+[`container`](https://github.com/apple/container) tool on an Apple silicon Mac,
+with [`vfkit`](https://github.com/crc-org/vfkit) (Virtualization.framework) on an
+Intel Mac, and with [Cloud Hypervisor](https://www.cloudhypervisor.org) on KVM on
+Linux. The rest (the proxy, vaults, agents, the UI) is the same everywhere.
 
 | Platform | Project VMs | Notes |
 |---|---|---|
@@ -62,8 +64,9 @@ Every project is a real microVM. sadbox makes them with Apple's
 | **Linux x86_64 with KVM** (bare metal, a home server, a cloud VM with nested virtualization) | ✅ **Supported, new** | Cloud Hypervisor microVMs. Tested on Ubuntu 24.04 in CI on real VMs. Runs natively or [in docker compose](#linux-with-docker-compose). |
 | Linux arm64 with KVM (e.g. Graviton `.metal`) | ⚠️ Untested | Built for it, but not yet run on an arm64 KVM host. |
 | Linux without `/dev/kvm` | ❌ | No hardware virtualization: see [EC2 and other clouds](#ec2-and-other-clouds). |
-| Mac, Apple silicon, macOS 15 or earlier | ❌ | Apple's `container` CLI requires macOS 26. Upgrade macOS. |
-| Mac, Intel | ❌ | Apple's `container` CLI is Apple silicon only. No Intel backend is planned. |
+| **Mac, Intel (2018+, macOS 15+)** | ⚠️ **Built, needs an Intel run** | Virtualization.framework through `vfkit`, so `container` is not needed; Docker is. The driver, vsock, shared folders, stop/start and stats are tested on Apple silicon with an arm64 guest; the amd64 kernel + disk pair has not yet been booted on Intel hardware. |
+| Mac, Apple silicon, macOS 15 | ⚠️ Opt-in | Apple's `container` CLI needs macOS 26; `SADBOX_DRIVER=vz` uses the same vfkit driver as Intel (arm64 guest), with Docker. |
+| Mac, macOS 14 or earlier | ❌ | Below vfkit's supported macOS floor (15) and Apple `container`'s (26). |
 | Docker on a Mac | ❌ | A container there cannot reach the Mac's hypervisor; run sadbox natively. See [Deploying](#deploying). |
 | Windows | ❌ | No build, none planned. |
 
@@ -81,8 +84,17 @@ A cloud VM needs KVM inside it (`ls /dev/kvm`):
 
 On a Mac:
 
-- Apple's [`container`](https://github.com/apple/container) CLI:
-  `brew install container`
+- **Apple silicon, macOS 26+**: Apple's
+  [`container`](https://github.com/apple/container) CLI — `brew install container`
+- **Intel (2018 or later), macOS 15+**: [`vfkit`](https://github.com/crc-org/vfkit)
+  (`brew install vfkit`; `sadbox setup` also fetches a pinned build) and
+  [Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/)
+  installed **and running** — `sadbox setup` builds the guest kernel and the VM
+  disk with it. This path is built but has not yet been run on Intel hardware;
+  see [Supported platforms](#supported-platforms)
+- **Apple silicon, macOS 15**: Apple's `container` CLI needs macOS 26; use the
+  vfkit path instead by setting `SADBOX_DRIVER=vz` on every command (see
+  [First run](#first-run)), with `vfkit` and Docker as above
 - `git`, and `openssl` on PATH (both ship with macOS / the Xcode command line
   tools) — the egress proxy uses openssl to mint its CA and certificates
 - [Bun](https://bun.com) ≥ 1.3.5 — only if you run from source
@@ -103,14 +115,29 @@ On Linux:
 
 ### Option 1 — install script (prebuilt binary)
 
+On an Apple silicon Mac (macOS 26+):
+
 ```sh
-brew install container      # on a Mac
+brew install container
 curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh | sh
 ```
 
+On an Intel Mac (macOS 15+), or Apple silicon on macOS 15 with
+`SADBOX_DRIVER=vz`:
+
+```sh
+brew install vfkit
+# install Docker Desktop and start it once: https://docs.docker.com/desktop/setup/install/mac-install/
+curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh | sh
+```
+
+On Linux, install `/dev/kvm` access and Docker first (see
+[Requirements](#requirements)).
+
 This downloads the latest release binary for your platform into
-`~/.local/bin/sadbox`. On Linux it then checks `/dev/kvm`, docker and
-virtiofsd, and says how to fix what is missing. If the script says that directory is not on your `PATH`,
+`~/.local/bin/sadbox`; the script then checks the tools that host needs
+(`container`, or `vfkit` + Docker; `/dev/kvm` + Docker + virtiofsd) and says how
+to fix what is missing. If the script says that directory is not on your `PATH`,
 add it as shown. To pin a version or change the location:
 
 ```sh
@@ -120,20 +147,24 @@ curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh \
 
 ### Option 2 — download the binary yourself
 
-Grab `sadbox-darwin-arm64` from the
-[releases page](https://github.com/sgsaravana/sadbox/releases/latest), check it
-against `SHA256SUMS`, and put it on your `PATH`:
+Grab `sadbox-darwin-arm64` (Apple silicon) or `sadbox-darwin-x64` (Intel) from
+the [releases page](https://github.com/sgsaravana/sadbox/releases/latest), check
+it against `SHA256SUMS`, and put it on your `PATH`:
 
 ```sh
-shasum -a 256 sadbox-darwin-arm64        # compare with the line in SHA256SUMS
-chmod +x sadbox-darwin-arm64
-xattr -d com.apple.quarantine sadbox-darwin-arm64 2>/dev/null   # browser downloads only
-mv sadbox-darwin-arm64 ~/.local/bin/sadbox
+bin=sadbox-darwin-arm64                 # Intel Macs: sadbox-darwin-x64
+shasum -a 256 "$bin"                    # compare with the line in SHA256SUMS
+chmod +x "$bin"
+xattr -d com.apple.quarantine "$bin" 2>/dev/null   # browser downloads only
+mv "$bin" ~/.local/bin/sadbox
 ```
 
 The binary is not signed or notarized, so a copy downloaded with a browser is
 quarantined by macOS; the `xattr` line clears that. (`curl` downloads, including
 the install script, are not quarantined.)
+
+This only installs the supervisor: on Intel (or with `SADBOX_DRIVER=vz`) also
+install `vfkit` and Docker, as in [Requirements](#requirements).
 
 On Linux, take `sadbox-linux-x64` (or `-arm64`) the same way, with
 `sha256sum` to check it and no `xattr` step.
@@ -149,8 +180,11 @@ bun run setup      # same as `sadbox setup`
 bun run start      # same as `sadbox serve`  (bun run dev to reload on change)
 ```
 
-`bun run compile` builds the same single-file binary into `dist/sadbox`; the web
-UI and base-image recipe are embedded, so it runs without the checkout.
+On an Intel Mac this uses the vfkit driver automatically; on Apple silicon with
+macOS 15, prefix both with `SADBOX_DRIVER=vz` (see [Requirements](#requirements)).
+Docker must be running for `bun run setup`. `bun run compile` builds the same
+single-file binary into `dist/sadbox`; the web UI and base-image recipe are
+embedded, so it runs without the checkout.
 
 A Homebrew formula is kept in `packaging/homebrew/sadbox.rb`, but it is not
 published to a tap yet, so `brew install` of sadbox itself is not available.
@@ -189,9 +223,11 @@ Your projects, vault, agent logins and history live in `~/.sadbox` and are
 kept across updates; nothing there needs to be exported or migrated by hand.
 
 1. **Stop the supervisor**: Ctrl-C on `sadbox serve` (or unload its launchd
-   job; on Linux, `systemctl --user stop sadbox`). Running VMs keep running — agents and terminals in them carry on —
-   and reconnect when the supervisor is back. (Not under docker compose: there
-   the VMs stop with the container and are started again from the UI.)
+   job — see [macOS: run at boot](#macos-run-at-boot-launchd); on Linux,
+   `systemctl --user stop sadbox`). Running VMs keep running — agents and
+   terminals in them carry on — and reconnect when the supervisor is back.
+   (Not under docker compose: there the VMs stop with the container and are
+   started again from the UI.)
 2. **Install the new version** the way you installed it:
    - install script: run the same command again —
      `curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh | sh`
@@ -229,10 +265,32 @@ sadbox setup     # checks dependencies, starts the VM backend, builds the base i
 sadbox serve     # http://localhost:7070
 ```
 
-On Linux, `sadbox setup` also fetches Cloud Hypervisor and its kernel, and turns
-the base image into the disk VMs boot from. To keep sadbox running in the
-background and start it at boot, use `sadbox service install` (a systemd user
-unit; see [Deploying](#deploying)).
+What `sadbox setup` does per backend:
+
+- **Apple silicon**: starts Apple's `container` service and builds the base
+  image.
+- **Intel** (the default there): builds the guest kernel + initramfs and the
+  base image's disk with **Docker, which must be running**.
+- **Linux**: fetches Cloud Hypervisor and its kernel, and turns the base image
+  into the disk VMs boot from with Docker.
+
+Run it as yourself, not with `sudo`: the supervisor's state (database, vault,
+agent logins, VM disks) lives in `~/.sadbox`. Expect a few GB for the base
+image in Docker and its disk under `~/.sadbox` (project disks are sparse and
+grow as they are used).
+
+On Apple silicon running macOS 15, no Apple `container` exists; use the vfkit
+backend explicitly — the same two commands, and the same prefix for anything
+that runs the supervisor:
+
+```sh
+SADBOX_DRIVER=vz sadbox setup
+SADBOX_DRIVER=vz sadbox serve
+```
+
+To keep sadbox running in the background and start it at boot, use
+`sadbox service install` on Linux (a systemd user unit) or a launchd job on a
+Mac; both are in [Deploying](#deploying).
 
 The first `sadbox serve` generates a sign-in password, prints it once, and
 saves it in `~/.sadbox/initial-password` (see [Sign-in password](#sign-in-password)
@@ -323,16 +381,17 @@ Browser (dashboard + xterm.js tabs)
    │ REST + WebSocket
 Supervisor (Bun/TS, this repo) ── SQLite state, AES-GCM vault + agent logins
    │ ProjectDriver interface
-   ├─ macOS: Apple container CLI ── one microVM per project
-   │         │ vsock (container exec)
+   ├─ macOS (Apple silicon): Apple container CLI ── one microVM per project
+   ├─ macOS (Intel): vfkit + Virtualization.framework ── one microVM per project
+   │         │ vsock (container exec / sadbox-agent)
    └─ Linux: Cloud Hypervisor on KVM ── one microVM per project
              │ vsock (sadbox-agent, the guest's init: guest/agent)
 Guest: Debian + tmux + Bun + node (nvm) + Claude Code + omp + opencode, agent user,
        workdir = your repo copy
 ```
 
-Everything below works the same on both. Where this section says `container
-exec` (how the supervisor runs a command in a VM), Linux uses the guest agent
+Everything below works the same on all three. Where this section says `container
+exec` (how the supervisor runs a command in a VM), Linux and Intel Macs use the guest agent
 over vsock instead.
 
 - **Two source modes** at create: **(a) local folder** — `git ls-files
@@ -759,7 +818,7 @@ Where the supervisor can run, and whether it can make project VMs there:
 
 | Where | Project microVMs? |
 |---|---|
-| **Mac, native** (`sadbox serve`, under launchd for boot) | ✅ through Apple `container` |
+| **Mac, native** (`sadbox serve`, under launchd for boot) | ✅ Apple `container` on Apple silicon; `vfkit` (Virtualization.framework) on Intel |
 | **Linux with KVM, native** (`sadbox serve`, or `sadbox service install`) | ✅ Cloud Hypervisor; VMs keep running across supervisor restarts |
 | **Linux with KVM, docker compose** ([above](#linux-with-docker-compose)) | ✅ Cloud Hypervisor, its processes in the container; VMs stop with it |
 | **Mac, in Docker/`container`** | ❌ web UI loads, but project create fails: no path to Virtualization.framework |
@@ -778,6 +837,56 @@ The unit runs the same `sadbox` you installed it with, carrying your current
 readable by anyone; the service uses the stored password from `sadbox passwd`).
 It stops only the supervisor (`KillMode=process`): the VMs keep running across a
 restart or an upgrade, and the supervisor finds them again.
+
+### macOS: run at boot (launchd)
+
+A LaunchAgent starts `sadbox serve` at login and restarts it if it exits. Write
+`~/Library/LaunchAgents/dev.sadbox.supervisor.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.sadbox.supervisor</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/.local/bin/sadbox</string>
+    <string>serve</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/sadbox.log</string>
+  <key>StandardErrorPath</key><string>/tmp/sadbox.log</string>
+</dict>
+</plist>
+```
+
+```sh
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.sadbox.supervisor.plist
+launchctl kickstart -k gui/$(id -u)/dev.sadbox.supervisor   # start / restart now
+launchctl bootout gui/$(id -u)/dev.sadbox.supervisor        # stop it
+tail -f /tmp/sadbox.log
+```
+
+- Replace `/Users/YOU/...` with the absolute path to the binary
+  (`command -v sadbox`).
+- Keep the `PATH` line: a LaunchAgent does not inherit your shell's environment,
+  and `openssl`, `docker` (Intel) and `container` (Apple silicon) are looked up
+  on it.
+- On Apple silicon running macOS 15, add
+  `<key>SADBOX_DRIVER</key><string>vz</string>` to `EnvironmentVariables`.
+  Intel Macs do not need it (vz is their default).
+- This runs at login. To run before anyone logs in, install the same file as a
+  LaunchDaemon in `/Library/LaunchDaemons` (owned by root, with a `UserName`
+  key); it is not needed for a normal desktop Mac.
+- Once the Homebrew formula is published, `brew services` writes this job for
+  you (see [Option 3](#option-3--from-source)).
 
 ### The container image
 
@@ -860,8 +969,8 @@ Notes:
 - **Forwarded ports are plain HTTP**: a sign-in forward's cookie crosses the
   network unencrypted when it is opened from another machine, and a forward
   opened to anyone is raw TCP that anyone who can reach this machine can use.
-- Platforms: Apple silicon Macs on macOS 26+, and Linux with KVM (see
-  [Supported platforms](#supported-platforms)). On Linux:
+- Platforms: Apple silicon Macs on macOS 26+, Intel Macs (built, see
+  [Supported platforms](#supported-platforms)), and Linux with KVM. On Linux:
   - Creating a project copies the image's disk (about 2 GB), which takes a few seconds on ext4.
     btrfs or xfs clone it instantly.
   - The disk size in Settings caps the whole VM, not only its workdir.

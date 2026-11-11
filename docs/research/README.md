@@ -151,3 +151,4 @@ swappable per-platform backends.
 | [11-credential-proxy.md](11-credential-proxy.md) | Placeholder secrets swapped in by the proxy |
 | [12-vaults.md](12-vaults.md) | Vaults: variables and secrets, proxy and fetch-at-runtime modes |
 | [13-agent-sessions.md](13-agent-sessions.md) | Agent logins and per-project conversation history |
+| [14-intel-mac.md](14-intel-mac.md) | Running locally on an Intel Mac: the `vfkit`/Virtualization.framework option, and the Linux-host workaround |

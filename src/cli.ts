@@ -4,6 +4,7 @@ import { buildBaseImage } from "./core/baseimage";
 import { getDriver } from "./driver";
 import { installService, serviceStatus, uninstallService } from "./core/service";
 import { CH_VERSION, ensureVmm, virtiofsdBin, vmmProblems } from "./driver/kvm/vmm";
+import { VFKIT_VERSION, ensureVmm as ensureVz, vmmProblems as vzProblems } from "./driver/vz/vmm";
 
 /** Whether agent history can be kept on this machine (shared into VMs), and why not. */
 function sharingNote(): string {
@@ -51,10 +52,37 @@ async function setupKvm() {
   console.log(sharingNote());
 }
 
+/** Intel Mac (or SADBOX_DRIVER=vz): vfkit, the guest kernel, docker for the image. */
+async function setupVz() {
+  const host = vzProblems().filter((p) => !p.fix?.startsWith("sadbox setup"));
+  for (const p of host) console.error(`✗ ${p.error}${p.fix ? `\n    fix: ${p.fix}` : ""}`);
+  if (host.length) process.exit(1);
+  console.log("✓ Virtualization.framework");
+  if (!(await has(process.env.SADBOX_DOCKER_BIN || "docker"))) {
+    console.error("✗ docker not found — it builds the VM image (https://docs.docker.com/engine/install/)");
+    process.exit(1);
+  }
+  console.log("✓ docker");
+  await ensureVz((msg) => console.log(`→ ${msg}…`));
+  console.log(`✓ vfkit ${VFKIT_VERSION}`);
+  console.log("✓ guest kernel and initramfs");
+  console.log("✓ virtio-fs (agent history is kept on this machine)");
+}
+
 async function setup() {
   console.log(`sadbox setup (v${VERSION})\n`);
   if (getDriver().name === "kvm") {
     await setupKvm();
+    mkdirSync(config.dataDir, { recursive: true });
+    console.log(`✓ data dir ${config.dataDir}`);
+    console.log(`→ building base image ${config.baseImage} and its VM disk (a few minutes)…`);
+    await buildBaseImage({ inherit: true });
+    console.log("\n✓ setup complete — run 'sadbox serve' and open http://localhost:7070");
+    return;
+  }
+
+  if (getDriver().name === "vz") {
+    await setupVz();
     mkdirSync(config.dataDir, { recursive: true });
     console.log(`✓ data dir ${config.dataDir}`);
     console.log(`→ building base image ${config.baseImage} and its VM disk (a few minutes)…`);
@@ -99,6 +127,17 @@ async function doctor() {
     console.log(`${(await driver.images.recipe(config.baseImage)) !== undefined ? "✓" : "✗"} VM disk built (${config.baseImage})`);
     console.log(`${(await has(process.env.SADBOX_DOCKER_BIN || "docker")) ? "✓" : "✗"} docker (builds the VM image)`);
     console.log(sharingNote());
+    console.log(`${(await has("openssl")) ? "✓" : "✗"} openssl (egress proxy TLS interception)`);
+    console.log(`proxy port:   ${config.proxyPort}`);
+    return;
+  }
+  if (driver.name === "vz") {
+    const problems = vzProblems();
+    for (const p of problems) console.log(`✗ ${p.error}${p.fix ? ` (fix: ${p.fix})` : ""}`);
+    if (!problems.length) console.log(`✓ Virtualization.framework and vfkit ${VFKIT_VERSION}`);
+    console.log(`${(await driver.images.recipe(config.baseImage)) !== undefined ? "✓" : "✗"} VM disk built (${config.baseImage})`);
+    console.log(`${(await has(process.env.SADBOX_DOCKER_BIN || "docker")) ? "✓" : "✗"} docker (builds the VM image)`);
+    console.log("✓ virtio-fs (agent history is kept on this machine)");
     console.log(`${(await has("openssl")) ? "✓" : "✗"} openssl (egress proxy TLS interception)`);
     console.log(`proxy port:   ${config.proxyPort}`);
     return;
@@ -153,7 +192,9 @@ Usage: sadbox <command>
 
 Env: SADBOX_PORT, SADBOX_HOST, SADBOX_PASSWORD, SADBOX_AUTH=off, SADBOX_NETWORK, SADBOX_PROXY_PORT, SADBOX_PROXY_HOST,
      SADBOX_FORWARD_HOST, SADBOX_DATA, SADBOX_BASE_IMAGE, SADBOX_NET_LOG_DAYS (network log retention, ≥ 7)
-Linux: SADBOX_DRIVER (kvm | container), SADBOX_CH_BIN, SADBOX_KVM_KERNEL, SADBOX_VIRTIOFSD, SADBOX_DOCKER_BIN, SADBOX_KVM_RUN`;
+SADBOX_DRIVER (container | kvm | vz), SADBOX_DOCKER_BIN
+Linux: SADBOX_CH_BIN, SADBOX_KVM_KERNEL, SADBOX_VIRTIOFSD, SADBOX_KVM_RUN
+Intel Mac: SADBOX_VFKIT_BIN, SADBOX_VZ_KERNEL, SADBOX_VZ_INITRD, SADBOX_VZ_RUN`;
 
 export async function main(argv: string[]) {
   const cmd = argv[2] ?? "serve";
