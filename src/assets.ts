@@ -83,6 +83,8 @@ import baseDockerfile from "../images/base/Dockerfile" with { type: "file" };
 import baseTmuxConf from "../images/base/tmux.conf" with { type: "file" };
 // the Linux driver's disk recipe, and the guest agent's source it compiles
 import diskDockerfile from "../images/disk/Dockerfile" with { type: "file" };
+// the vz driver's guest kernel and initramfs recipe
+import kernelDockerfile from "../images/kernel/Dockerfile" with { type: "file" };
 import agentGoMod from "../guest/agent/go.mod" with { type: "file" };
 import agentGoSum from "../guest/agent/go.sum" with { type: "file" };
 import agentMainGo from "../guest/agent/main.go" with { type: "file" };
@@ -191,4 +193,9 @@ export const diskImageFiles: Record<string, string> = {
   "agent/proc.go": agentProcGo,
   "agent/system_linux.go": agentSystemLinuxGo,
   "agent/system_other.go": agentSystemOtherGo,
+};
+
+// build-context files for the vz driver's guest kernel (src/driver/vz/vmm.ts)
+export const kernelImageFiles: Record<string, string> = {
+  Dockerfile: kernelDockerfile,
 };
