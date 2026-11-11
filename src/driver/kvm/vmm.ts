@@ -1,16 +1,12 @@
 // Cloud Hypervisor and the guest kernel it boots: pinned versions, fetched
 // into the data dir on first use (`sadbox setup`), or named by the environment.
 // The versions are the ones spikes/e-cloud-hypervisor proved.
-import { accessSync, chmodSync, constants, existsSync, mkdirSync, renameSync, rmSync } from "fs";
-import { join } from "path";
+import { accessSync, chmodSync, constants, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { config } from "../../config";
+import { CH_VERSION, KERNEL_TAG, chBinAsset, chKernelAsset, kernelUrl } from "../kernels";
 
-export const CH_VERSION = "v54.0";
-export const KERNEL_TAG = "ch-release-v7.2.8-20261009";
-
-const machine = process.arch === "arm64" ? "aarch64" : "x86_64";
-const CH_ASSET = machine === "aarch64" ? "cloud-hypervisor-static-aarch64" : "cloud-hypervisor-static";
-const KERNEL_ASSET = machine === "aarch64" ? "Image-arm64" : "vmlinux-x86_64";
+export { CH_VERSION, KERNEL_TAG };
 
 export const kvmDir = () => join(config.dataDir, "kvm");
 const binDir = () => join(kvmDir(), "bin");
@@ -18,10 +14,9 @@ const binDir = () => join(kvmDir(), "bin");
 /** The VMM binary: SADBOX_CH_BIN, or the pinned release under the data dir. */
 export const chBin = () => process.env.SADBOX_CH_BIN || join(binDir(), `cloud-hypervisor-${CH_VERSION}`);
 /** The guest kernel: SADBOX_KVM_KERNEL, or the pinned build under the data dir. */
-export const kernelPath = () => process.env.SADBOX_KVM_KERNEL || join(binDir(), `${KERNEL_ASSET}-${KERNEL_TAG}`);
+export const kernelPath = () => process.env.SADBOX_KVM_KERNEL || join(binDir(), `${chKernelAsset}-${KERNEL_TAG}`);
 
-const chUrl = () => `https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/${CH_ASSET}`;
-const kernelUrl = () => `https://github.com/cloud-hypervisor/linux/releases/download/${KERNEL_TAG}/${KERNEL_ASSET}`;
+const chUrl = () => `https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/${chBinAsset}`;
 
 /** What stands between this machine and running VMs, as fixable sentences; empty when nothing does. */
 export function vmmProblems(): { error: string; fix?: string }[] {
@@ -39,7 +34,7 @@ export function vmmProblems(): { error: string; fix?: string }[] {
   return out;
 }
 
-async function download(url: string, dest: string, mode: number): Promise<void> {
+export async function download(url: string, dest: string, mode: number): Promise<void> {
   mkdirSync(binDir(), { recursive: true });
   const res = await fetch(url, { redirect: "follow" });
   if (!res.ok) throw new Error(`could not download ${url}: HTTP ${res.status}`);
@@ -60,7 +55,7 @@ export async function ensureVmm(note: (msg: string) => void = () => {}): Promise
   if (!existsSync(kernelPath())) {
     if (process.env.SADBOX_KVM_KERNEL) throw new Error(`SADBOX_KVM_KERNEL is ${kernelPath()}, which does not exist`);
     note(`downloading the guest kernel (${KERNEL_TAG})`);
-    await download(kernelUrl(), kernelPath(), 0o644);
+    await download(kernelUrl(chKernelAsset), kernelPath(), 0o644);
   }
 }
 

@@ -17,16 +17,21 @@
 // again by their API sockets. Each VM's host-dials-in socket (the proxy's
 // carriers) is served here, a connection at a time, onto the agent's
 // `connect` to the guest socket.
-import { spawn } from "node:child_process";
-import { chmodSync, closeSync, constants as fsc, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, truncateSync, writeFileSync } from "fs";
-import net from "node:net";
-import { basename, dirname, join } from "path";
-import { createHash } from "crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { runDir } from "../../config";
 import { agentClient, awaitAnnouncement, hybridVsock, waitForAgent, type AgentClient } from "../agent";
 import type { ProjectDriver, ProjectInfo, ProjectStats, ServiceStatus } from "../types";
+import {
+  MAX_SOCK_PATH, cloneDisk, detached, exitedWithin, pidAlive, pidOf as pidOfAt, planMounts, readSpec as readSpecAt,
+  socketBridges, tail, waitFor, writeSpec as writeSpecAt, type Share, type VmSpec,
+} from "../vm";
 import { diskMeta, diskPath, kvmImages } from "./images";
 import { CH_VERSION, chBin, kernelPath, kvmDir, virtiofsdBin, vmmProblems } from "./vmm";
+
+export { planMounts };
+export type { VmSpec };
 
 const ANNOUNCE_PORT = 1025;
 const BOOT_MS = 60_000;
@@ -37,19 +42,6 @@ const DEFAULT_MEMORY_MB = 2048;
 const DEFAULT_FREE_GB = 32;
 const GiB = 1024 ** 3;
 
-export interface VmSpec {
-  ref: string;
-  image: string;
-  cpus: number;
-  memoryMB: number;
-  socket?: { host: string; guest: string };
-  mounts: { host: string; guest: string }[];
-  /** the image USER's uid/gid, which shared folders are mapped to */
-  uid: number;
-  gid: number;
-  createdAt: string;
-}
-
 const vmsDir = () => join(kvmDir(), "vms");
 const vmDir = (ref: string) => join(vmsDir(), ref);
 const file = (ref: string, name: string) => join(vmDir(ref), name);
@@ -57,16 +49,10 @@ const sockRoot = () => process.env.SADBOX_KVM_RUN || join(runDir(), "kvm");
 const sockDir = (ref: string) => join(sockRoot(), createHash("sha256").update(ref).digest("hex").slice(0, 12));
 /** A VM's sockets: CH's API, its vsock (+ _PORT for the guest's dials), virtiofsd's. */
 const sock = (ref: string, name: string) => join(sockDir(ref), name);
-const MAX_SOCK_PATH = 100; // sun_path is 104 bytes on macOS, 108 on Linux
 
-function readSpec(ref: string): VmSpec | null {
-  try { return JSON.parse(readFileSync(file(ref, "vm.json"), "utf8")); } catch { return null; }
-}
-function writeSpec(spec: VmSpec) {
-  writeFileSync(file(spec.ref, "vm.json.tmp"), JSON.stringify(spec, null, 2));
-  // rename, so a crash never leaves half a file
-  renameSync(file(spec.ref, "vm.json.tmp"), file(spec.ref, "vm.json"));
-}
+const readSpec = (ref: string) => readSpecAt(file(ref, "vm.json"));
+const writeSpec = (ref: string, spec: VmSpec) => writeSpecAt(file(ref, "vm.json"), spec);
+const pidOf = (ref: string) => pidOfAt(file(ref, "ch.pid"));
 
 const clients = new Map<string, AgentClient>();
 const client = (ref: string) => {
@@ -91,19 +77,6 @@ async function isRunning(ref: string): Promise<boolean> {
   try { return (await api(ref, "GET", "vm.info", 1500))?.state === "Running"; } catch { return false; }
 }
 
-function pidOf(ref: string): number | null {
-  try { return Number(readFileSync(file(ref, "ch.pid"), "utf8").trim()) || null; } catch { return null; }
-}
-function pidAlive(pid: number | null): boolean {
-  if (!pid) return false;
-  try { process.kill(pid, 0); } catch { return false; }
-  // on Linux, a zombie or a recycled pid is not our VMM
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    return !/^\d+ \(.*\) [ZX]/.test(stat);
-  } catch { return true; }
-}
-
 async function settledOff(ref: string, withinMs: number): Promise<boolean> {
   for (const until = Date.now() + withinMs; ;) {
     if (!pidAlive(pidOf(ref)) && !(await isRunning(ref))) return true;
@@ -113,24 +86,6 @@ async function settledOff(ref: string, withinMs: number): Promise<boolean> {
 }
 
 // ---- shared folders (virtiofs) ----
-interface Share { tag: string; dir: string }
-interface MountPlan { tag: string; sub: string; guest: string; file: boolean }
-
-/** One share per host folder (a file is shared through its folder), and where
- *  each mount comes from in them. */
-export function planMounts(mounts: VmSpec["mounts"]): { shares: Share[]; mounts: MountPlan[] } {
-  const shares: Share[] = [];
-  const plan: MountPlan[] = [];
-  for (const m of mounts) {
-    const isFile = statSync(m.host).isFile();
-    const dir = isFile ? dirname(m.host) : m.host;
-    let share = shares.find((s) => s.dir === dir);
-    if (!share) shares.push((share = { tag: `sbx${shares.length}`, dir }));
-    plan.push({ tag: share.tag, sub: isFile ? basename(m.host) : "", guest: m.guest, file: isFile });
-  }
-  return { shares, mounts: plan };
-}
-
 let translateIds: boolean | null = null;
 /** virtiofsd ≥ 1.11 can map ids, so the guest user owns what the host user owns. */
 function canTranslateIds(bin: string): boolean {
@@ -151,24 +106,6 @@ function startVirtiofsd(ref: string, spec: VmSpec, s: Share): string {
   if (canTranslateIds(bin)) args.push(`--translate-uid=map:${spec.uid}:${uid}:1`, `--translate-gid=map:${spec.gid}:${gid}:1`);
   detached(bin, args, file(ref, `${s.tag}.log`));
   return path;
-}
-
-/** Start a process that is not the supervisor's to wait for: it outlives a restart. */
-function detached(bin: string, args: string[], log: string): number {
-  const fd = openSync(log, "a");
-  try {
-    const child = spawn(bin, args, { detached: true, stdio: ["ignore", fd, fd] });
-    child.unref();
-    if (!child.pid) throw new Error(`could not start ${bin}`);
-    return child.pid;
-  } finally {
-    closeSync(fd);
-  }
-}
-
-async function waitFor(path: string, ms: number): Promise<boolean> {
-  for (const until = Date.now() + ms; Date.now() < until; await Bun.sleep(20)) if (existsSync(path)) return true;
-  return existsSync(path);
 }
 
 // ---- boot ----
@@ -226,10 +163,9 @@ async function boot(ref: string): Promise<void> {
   } catch (e) {
     done = true;
     try { process.kill(pid, "SIGKILL"); } catch {}
-    const tail = consoleTail(ref);
-    let ch = "";
-    try { ch = readFileSync(file(ref, "ch.log"), "utf8").trim().split("\n").slice(-5).join("\n"); } catch {}
-    throw new Error(`${(e as Error).message}${ch ? `\n${ch}` : ""}${tail ? `\n--- console\n${tail}` : ""}`);
+    const console = consoleTail(ref);
+    const log = tail(file(ref, "ch.log"));
+    throw new Error(`${(e as Error).message}${log ? `\n${log}` : ""}${console ? `\n--- console\n${console}` : ""}`);
   } finally {
     done = true;
     clearTimeout(timer);
@@ -241,32 +177,15 @@ async function boot(ref: string): Promise<void> {
 }
 
 // ---- the host-dials-in socket ----
-const bridges = new Map<string, net.Server>();
+const bridges = socketBridges((ref) => client(ref));
 
 function openBridge(ref: string, socket: { host: string; guest: string }) {
-  bridges.get(ref)?.close();
-  rmSync(socket.host, { force: true });
-  mkdirSync(dirname(socket.host), { recursive: true });
-  const server = net.createServer((c) => {
-    c.on("error", () => {});
-    client(ref).connect(socket.guest, 5_000).then((up) => {
-      up.on("error", () => {});
-      up.on("close", () => c.destroy());
-      c.on("close", () => up.destroy());
-      c.pipe(up);
-      up.pipe(c);
-    }, () => c.destroy()); // the VM is down, or nothing listens in it: the dialler retries
-  });
-  server.on("error", (e) => console.error(`⚠ ${ref}: socket ${socket.host}: ${e.message}`));
-  server.listen(socket.host, () => { try { chmodSync(socket.host, 0o600); } catch {} });
-  bridges.set(ref, server);
+  bridges.open(ref, socket);
 }
 
 function closeBridge(ref: string) {
   const spec = readSpec(ref);
-  bridges.get(ref)?.close();
-  bridges.delete(ref);
-  if (spec?.socket) rmSync(spec.socket.host, { force: true });
+  bridges.close(ref, spec?.socket);
 }
 
 let restored = false;
@@ -276,28 +195,7 @@ function restore() {
   restored = true;
   let refs: string[] = [];
   try { refs = readdirSync(vmsDir()); } catch {}
-  for (const ref of refs) {
-    const spec = readSpec(ref);
-    if (spec?.socket) openBridge(ref, spec.socket);
-  }
-}
-
-/** A project's disk: a copy-on-write clone of the image's where the
- *  filesystem can (btrfs, xfs, APFS), a sparse copy otherwise; then grown —
- *  sparsely — and the agent grows the filesystem to match at boot. */
-async function cloneDisk(src: string, dest: string, sizeBytes: number) {
-  if (process.platform === "linux") {
-    const cp = Bun.spawn(["cp", "--reflink=auto", "--sparse=always", src, dest], { stderr: "pipe" });
-    if (await cp.exited !== 0) throw new Error(`could not copy the disk: ${(await new Response(cp.stderr).text()).trim()}`);
-  } else {
-    copyFileSync(src, dest, fsc.COPYFILE_FICLONE);
-  }
-  if (statSync(dest).size < sizeBytes) truncateSync(dest, sizeBytes);
-}
-
-async function exitedWithin(pid: number | null, ms: number) {
-  for (const until = Date.now() + ms; pidAlive(pid) && Date.now() < until;) await Bun.sleep(50);
-  return !pidAlive(pid);
+  bridges.restore(refs.map(readSpec).filter((s): s is VmSpec => !!s));
 }
 
 /** Shared folders work when virtiofsd is there and the guest user can write
@@ -346,12 +244,13 @@ export const kvmDriver: ProjectDriver = {
     };
     try {
       await cloneDisk(diskPath(image), file(ref, "disk.ext4"), meta.sizeBytes + (opts?.diskGB ?? DEFAULT_FREE_GB) * GiB);
-      writeSpec(spec);
+      writeSpec(ref, spec);
       if (spec.socket) openBridge(ref, spec.socket);
       await boot(ref);
     } catch (e) {
       closeBridge(ref);
-      try { process.kill(pidOf(ref) ?? 0, "SIGKILL"); } catch {}
+      const pid = pidOf(ref);
+      if (pid) try { process.kill(pid, "SIGKILL"); } catch {}
       rmSync(vmDir(ref), { recursive: true, force: true });
       throw e;
     }
@@ -395,7 +294,7 @@ export const kvmDriver: ProjectDriver = {
     const spec = readSpec(ref);
     if (!spec) throw new Error(`no VM ${ref}`);
     if (await isRunning(ref)) throw new Error("the VM must be stopped to change its memory");
-    writeSpec({ ...spec, memoryMB });
+    writeSpec(ref, { ...spec, memoryMB });
   },
 
   async inspect(ref): Promise<ProjectInfo> {
