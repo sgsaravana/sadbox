@@ -38,6 +38,9 @@ concurrency:
 
 env:
   TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
+  # The `check` job runs before (and without) a checkout; without this, gh
+  # tries to find the repository with git and fails ("not a git repository").
+  GH_REPO: ${{ github.repository }}
 
 jobs:
   # What this run has to do, before paying for a build.
