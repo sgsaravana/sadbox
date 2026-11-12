@@ -6,7 +6,7 @@ import { staticRoutes, aceFiles } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
 import { addBinding, applyItem, createItem, deleteBinding, deleteItem, getItem, injectVault, listItems, projectVaultView, revealItem, revokeFetchGrant, setItemProjects, setProjectItems, updateItem } from "../core/vault";
-import { connectSyncFolder, listProjects, setGitRemote, createProject, destroyProject, getProject, projectDetails, refFor, projectsWithLiveState, rebuildProject, setProjectMemory, startProject, stopProject } from "../core/projects";
+import { connectSyncFolder, listProjects, setGitRemote, createProject, destroyProject, getProject, projectDetails, projectEvents, refFor, projectsWithLiveState, rebuildProject, setProjectMemory, startProject, stopProject } from "../core/projects";
 import { syncStatus, syncProject } from "../core/sync";
 import { pushProject } from "../core/push";
 import { terminalLinks } from "../core/links";
@@ -165,6 +165,13 @@ export function startServer() {
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/details$/);
         if (m && req.method === "GET") return json(await projectDetails(m[1]));
+        // the project's event log — the create form shows real progress from it
+        m = p.match(/^\/api\/projects\/([\w-]+)\/events$/);
+        if (m && req.method === "GET") {
+          if (!getProject(m[1])) return json({ error: "project not found" }, 404);
+          const after = Number(url.searchParams.get("after")) || 0;
+          return json(projectEvents(m[1], after));
+        }
         // the vault items a project may use (and what its VM holds for each)
         m = p.match(/^\/api\/projects\/([\w-]+)\/vault$/);
         if (m && req.method === "GET") return json(projectVaultView(m[1]));
@@ -442,7 +449,7 @@ export function startServer() {
         if (p === "/api/vault" && req.method === "POST") {
           const b = await req.json();
           const made = createItem({
-            name: b.name, value: b.value, kind: b.kind, type: b.type, mode: b.mode, inEnv: b.inEnv,
+            name: b.name, note: b.note, value: b.value, kind: b.kind, type: b.type, mode: b.mode, inEnv: b.inEnv,
             askOnFetch: b.askOnFetch, swapUrl: b.swapUrl, swapBody: b.swapBody, bindings: b.bindings, projectIds: b.projectIds,
           });
           return json(await applyItem(made.id), 201); // into the running VMs it was given to
@@ -452,7 +459,7 @@ export function startServer() {
         if (m && req.method === "PATCH") {
           const b = await req.json();
           return json(await updateItem(m[1], {
-            name: b.name, value: b.value, kind: b.kind, type: b.type, mode: b.mode, inEnv: b.inEnv, askOnFetch: b.askOnFetch,
+            name: b.name, note: b.note, value: b.value, kind: b.kind, type: b.type, mode: b.mode, inEnv: b.inEnv, askOnFetch: b.askOnFetch,
             swapUrl: b.swapUrl, swapBody: b.swapBody,
           }));
         }

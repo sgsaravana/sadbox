@@ -64,6 +64,17 @@ describe("/api/vault", () => {
     expect((await call("GET", "/api/vault")).body).toEqual([]);
   });
 
+  test("a note labels an item, and can be changed or cleared", async () => {
+    const made = await call("POST", "/api/vault", { name: "NOTE_TEST", value: "x", note: "for app-a" });
+    expect(made.status).toBe(201);
+    expect(made.body.note).toBe("for app-a");
+    const id = made.body.id;
+    expect((await call("PATCH", `/api/vault/${id}`, { note: "for app-b" })).body.note).toBe("for app-b");
+    // leaving it out keeps it; an empty one clears it
+    expect((await call("PATCH", `/api/vault/${id}`, { kind: "variable" })).body.note).toBe("for app-b");
+    expect((await call("PATCH", `/api/vault/${id}`, { note: "" })).body.note).toBe("");
+  });
+
   test("the routes of the old Secrets page are gone", async () => {
     expect((await fetch(`${base}/api/secrets`, { headers: { cookie } })).status).toBe(404);
   });
