@@ -40,7 +40,7 @@ with KVM (see [Supported platforms](#supported-platforms)).
 ## Releases
 
 <!-- LATEST_RELEASE:START -->
-**Latest release: [v0.4.4](https://github.com/sgsaravana/sadbox/releases/tag/v0.4.4)** · published 2026-11-10 · [release notes →](https://github.com/sgsaravana/sadbox/releases/tag/v0.4.4)
+**Latest release: [v0.5.0](https://github.com/sgsaravana/sadbox/releases/tag/v0.5.0)** · published 2026-11-12 · [release notes →](https://github.com/sgsaravana/sadbox/releases/tag/v0.5.0)
 <!-- LATEST_RELEASE:END -->
 
 Every release ships prebuilt binaries for macOS/Linux (arm64/x64) plus
