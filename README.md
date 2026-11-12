@@ -1078,6 +1078,8 @@ binary path with the one `command -v sadbox` printed:
   <dict>
     <key>PATH</key>
     <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>SADBOX_HOST</key>
+    <string>127.0.0.1</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -1113,6 +1115,11 @@ rm ~/Library/LaunchAgents/dev.sadbox.supervisor.plist            # remove for go
   and `docker`, `colima`, `vfkit` and `openssl` are looked up on it. On an Intel
   Mac Homebrew is in `/usr/local/bin`; `/opt/homebrew/bin` only matters if this
   Mac also runs an Apple silicon setup.
+- Keep `SADBOX_HOST` at `127.0.0.1` when anything proxies to this Mac over
+  IPv4 — Caddy (native or in Docker/colima), another reverse proxy. Bun binds
+  `localhost` to **`::1` only** on macOS, so a proxy dialling
+  `127.0.0.1:7070` gets `connection refused`; `SADBOX_HOST=127.0.0.1` makes
+  sadbox listen on IPv4 (and `http://localhost:7070` still works).
 - Do not put `SADBOX_PASSWORD` in the plist (it is world-readable). The job uses
   the stored password (`sadbox passwd`).
 - For a **beta**, put the beta binary in `ProgramArguments` and add its state
@@ -1147,12 +1154,28 @@ Virtualization.framework, and Apple silicon has no nested virtualization
 
 ### Serving to the LAN behind Caddy (Mac mini home server)
 
-sadbox binds **`localhost:7070`** by default and speaks plain HTTP, so the right
-shape is: run it natively, leave it on localhost, and let the Caddy already on
-your Mac mini be the only network-facing piece — it terminates TLS and
-reverse-proxies to `127.0.0.1:7070`. sadbox's own sign-in still applies behind
-it; Caddy's `basic_auth` is an optional second layer. A ready-to-adapt block is in
+sadbox speaks plain HTTP on **`127.0.0.1:7070`** — set `SADBOX_HOST=127.0.0.1`
+(the launchd section does), because Bun's `localhost` binds `::1` only on
+macOS, which an IPv4 reverse proxy cannot reach. The right shape is: run sadbox
+natively, leave it on loopback, and let the Caddy already on your Mac mini be
+the only network-facing piece — it terminates TLS and reverse-proxies to
+`127.0.0.1:7070`. sadbox's own sign-in still applies behind it; Caddy's
+`basic_auth` is an optional second layer. A ready-to-adapt block is in
 [`packaging/caddy/Caddyfile.example`](packaging/caddy/Caddyfile.example).
+
+If Caddy runs in a **container** (Docker Desktop or colima) instead of natively,
+`127.0.0.1` in `reverse_proxy` is Caddy's own loopback, not the Mac. On Docker
+Desktop use `host.docker.internal:7070`. With **colima** that name resolves to
+the host address (usually `192.168.5.2`), which maps to the Mac's **IPv4**
+loopback — so sadbox must listen on `127.0.0.1`, not `::1`. If the name does not
+resolve inside the container, pin it in the Caddy service:
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:192.168.5.2"
+```
+
+Keep the other upstreams (`dockge:5001`, …) as container names.
 
 If you already terminate a **wildcard** cert (e.g. Cloudflare DNS challenge),
 route sadbox by host inside that block so it reuses the real, browser-trusted
@@ -1180,16 +1203,30 @@ cert — then `wss://` (terminal) and SSE work with no client cert-trust steps:
 (For a standalone hostname without a wildcard, give the block its own `tls`
 directive — real certs, or `tls internal` plus `caddy trust` on each client.)
 
+The `dns cloudflare` challenge needs a Caddy built with
+[`caddy-dns/cloudflare`](https://github.com/caddy-dns/cloudflare): the official
+`caddy` Docker image and Homebrew's `caddy` do not include it. Build one with
+`xcaddy build --with github.com/caddy-dns/cloudflare`. The `zone_id` option
+some examples show is not supported; the API token's scope picks the zone.
+
 Notes:
 - **WebSocket** (the browser terminal) is upgraded automatically by Caddy v2 —
   no extra config. The terminal picks `wss://` on an HTTPS page, so it works
   through TLS. `flush_interval -1` is what keeps the live **network feed** (SSE)
   streaming instead of buffering.
-- **Keep sadbox on localhost.** Since Caddy is on the same host you don't need
-  `SADBOX_HOST=0.0.0.0`; leaving it on localhost means the only way in is
-  through Caddy (and so over TLS — the sign-in password should never cross
-  the network in plain HTTP). Set `SADBOX_HOST` only if Caddy runs on a
+- **Keep sadbox on loopback.** Since Caddy is on (or can reach) this host you
+  don't need `SADBOX_HOST=0.0.0.0`; `127.0.0.1` means the only way in is through
+  Caddy (and so over TLS — the sign-in password should never cross the network
+  in plain HTTP). Set `SADBOX_HOST` to another address only if Caddy runs on a
   different machine.
+- **A 502 from Caddy** means it reached the Mac but sadbox is not listening on
+  the address it dialled: `lsof -nP -iTCP:7070 -sTCP:LISTEN` should show
+  `127.0.0.1:7070` (not `[::1]`), and
+  `curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7070/` should
+  print `200`. If Caddy exits instead of starting, run
+  `caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile`; an empty
+  `CLOUDFLARE_API_TOKEN` fails at config load with
+  `API token '' appears invalid`.
 - **Only route 7070.** Port 7071 is the egress proxy for older VMs that still
   sit on a network (new ones use a private socket instead); it refuses any
   client that is not a project VM and must not be proxied.

@@ -1,9 +1,19 @@
 # sadbox behind Caddy on the Mac mini (home server).
 #
 # sadbox runs NATIVELY on the Mac mini (it needs Apple Virtualization.framework
-# via `container` — never in Docker) and binds localhost:7070. Caddy, already on
-# the same box, is the only thing exposed to the network.
+# via `container` — never in Docker) and listens on 127.0.0.1:7070. Run it with
+# SADBOX_HOST=127.0.0.1: Bun's `localhost` binds ::1 only on macOS, and an IPv4
+# reverse proxy (or colima's host address) then gets connection refused. Caddy,
+# already on the same box, is the only thing exposed to the network.
 #
+#   - Caddy in Docker/colima: `127.0.0.1` in reverse_proxy is Caddy's own
+#     container. Use `host.docker.internal:7070` (Docker Desktop) or the host
+#     address colima maps it to (usually 192.168.5.2); if the name does not
+#     resolve, add `extra_hosts: ["host.docker.internal:192.168.5.2"]`.
+#   - `dns cloudflare` needs a Caddy built with
+#     github.com/caddy-dns/cloudflare — the official image and brew's caddy do
+#     not include it. `zone_id` is not a supported option; scope the API token
+#     to the zone instead.
 #   - WebSocket (the browser terminal) is proxied automatically by Caddy v2.
 #   - `flush_interval -1` keeps the SSE network-activity feed streaming.
 #   - sadbox has its own password sign-in; basic_auth here (or Tailscale /
@@ -50,7 +60,7 @@ sadbox.internal.example.com {
 		admin $2a$14$REPLACE_WITH_BCRYPT_HASH   # caddy hash-password
 	}
 
-	reverse_proxy 127.0.0.1:7070 {
+	reverse_proxy 127.0.0.1:7070 {   # Docker/colima: host.docker.internal:7070
 		flush_interval -1  # stream SSE (live network feed) without buffering
 	}
 }
