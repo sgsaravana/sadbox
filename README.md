@@ -15,6 +15,36 @@ Apple's Virtualization.framework through the open-source
 through [`vfkit`](https://github.com/crc-org/vfkit) on an Intel Mac, and
 [Cloud Hypervisor](https://www.cloudhypervisor.org) on KVM on Linux.
 
+## Index
+
+- [Status](#status)
+- [Releases](#releases)
+- [Supported platforms](#supported-platforms) — [EC2 and other clouds](#ec2-and-other-clouds)
+- [Requirements](#requirements)
+- [Install](#install)
+  - [Option 1 — install script (prebuilt binary)](#option-1--install-script-prebuilt-binary)
+  - [Option 2 — download the binary yourself](#option-2--download-the-binary-yourself)
+  - [Option 3 — from source](#option-3--from-source)
+  - [Installing a beta (pre-release)](#installing-a-beta-pre-release)
+    - [Intel Mac (macOS 15+) — beta](#intel-mac-macos-15--beta)
+    - [Apple silicon and Linux — beta](#apple-silicon-and-linux--beta)
+    - [Or download the pre-release binary by hand](#or-download-the-pre-release-binary-by-hand)
+    - [What a beta is, and is not](#what-a-beta-is-and-is-not)
+  - [Linux, with docker compose](#linux-with-docker-compose)
+  - [Updating](#updating)
+- [First run](#first-run)
+  - [Sign-in password](#sign-in-password)
+  - [CLI](#cli)
+- [Building & releasing](#building--releasing)
+- [How it works](#how-it-works)
+- [API](#api)
+- [Deploying](#deploying)
+  - [Linux: run at boot (systemd)](#linux-run-at-boot-systemd)
+  - [macOS: run at boot (launchd)](#macos-run-at-boot-launchd)
+  - [The container image](#the-container-image)
+  - [Serving to the LAN behind Caddy (Mac mini home server)](#serving-to-the-lan-behind-caddy-mac-mini-home-server)
+- [Known limitations (v0)](#known-limitations-v0)
+
 ## Status
 
 v0 — the full vertical slice works: create → browser tmux terminal →
