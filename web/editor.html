@@ -236,6 +236,7 @@
   <script src="/vendor/ace/ext-searchbox.js"></script>
   <script src="/vendor/ace/theme-one_dark.js"></script>
   <script src="/net-asks.js"></script>
+  <script src="/vm-warn.js"></script>
   <script>
     const $ = (s) => document.querySelector(s);
     const params = new URLSearchParams(location.search);
@@ -1157,6 +1158,8 @@
       notify: (msg, warn) => flash(msg, warn ? "bad" : "ok"),
       onAnswered: () => { if (active) editor.focus(); },
     });
+    // say so if the VM is above 80% CPU/memory (see /vm-warn.js)
+    sadboxVmWarn({ projectId, name: projName });
 
     // ---- boot ----
     activate(null);

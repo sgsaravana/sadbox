@@ -320,10 +320,12 @@ async function loadProjectNames() {
 async function refreshVault() {
   [vaultCache] = await Promise.all([api("/api/vault"), loadProjectNames()]);
   renderVaultList();
+  // keep ticks across a refresh (e.g. after making a new item from the form)
+  const ticked = new Set([...document.querySelectorAll("#create-secrets input[name=secret]:checked")].map((c) => c.value));
   $("#create-secrets").innerHTML = vaultCache.length
     ? vaultCache.map((s) => {
         const label = itemForLabel(s);
-        return `<label><input type="checkbox" name="secret" value="${s.id}">${escapeHtml(s.name)}` +
+        return `<label><input type="checkbox" name="secret" value="${s.id}"${ticked.has(s.id) ? " checked" : ""}>${escapeHtml(s.name)}` +
           (label ? ` <span class="hint">${escapeHtml(label)}</span>` : "") +
           ` <span class="hint">· ${s.kind}${s.mode === "proxy" ? ", via proxy" : ""}</span></label>`;
       }).join("")
@@ -1018,6 +1020,8 @@ function openCreateForm() {
   $("#btn-new").hidden = true;
   loadCreateToolchain();
   syncSrcMode();
+  // fresh items and labels, including ones made on the Vaults page or here
+  refreshVault().catch(() => {});
   api("/api/history").then((h) => { historyCache = h; showCreateHistory(); }).catch(() => {});
 }
 function closeCreateForm() {
@@ -1030,6 +1034,9 @@ $("#btn-new").onclick = openCreateForm;
 $("#home-new").onclick = () => { openCreateNext = true; location.hash = "projects"; };
 $("#btn-cancel").onclick = closeCreateForm;
 $("#cp-back").onclick = resetCreateProgress;
+// make a vault item without leaving the create form; it shows up (and can be
+// ticked) as soon as the dialog saves, whether or not any project is chosen
+$("#create-vault-new").onclick = () => openItemDialog(null, { after: refreshVault });
 $("#git-toggle").onchange = (e) => { $("#git-fields").hidden = !e.target.checked; };
 $("#src-mode").addEventListener("change", syncSrcMode);
 
@@ -1760,10 +1767,10 @@ function renderPending() {
   if (!el) return;
   if (!netModel.pending.length) { el.innerHTML = ""; return; }
   el.innerHTML = netModel.pending.map((p) => {
-    // a credential defaults to a short window: "forever" would bind the secret to this host for good;
-    // a vault read defaults to this one time
-    const dflt = p.fetch ? "once" : p.credential ? "5m" : "forever";
-    const opts = DUR_OPTS.map(([v, l]) => `<option value="${v}"${v === dflt ? " selected" : ""}>${l}</option>`).join("");
+    // clicking a duration is the answer itself; "forever" would bind a
+    // credential to the host for good, so it is not offered for one
+    const opts = DUR_OPTS.filter(([v]) => !(p.credential && v === "forever"))
+      .map(([v, l]) => `<button class="durbtn" data-approve-duration="${v}" title="Allow for ${l}">${l}</button>`).join("");
     // a credential ask: send this proxy secret to a host none of its bindings name?
     const cred = p.fetch
       ? `<div class="approval-cred">🔒 wants to read <b>${escapeHtml(p.fetch.name)}</b> from the vault — the VM gets the real value</div>`
@@ -1777,8 +1784,7 @@ function renderPending() {
         <span class="host">${escapeHtml(p.host)}</span><span class="path">${escapeHtml(p.path)}</span>
       </div>
       <div class="approval-actions">
-        <select class="dur">${opts}</select>
-        <button class="primary" data-approve>Allow</button>
+        <span class="hint">Allow for</span>${opts}
         <button class="danger" data-block>Block</button>
       </div>
     </div>`;
@@ -2058,14 +2064,14 @@ function renderHeaders() {
 function bindNetHandlers(el) {
   el.addEventListener("click", async (e) => {
     const appr = e.target.closest(".approval");
-    if (appr && e.target.closest("[data-approve]")) {
-      return sendApproval(appr.dataset.aid, "allow", appr.querySelector(".dur").value);
+    const allow = e.target.closest("[data-approve-duration]");
+    if (appr && allow) {
+      return sendApproval(appr.dataset.aid, "allow", allow.dataset.approveDuration);
     }
     if (appr && e.target.closest("[data-block]")) {
-      const d = appr.querySelector(".dur").value; // once ⇒ deny this only; else a permanent block rule
       // a credential block refuses this request only (no rule) — the host itself stays reachable
       const cred = appr.classList.contains("cred");
-      return sendApproval(appr.dataset.aid, "block", d === "once" || cred ? "once" : "forever");
+      return sendApproval(appr.dataset.aid, "block", cred ? "once" : "forever");
     }
     const tab = e.target.closest("[data-net-tab]");
     if (tab) return setNetTab(tab.dataset.netTab);

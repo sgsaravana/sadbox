@@ -193,7 +193,11 @@
           </fieldset>
           <label>Extra apt packages <input name="apps" placeholder="python3, htop (optional)"></label>
 
-          <fieldset><legend>Vault items</legend><div id="create-secrets" class="checks"></div></fieldset>
+          <fieldset>
+            <legend>Vault items <button type="button" id="create-vault-new" class="mini">+ New item</button></legend>
+            <div id="create-secrets" class="checks"></div>
+            <p class="hint">Items are listed even before a project uses them; tick one to give this project access.</p>
+          </fieldset>
           <div class="row">
             <button type="submit" id="btn-create" class="primary">Create</button>
             <button type="button" id="btn-cancel">Cancel</button>

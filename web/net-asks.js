@@ -24,14 +24,15 @@
   .ask-note b { color: #f5b544; }
   .ask-row { display: flex; align-items: center; gap: 6px; margin-top: 11px; flex-wrap: wrap; }
   .ask-row label { color: #8a8aa0; font-size: 12px; }
-  .ask select, .ask button { font: inherit; font-size: 12px; border-radius: 7px; padding: 5px 10px; cursor: pointer; }
-  .ask select { background: #0e0e15; color: #e6e6ef; border: 1px solid #2a2a35; }
-  .ask .allow { background: #5b8cff; color: #fff; border: 1px solid #5b8cff; font-weight: 600; }
+  .ask button { font: inherit; font-size: 12px; border-radius: 7px; padding: 5px 10px; cursor: pointer; }
+  .ask .durbtn { background: #182238; color: #cbd5e1; border: 1px solid #2f4a7a; }
+  .ask .durbtn:hover { border-color: #5b8cff; }
   .ask .deny { background: #1a1a24; color: #ffb4b4; border: 1px solid #5a2a2e; }
   .ask .always { margin-left: auto; background: none; border: 0; color: #8a8aa0; text-decoration: underline; padding: 5px 2px; }
   .ask button:hover { filter: brightness(1.15); } .ask button:disabled { opacity: .5; cursor: default; }
   `;
-  const DURATIONS = [["once", "just this request"], ["1m", "1 minute"], ["5m", "5 minutes"], ["30m", "30 minutes"], ["60m", "1 hour"], ["forever", "always"]];
+  // Clicking a duration IS the answer; there is no separate Allow button.
+  const DURATIONS = [["once", "once"], ["1m", "1m"], ["5m", "5m"], ["30m", "30m"], ["60m", "1h"], ["forever", "always"]];
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
   window.sadboxNetAsks = function ({ projectId, notify = () => {}, onAnswered = () => {} }) {
@@ -41,12 +42,11 @@
     const answered = new Set(); // ids answered from this tab (no "answered elsewhere" notice)
 
     function render() {
-      // keep each card's chosen duration across re-renders
-      const chosen = {};
-      for (const el of box.querySelectorAll(".ask")) chosen[el.dataset.id] = el.querySelector("select").value;
       box.innerHTML = [...asks.values()].map((p) => {
         const plain = p.scheme === "https" ? "" : " (not encrypted)";
-        const opts = DURATIONS.map(([v, l]) => `<option value="${v}"${v === (chosen[p.id] || "5m") ? " selected" : ""}>${l}</option>`).join("");
+        // "always" is omitted for a credential: it would bind the secret to the host for good
+        const opts = DURATIONS.filter(([v]) => !(p.credential && v === "forever"))
+          .map(([v, l]) => `<button class="durbtn" data-act="allow" data-duration="${v}" title="Allow ${v === "once" ? "just this request" : "for " + l}">${l}</button>`).join("");
         // a credential ask: the request carries a proxy secret's placeholder to a host it isn't bound to
         const head = p.credential ? `🔑 Secret requested` : `⚠ Network request blocked`;
         const note = p.credential
@@ -60,8 +60,7 @@
           <div class="ask-req"><b>${esc(p.method)}</b> ${esc(p.scheme)}://${esc(p.host)}${esc(p.path)}${plain}</div>
           <div class="ask-note">${note}</div>
           <div class="ask-row">
-            <button class="allow" data-act="allow">Allow</button>
-            <label>for</label><select>${opts}</select>
+            <label>Allow for</label>${opts}
             <button class="deny" data-act="deny">Deny</button>
             ${always}
           </div>
@@ -86,10 +85,10 @@
       const card = btn.closest(".ask"), id = card.dataset.id, p = asks.get(id);
       const act = btn.dataset.act;
       // deny = this request only; "always block" writes a permanent block rule
-      const body = act === "allow" ? { action: "allow", duration: card.querySelector("select").value }
+      const body = act === "allow" ? { action: "allow", duration: btn.dataset.duration }
                  : act === "block" ? { action: "block", duration: "forever" }
                  : { action: "block", duration: "once" };
-      for (const b of card.querySelectorAll("button, select")) b.disabled = true;
+      for (const b of card.querySelectorAll("button")) b.disabled = true;
       try {
         const r = await fetch(`/api/projects/${projectId}/net/approvals/${id}`, {
           method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
@@ -98,7 +97,7 @@
         answered.add(id); asks.delete(id); render();
         notify(act === "allow" ? `Allowed ${p.host}` : `Denied ${p.host}`, act !== "allow");
       } catch (err) {
-        for (const b of card.querySelectorAll("button, select")) b.disabled = false;
+        for (const b of card.querySelectorAll("button")) b.disabled = false;
         notify(`Could not answer: ${err.message}`, true);
       }
       onAnswered();
