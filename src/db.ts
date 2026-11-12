@@ -87,6 +87,7 @@ if (refsOldTable("secrets") || refsOldTable("project_secrets")) {
     project_id TEXT REFERENCES projects(id),
     name TEXT NOT NULL,
     value_enc TEXT NOT NULL,
+    note TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
   db.run(`INSERT INTO secrets_fix SELECT id, project_id, name, value_enc, created_at FROM secrets`);
@@ -115,6 +116,7 @@ db.run(`
     project_id TEXT REFERENCES projects(id),
     name TEXT NOT NULL,
     value_enc TEXT NOT NULL,
+    note TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
 db.run(`
@@ -135,6 +137,7 @@ db.run(`
 // ask_on_fetch: a fetch waits for the owner's approval
 // swap_url / swap_body: a proxy item is swapped in the URL / the request body
 //   too, not only in headers (docs/research/12, V3–V4)
+let addedNote = false;
 for (const [col, ddl] of [
   ["delivery", "delivery TEXT NOT NULL DEFAULT 'env'"],
   ["kind", "kind TEXT NOT NULL DEFAULT 'secret'"],
@@ -144,9 +147,13 @@ for (const [col, ddl] of [
   ["updated_at", "updated_at TEXT"],
   ["swap_url", "swap_url INTEGER NOT NULL DEFAULT 0"],
   ["swap_body", "swap_body INTEGER NOT NULL DEFAULT 0"],
+  ["note", "note TEXT"],
 ]) {
   const has = db.query<{ name: string }, []>("PRAGMA table_info(secrets)").all().some((c) => c.name === col);
-  if (!has) db.run(`ALTER TABLE secrets ADD COLUMN ${ddl}`);
+  if (!has) {
+    db.run(`ALTER TABLE secrets ADD COLUMN ${ddl}`);
+    if (col === "note") addedNote = true;
+  }
 }
 
 /** Secrets → vault items (docs/research/12, V9). Idempotent, run at every start.
@@ -169,6 +176,18 @@ export function migrateToVault(): void {
   })();
 }
 migrateToVault();
+// First run with `note`: label existing git-token items with the one project
+// they belong to, so duplicates made before notes existed are told apart (and
+// the label survives that project being destroyed). Only once, so clearing a
+// note later is not undone.
+if (addedNote) {
+  db.run(`UPDATE secrets SET note = 'for ' || (
+            SELECT p.name FROM project_secrets ps JOIN projects p ON p.id = ps.project_id
+            WHERE ps.secret_id = secrets.id LIMIT 1)
+          WHERE note IS NULL
+            AND name IN ('GITHUB_TOKEN', 'GITLAB_TOKEN', 'GIT_TOKEN')
+            AND (SELECT COUNT(*) FROM project_secrets ps WHERE ps.secret_id = secrets.id) = 1`);
+}
 // One placeholder per (project, proxy secret), stable across restarts and
 // rebuilds, different in every VM — a placeholder copied out of one VM is
 // worthless from another. No cascade from projects: project rows are soft-

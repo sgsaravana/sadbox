@@ -52,6 +52,15 @@ describe("gitTokenItem", () => {
     const f = createItem({ name: "GIT_TOKEN", value: "t", mode: "fetch" });
     expect(gitTokenItem("https://git.example.com/x.git", "t")).not.toBe(f.id);
   });
+
+  test("a note labels the token; a reused item without one gets it, a set one is kept", () => {
+    const id = gitTokenItem(GH, "ghp_note");
+    expect(getItem(id).note).toBe("");
+    expect(gitTokenItem(GH, "ghp_note", "for my-app")).toBe(id);
+    expect(getItem(id).note).toBe("for my-app");
+    gitTokenItem(GH, "ghp_note", "for someone-else");
+    expect(getItem(id).note).toBe("for my-app");
+  });
 });
 
 describe("gitTokenForCreate", () => {
@@ -60,6 +69,11 @@ describe("gitTokenForCreate", () => {
     expect(gitTokenForCreate(GH, "ghp_one", [chosen.id])).toBe(chosen.id);
     expect(() => gitTokenForCreate(GH, "ghp_two", [chosen.id])).toThrow(/also given vault item GITHUB_TOKEN/);
     expect(gitTokenForCreate(GH, "ghp_two", [])).not.toBe(chosen.id);
+  });
+
+  test("names the project on a token it makes", () => {
+    const id = gitTokenForCreate(GH, "ghp_note", [], "my-app");
+    expect(getItem(id)).toMatchObject({ name: "GITHUB_TOKEN", note: "for my-app" });
   });
 });
 

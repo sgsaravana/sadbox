@@ -51,6 +51,7 @@ export interface Binding {
 
 export interface ItemInput {
   name: string;
+  note?: string;          // a short label (which project it was made for), shown in the UI
   value: string;
   kind?: Kind;            // default secret
   type?: ValueType;       // default string
@@ -75,6 +76,7 @@ interface ItemRow {
   ask_on_fetch: number;
   swap_url: number;
   swap_body: number;
+  note: string | null;
   value_enc: string;
   created_at: string;
   updated_at: string | null;
@@ -97,6 +99,7 @@ function view(r: ItemRow) {
     askOnFetch: !!r.ask_on_fetch,
     swapUrl: !!r.swap_url,
     swapBody: !!r.swap_body,
+    note: r.note ?? "",
     ...(r.kind === "variable" ? { value: decrypt(r.value_enc) } : {}),
     bindings: listBindings(r.id),
     projectIds: projectsOf(r.id),
@@ -141,6 +144,13 @@ function checkedValue(type: ValueType, value: unknown): string {
   return value;
 }
 
+/** A note is a one-line label, not free-form text: trim it, keep it short. */
+function cleanNote(note: unknown): string | null {
+  if (note == null) return null;
+  const s = String(note).replace(/\s+/g, " ").trim().slice(0, 200);
+  return s || null;
+}
+
 function checkedShape(o: { name: string; kind: Kind; type: ValueType; mode: Mode; inEnv: boolean }) {
   if (!ITEM_NAME.test(o.name)) throw new Error("name must be an env-var style identifier (A-Z, 0-9, _)");
   if (o.kind !== "variable" && o.kind !== "secret") throw new Error("kind must be variable or secret");
@@ -177,6 +187,7 @@ export function createItem(input: ItemInput): ItemView {
   const name = String(input.name ?? "").trim();
   checkedShape({ name, kind, type, mode, inEnv });
   const value = checkedValue(type, input.value);
+  const note = cleanNote(input.note);
   const bindings = (input.bindings ?? []).map(validBinding);
   if (mode === "proxy" && !bindings.length) throw new Error("a proxy item needs at least one host it may be sent to");
   const projectIds = [...new Set(input.projectIds ?? [])];
@@ -186,10 +197,10 @@ export function createItem(input: ItemInput): ItemView {
   const id = crypto.randomUUID().slice(0, 8);
   db.transaction(() => {
     db.query(
-      `INSERT INTO secrets (id, project_id, name, value_enc, delivery, kind, value_type, in_env, ask_on_fetch, swap_url, swap_body, updated_at)
-       VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+      `INSERT INTO secrets (id, project_id, name, value_enc, delivery, kind, value_type, in_env, ask_on_fetch, swap_url, swap_body, note, updated_at)
+       VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
     ).run(id, name, encrypt(value), mode, kind, type, inEnv ? 1 : 0, (input.askOnFetch ?? kind === "secret") ? 1 : 0,
-      input.swapUrl ? 1 : 0, input.swapBody ? 1 : 0);
+      input.swapUrl ? 1 : 0, input.swapBody ? 1 : 0, note);
     for (const b of bindings) insertBinding(id, b);
     const grant = db.query("INSERT INTO project_secrets (project_id, secret_id, status) VALUES (?, ?, 'pending')");
     for (const pid of projectIds) grant.run(pid, id);
@@ -221,15 +232,16 @@ export async function updateItem(id: string, patch: ItemPatch): Promise<ItemView
   const oldValue = decrypt(r.value_enc);
   // a new type is checked against the value it will have
   const value = checkedValue(type, patch.value ?? oldValue);
+  const note = patch.note !== undefined ? cleanNote(patch.note) : r.note;
   if (mode === "proxy" && !listBindings(id).length) throw new Error("a proxy item needs at least one host it may be sent to — add one first");
   if (name !== r.name) checkNamesFree(name, projectsOf(id), id);
 
   db.query(
     `UPDATE secrets SET name = ?, kind = ?, value_type = ?, delivery = ?, in_env = ?, ask_on_fetch = ?,
-       swap_url = ?, swap_body = ?, value_enc = ?, updated_at = datetime('now') WHERE id = ?`,
+       swap_url = ?, swap_body = ?, note = ?, value_enc = ?, updated_at = datetime('now') WHERE id = ?`,
   ).run(name, kind, type, mode, inEnv ? 1 : 0, (patch.askOnFetch ?? !!r.ask_on_fetch) ? 1 : 0,
     (patch.swapUrl ?? !!r.swap_url) ? 1 : 0, (patch.swapBody ?? !!r.swap_body) ? 1 : 0,
-    value === oldValue ? r.value_enc : encrypt(value), id);
+    note, value === oldValue ? r.value_enc : encrypt(value), id);
   // a placeholder is shaped like the value it stands for (prefix, alphabet):
   // a value of another shape gets new ones, so tools sniffing a prefix still accept it
   if (value !== oldValue && prefixOf(value) !== prefixOf(oldValue)) dropItemPlaceholders(id);

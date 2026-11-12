@@ -145,6 +145,17 @@ export function getProject(id: string): ProjectRow | null {
   return db.query<ProjectRow, [string]>("SELECT * FROM projects WHERE id = ?").get(id);
 }
 
+/** An entry in a project's event log (the `events` table), for the create
+ *  progress view: real phases, in order, as the supervisor reaches them. */
+export interface ProjectEvent { id: number; type: string; detail: string; at: string }
+
+/** Events after `after` (an event id), oldest first. */
+export function projectEvents(projectId: string, after = 0, limit = 100): ProjectEvent[] {
+  return db.query<ProjectEvent, [string, number, number]>(
+    "SELECT id, type, detail, at FROM events WHERE project_id = ? AND id > ? ORDER BY id LIMIT ?",
+  ).all(projectId, after, limit);
+}
+
 /** Point the workdir's `origin` at an external remote. Its token, if any, is a
  *  proxy vault item (core/gittoken.ts): git's credential helper signs in with
  *  the placeholder, and the real token never enters the VM. */
@@ -233,6 +244,7 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
     socket: isolated ? { host: openProjectSocket(p.id), guest: config.guestCarrierSocket } : undefined,
     mounts,
   });
+  logEvent(p.id, "vm.ready", "VM booted");
   db.query("UPDATE projects SET history_mounted = ? WHERE id = ?").run(shared ? 1 : 0, p.id);
 
   // a sized workdir volume mounts root-owned — hand it to the agent user
@@ -300,6 +312,7 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
     ]);
     if (setup.exitCode !== 0) throw new Error(`guest setup failed: ${setup.stderr}`);
   }
+  logEvent(p.id, "workdir.ready", empty ? "empty workdir ready" : cloneMode ? "repository cloned" : "source copied in");
 
   // secrets + proxy env source-hooks for the guest's shells (both modes)
   await installShellHooks(ref);
@@ -348,6 +361,7 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   const tmux = await driver.exec(ref, ["tmux", "new-session", "-d",
     "-s", config.tmuxSession, "-c", config.guestWorkdir]);
   if (tmux.exitCode !== 0) throw new Error(`tmux start failed: ${tmux.stderr}`);
+  logEvent(p.id, "terminal.ready", `tmux session ${config.tmuxSession} started`);
 }
 
 export async function createProject(opts: {
@@ -389,7 +403,7 @@ export async function createProject(opts: {
   const token = opts.git?.token?.trim();
   const secretIds = [...new Set(opts.secretIds ?? [])];
   if (gitRemote && token) {
-    const tokenItem = gitTokenForCreate(gitRemote, token, secretIds);
+    const tokenItem = gitTokenForCreate(gitRemote, token, secretIds, name);
     if (!secretIds.includes(tokenItem)) secretIds.push(tokenItem);
   }
   // base_sha/source_branch recorded by provisionVM once the workdir is seeded

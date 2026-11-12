@@ -507,3 +507,26 @@ table.net-log td.rowact .mini { opacity: .55; }
 table.net-log tr:hover td.rowact .mini, table.net-log td.rowact .mini:focus-visible { opacity: 1; }
 .net-tools select { margin: 0; padding: 5px 8px; font-size: 12px; background: #0e0e15; color: var(--text); border: 1px solid var(--border); border-radius: 7px; }
 #net-older { margin-top: 6px; }
+
+/* ---- new project: the form becomes a live create-progress view ---- */
+#create-form.busy > :not(#create-progress) { display: none; }
+#create-form.busy #create-progress { display: block; }
+.create-progress { padding: 2px 0 4px; }
+.cp-head { display: flex; align-items: center; gap: 12px; }
+.cp-what { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cp-what strong { font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cp-elapsed { margin-left: auto; color: var(--dim); font-size: 13px; font-variant-numeric: tabular-nums; }
+.cp-bar { height: 5px; border-radius: 3px; background: var(--border); overflow: hidden; margin: 16px 0 10px; }
+.cp-bar span { display: block; width: 35%; height: 100%; border-radius: 3px; background: var(--accent); animation: cp-slide 1.3s ease-in-out infinite; }
+@keyframes cp-slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(320%); } }
+.cp-log { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow: auto; }
+.cp-log li { display: flex; gap: 10px; padding: 7px 0; border-top: 1px solid var(--border); font-size: 13px; }
+.cp-log li:first-child { border-top: 0; }
+.cp-log .t { color: var(--dim); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.cp-log .ev { min-width: 0; }
+.cp-log .ev strong { font-weight: 500; }
+.cp-log .ev .hint { margin-left: 4px; }
+.cp-error { color: var(--bad); margin: 10px 0 0; white-space: pre-wrap; }
+
+/* vault item: which project(s) a shared-name item (GITHUB_TOKEN) belongs to */
+.vfor { font-size: 12px; color: var(--dim); }

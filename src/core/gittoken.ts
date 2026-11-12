@@ -49,11 +49,16 @@ function ensureBindings(id: string, hosts: string[]) {
 
 /** The vault item for this token (reused when one has the same name and
  *  value, else made), bound to the remote's hosts. Gives no project access. */
-export function gitTokenItem(remote: string, token: string): string {
+export function gitTokenItem(remote: string, token: string, note?: string): string {
   const { name, hosts } = tokenShape(remote);
   const [same] = sameItems(name, token);
-  if (same) { ensureBindings(same, hosts); return same; }
-  const item = createItem({ name, value: token, kind: "secret", mode: "proxy", bindings: hosts.map((host) => ({ host })) });
+  if (same) {
+    ensureBindings(same, hosts);
+    // label a token made before notes existed, without touching one already set
+    if (note && !getItem(same).note) db.query("UPDATE secrets SET note = ? WHERE id = ? AND note IS NULL").run(note, same);
+    return same;
+  }
+  const item = createItem({ name, note, value: token, kind: "secret", mode: "proxy", bindings: hosts.map((host) => ({ host })) });
   logEvent(null, "vault.git", `${name} made from a git remote's token (${hosts.join(", ")})`);
   return item.id;
 }
@@ -62,16 +67,19 @@ export function gitTokenItem(remote: string, token: string): string {
  *  token's item, to add to them. One of the chosen items with the token's name
  *  stands in for it when it holds the same token; a different one is refused
  *  (a project has one item per name). */
-export function gitTokenForCreate(remote: string, token: string, itemIds: string[]): string {
+export function gitTokenForCreate(remote: string, token: string, itemIds: string[], projectName?: string): string {
   const { name, hosts } = tokenShape(remote);
   const chosen = itemIds.map((id) => db.query<ItemRow & { name: string }, [string]>("SELECT id, name, value_enc FROM secrets WHERE id = ?").get(id))
     .find((r) => r?.name === name);
   if (chosen) {
     if (decrypt(chosen.value_enc) !== token) throw new Error(`the project is also given vault item ${name}, holding another token — choose one of them`);
     ensureBindings(chosen.id, hosts);
+    if (projectName && !getItem(chosen.id).note) {
+      db.query("UPDATE secrets SET note = ? WHERE id = ? AND note IS NULL").run(`for ${projectName}`, chosen.id);
+    }
     return chosen.id;
   }
-  return gitTokenItem(remote, token);
+  return gitTokenItem(remote, token, projectName ? `for ${projectName}` : undefined);
 }
 
 /** Give a project this token for its remote. The project's item of that name
@@ -94,7 +102,8 @@ export async function setProjectGitToken(projectId: string, remote: string, toke
     }
   }
   if (current) await setItemProjects(current.id, getItem(current.id).projectIds.filter((p) => p !== projectId));
-  const id = gitTokenItem(remote, token);
+  const project = getProject(projectId);
+  const id = gitTokenItem(remote, token, project ? `for ${project.name}` : undefined);
   await setItemProjects(id, [...new Set([...getItem(id).projectIds, projectId])]);
   logEvent(projectId, "vault.git", `${name} for ${remoteHost(remote)}`);
   return id;

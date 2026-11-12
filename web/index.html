@@ -195,9 +195,28 @@
 
           <fieldset><legend>Vault items</legend><div id="create-secrets" class="checks"></div></fieldset>
           <div class="row">
-            <button type="submit" class="primary">Create</button>
+            <button type="submit" id="btn-create" class="primary">Create</button>
             <button type="button" id="btn-cancel">Cancel</button>
             <span id="create-status"></span>
+          </div>
+
+          <!-- Replaces the form while a project is being created. The
+               supervisor's own event log drives it (see /api/projects/:id/events). -->
+          <div id="create-progress" class="create-progress" hidden aria-live="polite">
+            <div class="cp-head">
+              <span class="spinner"></span>
+              <div class="cp-what">
+                <strong id="cp-title">Creating…</strong>
+                <div id="cp-phase" class="hint">Starting…</div>
+              </div>
+              <span id="cp-elapsed" class="cp-elapsed">0:00</span>
+            </div>
+            <div class="cp-bar" role="progressbar" aria-label="Creating the project"><span></span></div>
+            <ol id="cp-log" class="cp-log"></ol>
+            <p id="cp-error" class="cp-error" hidden></p>
+            <div class="row" id="cp-actions" hidden>
+              <button type="button" id="cp-back">Back to the form</button>
+            </div>
           </div>
         </form>
 
@@ -320,6 +339,9 @@
           <select name="type"><option value="string">string</option><option value="number">number</option><option value="json">json</option></select>
         </label>
       </div>
+      <label>Note <span class="hint">— optional, shown beside the name (e.g. which project it is for)</span>
+        <input name="note" maxlength="200" placeholder="for my-app">
+      </label>
       <label>Value
         <span class="row input-with-btn">
           <input name="value" autocomplete="off" spellcheck="false">

@@ -290,6 +290,16 @@ function projectChips(s) {
   if (!s.projectIds.length) return `<span class="bnote">no project can use it</span>`;
   return s.projectIds.map((id) => `<a class="pchip" href="#project/${id}">${escapeHtml(projectNames[id] || id)}</a>`).join("");
 }
+/** "my-app, other-app" — the label that tells two GITHUB_TOKENs apart. */
+function projectLabelOf(s) {
+  if (!s.projectIds.length) return "";
+  return s.projectIds.map((id) => projectNames[id] || id).join(", ");
+}
+/** What to show beside the name: its note (what it was made for), or — for an
+ *  older item without one — the project(s) using it now. */
+function itemForLabel(s) {
+  return s.note || (s.projectIds.length ? `for ${projectLabelOf(s)}` : "");
+}
 
 // projects that may fetch an item without being asked (an approval answered
 // with a window or "always"); ✕ takes that back
@@ -311,8 +321,12 @@ async function refreshVault() {
   [vaultCache] = await Promise.all([api("/api/vault"), loadProjectNames()]);
   renderVaultList();
   $("#create-secrets").innerHTML = vaultCache.length
-    ? vaultCache.map((s) =>
-        `<label><input type="checkbox" name="secret" value="${s.id}">${escapeHtml(s.name)} <span class="hint">· ${s.kind}${s.mode === "proxy" ? ", via proxy" : ""}</span></label>`).join("")
+    ? vaultCache.map((s) => {
+        const label = itemForLabel(s);
+        return `<label><input type="checkbox" name="secret" value="${s.id}">${escapeHtml(s.name)}` +
+          (label ? ` <span class="hint">${escapeHtml(label)}</span>` : "") +
+          ` <span class="hint">· ${s.kind}${s.mode === "proxy" ? ", via proxy" : ""}</span></label>`;
+      }).join("")
     : `<span class="empty">none in the vault yet</span>`;
 }
 
@@ -324,6 +338,7 @@ function renderVaultList() {
       <div class="vitem-card" data-item="${s.id}">
         <div class="vrow">
           <span class="sec-name">${escapeHtml(s.name)}</span>${kindBadge(s)}${modeBadges(s)}
+          ${itemForLabel(s) ? `<span class="vfor" title="The project it was made for, or the project(s) that may use it now">${escapeHtml(itemForLabel(s))}</span>` : ""}
           <span class="vactions">
             <button type="button" class="mini" data-edit-item="${s.id}">Edit</button>
             <button type="button" class="mini danger" data-del-item="${s.id}" data-name="${escapeHtml(s.name)}">Delete</button>
@@ -395,6 +410,7 @@ async function openItemDialog(item, opts = {}) {
   $("#vitem-save").textContent = editing ? "Save" : "Create";
   $("#vitem-status").textContent = "";
   vform.elements["name"].value = item?.name ?? "";
+  vform.elements["note"].value = item?.note ?? "";
   vform.kind.value = item?.kind ?? "secret";
   vform.type.value = item?.type ?? "string";
   vform.mode.value = item?.mode ?? "fetch";
@@ -444,7 +460,8 @@ vform.onsubmit = async (e) => {
   const status = $("#vitem-status");
   const value = vform.type.value === "json" ? vform.valueJson.value : vform.value.value;
   const fields = {
-    name: vform.elements["name"].value.trim(), kind: vform.kind.value, type: vform.type.value, mode: vform.mode.value,
+    name: vform.elements["name"].value.trim(), note: vform.elements["note"].value.trim(),
+    kind: vform.kind.value, type: vform.type.value, mode: vform.mode.value,
     inEnv: vform.mode.value === "fetch" && vform.inEnv.checked, askOnFetch: vform.askOnFetch.checked,
     swapUrl: vform.swapUrl.checked, swapBody: vform.swapBody.checked,
   };
@@ -888,7 +905,114 @@ function showCreateHistory() {
 }
 $("#create-form").name.addEventListener("input", showCreateHistory);
 
+// ---- create progress: the form turns into a live view of the supervisor's
+// event log while the project is being made (POST /api/projects is long) ----
+let createBusy = false;
+let createWatch = null;
+const CREATE_PHASES = {
+  image: "Preparing the VM image",
+  history: "Bringing in agent history",
+  "create.start": "Creating the project",
+  "vm.ready": "VM booted",
+  "proxy.configure": "Connecting the egress proxy",
+  "vault.inject": "Preparing vault access",
+  "workdir.ready": "Files are in place",
+  "agent.update": "Updating the agents",
+  "app.install": "Installing extra packages",
+  "terminal.ready": "Starting the terminal",
+  "create.done": "Done",
+};
+const normProjectName = (s) => String(s).toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
+const elapsedText = (ms) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+};
+const eventTime = (at) => {
+  const d = new Date(String(at).includes("T") ? at : String(at).replace(" ", "T") + "Z");
+  return Number.isNaN(d.getTime()) ? "" : d.toTimeString().slice(0, 8);
+};
+
+function resetCreateProgress() {
+  createBusy = false;
+  createWatch?.stop();
+  createWatch = null;
+  const form = $("#create-form");
+  form.classList.remove("busy");
+  form.removeAttribute("aria-busy");
+  $("#create-progress").hidden = true;
+  $("#cp-log").innerHTML = "";
+  $("#cp-phase").textContent = "Starting…";
+  $("#cp-elapsed").textContent = "0:00";
+  $("#cp-error").hidden = true;
+  $("#cp-error").textContent = "";
+  $("#cp-actions").hidden = true;
+  const btn = $("#btn-create");
+  btn.disabled = false;
+  btn.textContent = "Create";
+}
+
+function startCreateProgress(name, mode, startedAt) {
+  createBusy = true;
+  const form = $("#create-form");
+  form.classList.add("busy");
+  form.setAttribute("aria-busy", "true");
+  $("#create-progress").hidden = false;
+  $("#cp-title").textContent = `Creating ${name}`;
+  $("#cp-phase").textContent = mode === "git"
+    ? "Preparing the image and cloning the repository…"
+    : "Preparing the image and booting the VM…";
+  $("#cp-elapsed").textContent = "0:00";
+  $("#cp-log").innerHTML = "";
+  $("#cp-error").hidden = true;
+  $("#cp-error").textContent = "";
+  $("#cp-actions").hidden = true;
+  const btn = $("#btn-create");
+  btn.disabled = true;
+  btn.textContent = "Creating…";
+
+  let stopped = false, timer = null, lastId = 0, id = null;
+  const tick = setInterval(() => { $("#cp-elapsed").textContent = elapsedText(Date.now() - startedAt); }, 500);
+  const phase = (text) => { $("#cp-phase").textContent = text; };
+  const addEvent = (ev) => {
+    const li = document.createElement("li");
+    const t = document.createElement("span");
+    t.className = "t";
+    t.textContent = eventTime(ev.at);
+    const d = document.createElement("span");
+    d.className = "ev";
+    const label = CREATE_PHASES[ev.type] || ev.type;
+    d.innerHTML = `<strong>${escapeHtml(label)}</strong>` + (ev.detail ? ` <span class="hint">${escapeHtml(ev.detail)}</span>` : "");
+    li.append(t, d);
+    $("#cp-log").append(li);
+    $("#cp-log").scrollTop = $("#cp-log").scrollHeight;
+    phase(label);
+  };
+  const poll = async () => {
+    if (stopped) return;
+    try {
+      if (!id) {
+        // the row appears as soon as the supervisor starts provisioning
+        const list = await api("/api/projects");
+        const found = list.find((x) => normProjectName(x.name) === name && x.state === "creating")
+          || list.find((x) => normProjectName(x.name) === name);
+        if (found) { id = found.id; phase("Booting the VM…"); }
+      } else {
+        const events = await api(`/api/projects/${encodeURIComponent(id)}/events?after=${lastId}`);
+        for (const ev of events) { lastId = ev.id; addEvent(ev); }
+      }
+    } catch {}
+    if (!stopped) timer = setTimeout(poll, id ? 700 : 600);
+  };
+  poll();
+  createWatch = {
+    stop() { stopped = true; clearInterval(tick); clearTimeout(timer); },
+    phase,
+  };
+}
+
 function openCreateForm() {
+  if (createBusy) return; // one create at a time
+  resetCreateProgress();
   $("#create-form").hidden = false;
   $("#projects").hidden = true;
   $("#btn-new").hidden = true;
@@ -897,6 +1021,7 @@ function openCreateForm() {
   api("/api/history").then((h) => { historyCache = h; showCreateHistory(); }).catch(() => {});
 }
 function closeCreateForm() {
+  if (createBusy) return;
   $("#create-form").hidden = true;
   $("#projects").hidden = false;
   $("#btn-new").hidden = false;
@@ -904,6 +1029,7 @@ function closeCreateForm() {
 $("#btn-new").onclick = openCreateForm;
 $("#home-new").onclick = () => { openCreateNext = true; location.hash = "projects"; };
 $("#btn-cancel").onclick = closeCreateForm;
+$("#cp-back").onclick = resetCreateProgress;
 $("#git-toggle").onchange = (e) => { $("#git-fields").hidden = !e.target.checked; };
 $("#src-mode").addEventListener("change", syncSrcMode);
 
@@ -988,47 +1114,57 @@ $("#settings-form").onsubmit = async (e) => {
 
 $("#create-form").onsubmit = async (e) => {
   e.preventDefault();
-  const f = new FormData(e.target);
-  const status = $("#create-status");
+  if (createBusy) return;
+  const form = e.target;
+  const f = new FormData(form);
   const mode = f.get("srcMode") || "local";
   let sourcePath, git;
   let empty = false;
   if (mode === "empty") {
     // nothing to seed: repositories are cloned from the terminal
     empty = true;
-    status.textContent = "Creating (boot, a few seconds)…";
   } else if (mode === "git") {
     // clone-in-VM mode: the git remote IS the source; no local folder
     git = { remote: (f.get("cloneRemote") || "").trim(), token: (f.get("cloneToken") || "").trim() || undefined };
-    status.textContent = "Creating (boot + git clone, a few seconds)…";
   } else {
     sourcePath = (f.get("sourcePath") || "").trim();
     git = f.get("gitEnabled") && f.get("gitRemote")
       ? { remote: f.get("gitRemote").trim(), token: (f.get("gitToken") || "").trim() || undefined }
       : undefined;
-    status.textContent = "Creating (boot + copy-in, a few seconds)…";
   }
+
+  // The form turns into progress immediately; the POST below can take minutes.
+  startCreateProgress(normProjectName(f.get("name")), mode, Date.now());
   try {
-    await api("/api/projects", {
+    const created = await api("/api/projects", {
       method: "POST",
       body: {
         name: f.get("name"),
         sourcePath, // undefined ⇒ backend clones the git remote instead
         empty,
         apps: (f.get("apps") || "").split(",").map((s) => s.trim()).filter(Boolean),
-        secretIds: [...e.target.querySelectorAll("input[name=secret]:checked")].map((c) => c.value),
+        secretIds: [...form.querySelectorAll("input[name=secret]:checked")].map((c) => c.value),
         git,
       },
     });
-    status.textContent = "";
-    e.target.reset();
+    createWatch?.stop();
+    createBusy = false;
+    resetCreateProgress();
+    form.reset();
     $("#git-fields").hidden = true;
     syncSrcMode();
+    showCreateHistory();
+    refreshProjects().catch(() => {});
     closeCreateForm();
-    refreshProjects();
-    refreshNavTree();
+    // select it: route() opens the detail view and marks it in the nav
+    location.hash = `project/${created.id}`;
   } catch (err) {
-    status.textContent = err.message;
+    // keep the form's values; Back returns to them
+    createWatch?.stop();
+    $("#cp-phase").textContent = "Could not create the project";
+    $("#cp-error").textContent = err.message;
+    $("#cp-error").hidden = false;
+    $("#cp-actions").hidden = false;
   }
 };
 
