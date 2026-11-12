@@ -1111,6 +1111,23 @@ launchctl bootout gui/$(id -u)/dev.sadbox.supervisor             # stop (running
 rm ~/Library/LaunchAgents/dev.sadbox.supervisor.plist            # remove for good
 ```
 
+The commands are long enough to deserve aliases. Put these in `~/.zshrc`, then
+`source ~/.zshrc` (or open a new terminal):
+
+```sh
+# launchd supervisor: start / stop / restart / status / logs
+alias sadbox-start='launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.sadbox.supervisor.plist 2>/dev/null || launchctl kickstart -k gui/$(id -u)/dev.sadbox.supervisor'
+alias sadbox-stop='launchctl bootout gui/$(id -u)/dev.sadbox.supervisor 2>/dev/null || true'
+alias sadbox-restart='launchctl kickstart -k gui/$(id -u)/dev.sadbox.supervisor 2>/dev/null || launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.sadbox.supervisor.plist'
+alias sadbox-status='launchctl print gui/$(id -u)/dev.sadbox.supervisor | head -20'
+alias sadbox-logs='tail -f ~/Library/Logs/sadbox.log'
+```
+
+`sadbox-start` also works when the job is already loaded (it restarts it), and
+`sadbox-restart` starts it when it was stopped. Stopping or restarting the
+supervisor leaves running VMs alone — only the UI, egress proxy, approvals and
+port forwards go down.
+
 - Keep the `PATH` line: a LaunchAgent does not inherit your shell's environment,
   and `docker`, `colima`, `vfkit` and `openssl` are looked up on it. On an Intel
   Mac Homebrew is in `/usr/local/bin`; `/opt/homebrew/bin` only matters if this
