@@ -1,7 +1,7 @@
 import { join } from "path";
 import { homedir } from "os";
 
-export const VERSION = "0.4.4";
+export const VERSION = "0.5.0";
 
 export const config = {
   port: Number(process.env.SADBOX_PORT ?? 7070),
