@@ -1,9 +1,9 @@
 # 14 — Running sadbox on an Intel Mac
 
-> **Status: built 2026-11-11** — `src/driver/vz/` (vfkit over Virtualization.framework), the
+> **Status: shipped in v0.5.0 (2026-11-12)** — `src/driver/vz/` (vfkit over Virtualization.framework), the
 > driver selection, `setup`/`doctor`, `install.sh`/Homebrew and the README. Tested with a stand-in
-> VMM (`test/fake-vfkit.ts`) and against real VMs on Apple silicon; the Intel amd64 pair
-> (Debian `vmlinuz` + amd64 disk) still needs a run on Intel hardware. See "As built" below.
+> VMM (`test/fake-vfkit.ts`), against real VMs on Apple silicon, and by hand on an Intel Mac with
+> the amd64 pair (Debian `vmlinuz` + amd64 disk). See "As built" below.
 > Research verdict, 2026-11-11: **possible, and smaller than expected** — but it is a
 > *third driver*, not a port of either existing one. The natural backend is
 > **`vfkit` over Apple's Virtualization.framework**, which supports Intel hosts and gives us the
@@ -163,8 +163,8 @@ driver with the transport swapped.
 
 1. **Kernel/device compatibility.** Solved for arm64: CH's Image does not start under VZ at all;
    Debian's kernel does, with the vsock/virtio modules loaded from the initramfs. The amd64 pair
-   (`vmlinuz` bzImage + `initrd.img`) is built the same way but has not been booted on Intel
-   hardware yet.
+   (`vmlinuz` bzImage + `initrd.img`) is built the same way, and boots on an Intel Mac (v0.5.0,
+   2026-11-12).
 2. **virtio-fs on Intel hosts.** Apple exposes it on both architectures, but I found no explicit
    Intel data point. Fallback: `sharedMount: false` — history and logins are then copy-in only,
    and the product still works (that is exactly how the KVM driver degrades without `virtiofsd`).
@@ -217,8 +217,8 @@ code and Virtualization.framework path the Intel build uses):
 - Cloud Hypervisor's x86 `bzImage-x86_64` is *not* used either — one kernel strategy per backend is
   simpler, and Debian's amd64 `vmlinuz` is the standard thing VZ on Intel boots.
 
-Not yet proven: the amd64 kernel + disk on Intel hardware, virtio-fs specifically on Intel, and a
-CI job (macOS runners have no Docker; the plan is to build the artifacts on the Linux job and run
+Proven on an Intel Mac with v0.5.0 (2026-11-12): the amd64 kernel + disk. Not yet proven:
+virtio-fs specifically on Intel, and a CI job (macOS runners have no Docker; the plan is to build the artifacts on the Linux job and run
 the VM test on `macos-26-intel`).
 
 ## Sources
