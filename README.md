@@ -37,6 +37,18 @@ through [`vfkit`](https://github.com/crc-org/vfkit) on an Intel Mac, and
   - [CLI](#cli)
 - [Building & releasing](#building--releasing)
 - [How it works](#how-it-works)
+  - [Source, folder and sync](#source-folder-and-sync)
+  - [Terminal and editor](#terminal-and-editor)
+  - [Git in the editor](#git-in-the-editor)
+  - [Approvals while you work](#approvals-while-you-work)
+  - [Agents baked in](#agents-baked-in)
+  - [Vaults](#vaults)
+  - [Agent logins and history](#agent-logins-and-history)
+  - [Git setup and sync-back](#git-setup-and-sync-back)
+  - [Project detail view](#project-detail-view)
+  - [Network proxy and isolation](#network-proxy-and-isolation)
+  - [Port forwards and project links](#port-forwards-and-project-links)
+  - [Sign-in and sessions](#sign-in-and-sessions)
 - [API](#api)
 - [Deploying](#deploying)
   - [Linux: run at boot (systemd)](#linux-run-at-boot-systemd)
@@ -545,6 +557,8 @@ Everything below works the same on all three. Where this section says `container
 exec` (how the supervisor runs a command in a VM), Linux and Intel Macs use the guest agent
 over vsock instead.
 
+### Source, folder and sync
+
 - **Two source modes** at create: **(a) local folder** — `git ls-files
   --exclude-standard` → tar over exec stdin (only gitignored paths excluded, full
   history included; ~2 s for a 100 MB repo), with an optional git remote for
@@ -578,6 +592,9 @@ over vsock instead.
 
   A connected folder is only where work goes: **Rebuild** still re-clones the
   remote.
+
+### Terminal and editor
+
 - **Terminal**: xterm.js ⇄ WS ⇄ a PTY in the VM running `tmux new -A -s main`
   (on a Mac, `container exec -it` under `Bun.spawn({terminal})`; on Linux, the
   guest agent's PTY over vsock). Sessions live in the VM and
@@ -603,6 +620,9 @@ over vsock instead.
   the agent's changes when you return to it. It is an editor, not an IDE — no
   language server, debugger or project-wide search — and it handles UTF-8 text
   files up to 2 MB.
+
+### Git in the editor
+
 - **Git in the editor**: everything below runs `git` inside the VM, on the
   VM's repository, as the VM's git identity (`sadbox project <name>`). Nothing
   here touches your local folder — that is still **Sync back**.
@@ -651,6 +671,9 @@ over vsock instead.
 
   Not there: stashing or pushing a selection, "apply" without removing a
   stash, merge/rebase, history, word-level diff. Use the terminal for those.
+
+### Approvals while you work
+
 - **Approve where you are working**: when something in the VM asks for a host
   no rule covers, the proxy holds the request and a popup appears on the
   terminal and editor tabs with the method, URL and a countdown. **Allow** it
@@ -659,6 +682,9 @@ over vsock instead.
   as soon as you answer; unanswered requests are denied after 2 minutes. The
   same prompts still appear on the project's detail page, and answering in one
   place clears the other.
+
+### Agents baked in
+
 - **Agents baked in**: Claude Code, [omp](https://omp.sh), and
   [opencode](https://opencode.ai) are installed in the base image (plus Bun +
   git + ripgrep + jq). Run `claude`, `omp`, or `opencode` in the terminal. The
@@ -666,6 +692,9 @@ over vsock instead.
   the base image via `/api/toolchain`); the detail view's **Installed tools**
   panel probes the *running VM* itself, so an older VM correctly shows which
   tools it's missing.
+
+### Vaults
+
 - **Vaults** (*Vaults* tab): one list of **variables** and **secrets**, typed
   `string` / `number` / `json`, encrypted at rest (AES-256-GCM) in SQLite. A
   variable's value shows in the list; a secret's shows `••••` and an eye icon
@@ -706,6 +735,9 @@ over vsock instead.
   **+ env file** off on the item. A VM can never reach sadbox's own API — the
   proxy refuses this machine before any rule — so the reveal endpoint is out of
   its reach.
+
+### Agent logins and history
+
 - **Agent logins** (*Agents* tab): sadbox keeps the agents' logins and puts them
   into each VM at create, rebuild and start, so you log in once.
   - **Claude Code** (claude.ai login): run `/login` in any VM. sadbox makes the
@@ -734,6 +766,9 @@ over vsock instead.
   or destroy, but a new VM starts without it. Stored history is
   listed on the Agents page with **Delete** (not while a project of that name
   exists). Logins are never part of it.
+
+### Git setup and sync-back
+
 - **Git setup** (optional, at create or later from the project page): give a
   remote URL + access token and the project's `origin` is pointed there. The
   token becomes a **proxy vault item** the project is given — `GITHUB_TOKEN`
@@ -751,6 +786,9 @@ over vsock instead.
   over exec stdout → fetched into a private repo whose work tree is the folder
   → `git checkout` there writes the changed files; a diffstat is returned to
   the UI.
+
+### Project detail view
+
 - **Detail view**: per project, live CPU %/memory/disk/network/process usage
   (from the VM backend — `container stats` on a Mac, Cloud Hypervisor's
   counters and the guest agent on Linux — plus in-guest probes), workdir size, tmux session/window
@@ -772,6 +810,9 @@ over vsock instead.
   agent history and logins; unsynced work inside the old VM is lost. Rebuild uses the **current** base
   image, so a project created before a tool was baked in (e.g. opencode) picks
   it up on rebuild.
+
+### Network proxy and isolation
+
 - **Network proxy** (egress control): every VM routes its HTTP(S) through the
   supervisor. The proxy MITM-terminates TLS with a per-supervisor CA that each
   VM trusts (installed into the guest trust store + `NODE_EXTRA_CA_CERTS` at
@@ -828,6 +869,8 @@ over vsock instead.
   **Rebuild** them, and `SADBOX_NETWORK=default` opts new projects out. Linux
   VMs are always isolated: the KVM driver has no VM networks to opt into.
 
+### Port forwards and project links
+
 - **Port forwards** (inbound): on the detail view, map a port on the supervisor
   host to a port inside the VM (e.g. host `8080` → VM `8000`) and open the app
   the agent is running at `<supervisor-host>:8080`. Since a VM has no network
@@ -883,6 +926,9 @@ over vsock instead.
     browser on the host, not from the VM: give the API a port forward open
     to anyone and point the UI at that (e.g. `http://localhost:3000`). No
     link needed.
+
+### Sign-in and sessions
+
 - **Sign-in**: the UI and API require a password (one user). A session is an
   HttpOnly, `SameSite=Strict` cookie, valid 30 days; only the login page and
   static scripts are served without one, and that includes the terminal
