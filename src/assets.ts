@@ -11,6 +11,7 @@ import terminalHtml from "../web/terminal.html" with { type: "file" };
 import appJs from "../web/app.js" with { type: "file" };
 import styleCss from "../web/style.css" with { type: "file" };
 import netAsksJs from "../web/net-asks.js" with { type: "file" };
+import vmWarnJs from "../web/vm-warn.js" with { type: "file" };
 import xtermJs from "../node_modules/@xterm/xterm/lib/xterm.js" with { type: "file" };
 import xtermCss from "../node_modules/@xterm/xterm/css/xterm.css" with { type: "file" };
 import addonFitJs from "../node_modules/@xterm/addon-fit/lib/addon-fit.js" with { type: "file" };
@@ -103,6 +104,7 @@ export const staticRoutes: Record<string, [string, string]> = {
   "/app.js": [appJs, "text/javascript"],
   "/style.css": [styleCss, "text/css"],
   "/net-asks.js": [netAsksJs, "text/javascript"],
+  "/vm-warn.js": [vmWarnJs, "text/javascript"],
   "/vendor/xterm.js": [xtermJs, "text/javascript"],
   "/vendor/xterm.css": [xtermCss, "text/css"],
   "/vendor/addon-fit.js": [addonFitJs, "text/javascript"],

@@ -61,6 +61,7 @@
   <script src="/vendor/xterm.js"></script>
   <script src="/vendor/addon-fit.js"></script>
   <script src="/net-asks.js"></script>
+  <script src="/vm-warn.js"></script>
   <script>
     const params = new URLSearchParams(location.search);
     const projectId = params.get("id");
@@ -262,6 +263,8 @@
       notify: (msg, warn) => flash(msg, warn, 2500),
       onAnswered: () => term.focus(),
     });
+    // say so if the VM is above 80% CPU/memory (see /vm-warn.js)
+    sadboxVmWarn({ projectId, name });
   </script>
 </body>
 </html>

@@ -530,3 +530,8 @@ table.net-log tr:hover td.rowact .mini, table.net-log td.rowact .mini:focus-visi
 
 /* vault item: which project(s) a shared-name item (GITHUB_TOKEN) belongs to */
 .vfor { font-size: 12px; color: var(--dim); }
+
+/* approvals: each duration is a button — clicking it is the answer */
+.approval-actions { flex-wrap: wrap; }
+.approval-actions .durbtn { background: #182238; color: #cbd5e1; border: 1px solid #2f4a7a; border-radius: 7px; }
+.approval-actions .durbtn:hover { border-color: var(--accent); }
