@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { config } from "../../config";
 import { kernelImageFiles } from "../../assets";
 import { runBuild } from "../container";
+import { dockerBuildArgs } from "../docker";
 
 /** Pinned like Cloud Hypervisor; the release asset is a signed universal binary
  *  carrying com.apple.security.virtualization. */
@@ -22,7 +23,6 @@ export const VFKIT_SHA256 = "0ed83fc8ca7aa708598835480dba1362406aa7cd1dab3b27464
 
 export const vzDir = () => join(config.dataDir, "vz");
 const binDir = () => join(vzDir(), "bin");
-const docker = () => process.env.SADBOX_DOCKER_BIN || "docker";
 
 /** The VMM binary: SADBOX_VFKIT_BIN, a pinned download, or vfkit on PATH. */
 export function vfkitBin(): string {
@@ -72,7 +72,7 @@ async function buildKernel(): Promise<void> {
   try {
     for (const [name, path] of Object.entries(kernelImageFiles)) await Bun.write(join(ctx, name), Bun.file(path));
     mkdirSync(binDir(), { recursive: true });
-    await runBuild([docker(), "build", "--progress", "plain", "-o", `type=local,dest=${binDir()}`, ctx], "guest kernel build", true);
+    await runBuild(await dockerBuildArgs(["-o", `type=local,dest=${binDir()}`, ctx]), "guest kernel build", true);
   } finally {
     rmSync(ctx, { recursive: true, force: true });
   }

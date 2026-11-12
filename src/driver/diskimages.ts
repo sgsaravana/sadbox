@@ -17,10 +17,10 @@ import { join } from "node:path";
 import { VERSION } from "../config";
 import { diskImageFiles } from "../assets";
 import { runBuild } from "./container";
+import { dockerBin as docker, dockerBuildArgs } from "./docker";
 import type { ExecResult, ImageStore } from "./types";
 
 const RECIPE_LABEL = "sadbox.recipe";
-const docker = () => process.env.SADBOX_DOCKER_BIN || "docker";
 
 export interface DiskMeta {
   image: string;
@@ -80,8 +80,8 @@ export function diskImages(imagesDir: string): DiskImages {
     try {
       for (const [name, path] of Object.entries(diskImageFiles)) await Bun.write(join(ctx, name), Bun.file(path));
       writeFileSync(join(ctx, "image.json"), JSON.stringify(await imageConfig(image)));
-      await runBuild([docker(), "build", "--progress", "plain", "--build-arg", `BASE=${image}`, "--build-arg", `VERSION=${VERSION}`,
-        "-o", `type=local,dest=${out}`, ctx], "disk image build", opts.inherit);
+      await runBuild(await dockerBuildArgs(["--build-arg", `BASE=${image}`, "--build-arg", `VERSION=${VERSION}`,
+        "-o", `type=local,dest=${out}`, ctx]), "disk image build", opts.inherit);
       const [uid, gid] = readFileSync(join(out, "user"), "utf8").trim().split(":").map(Number);
       const meta: DiskMeta = {
         image, recipe, builtAt: new Date().toISOString(), sizeBytes: statSync(join(out, "rootfs.ext4")).size,
@@ -107,7 +107,9 @@ export function diskImages(imagesDir: string): DiskImages {
     },
 
     async build(contextDir, image, recipe, opts) {
-      await runBuild([docker(), "build", "--progress", "plain", "-t", image, "--label", `${RECIPE_LABEL}=${recipe}`, contextDir],
+      // --load: a buildx builder other than docker's own would otherwise keep
+      // the tagged image inside itself, where the disk build cannot see it
+      await runBuild(await dockerBuildArgs(["--load", "-t", image, "--label", `${RECIPE_LABEL}=${recipe}`, contextDir]),
         "base image build", opts?.inherit);
       await buildDisk(image, recipe, opts);
     },

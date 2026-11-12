@@ -101,10 +101,11 @@ On a Mac:
   [`container`](https://github.com/apple/container) CLI — `brew install container`
 - **Intel (2018 or later), macOS 15+**: [`vfkit`](https://github.com/crc-org/vfkit)
   (`brew install vfkit`; `sadbox setup` also fetches a pinned build) and
-  [Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/)
-  installed **and running** — `sadbox setup` builds the guest kernel and the VM
-  disk with it. Until 0.5.0 is released this backend exists only in pre-release
-  builds: follow [Installing a beta (pre-release)](#installing-a-beta-pre-release),
+  Docker installed **and running** — [Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/),
+  or [colima](https://github.com/abiosoft/colima) with the docker CLI and its
+  buildx plugin (`brew install docker docker-buildx colima`) — `sadbox setup`
+  builds the guest kernel and the VM disk with it (BuildKit is required).
+  Until 0.5.0 is released this backend exists only in pre-release builds: follow [Installing a beta (pre-release)](#installing-a-beta-pre-release),
   not the plain install script. It is built but has not yet been run on Intel
   hardware; see [Supported platforms](#supported-platforms)
 - **Apple silicon, macOS 15**: Apple's `container` CLI needs macOS 26; use the
@@ -117,8 +118,9 @@ On a Mac:
 On Linux:
 
 - `/dev/kvm`, usable by your user (`sudo usermod -aG kvm $USER`, then log in again)
-- [Docker](https://docs.docker.com/engine/install/), usable by your user: it
-  builds the VM image (`sudo usermod -aG docker $USER`)
+- [Docker](https://docs.docker.com/engine/install/), usable by your user, with
+  the buildx plugin (`docker-buildx-plugin` from that repository): it builds
+  the VM image and disk (`sudo usermod -aG docker $USER`)
 - `git`, `openssl`, `curl`
 - optional: `virtiofsd` 1.11 or later (or your user being uid 1000), so agent
   history is kept on the host. Without it the history stays in each VM and is
@@ -142,7 +144,9 @@ On an Intel Mac (macOS 15+), or Apple silicon on macOS 15 with
 
 ```sh
 brew install vfkit
-# install Docker Desktop and start it once: https://docs.docker.com/desktop/setup/install/mac-install/
+# Docker Desktop (https://docs.docker.com/desktop/setup/install/mac-install/),
+# or colima: brew install docker docker-buildx colima && colima start
+# Install/start one of them once before running sadbox setup.
 curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh | sh
 ```
 
