@@ -209,7 +209,7 @@ ids, and the runner's user is uid 1001.
 - CH snapshot/restore for near-instant resume of stopped projects.
 - Optional virtiofs shared mounts.
 
-## Then: Intel Mac support — built 2026-11-11
+## Then: Intel Mac support — shipped in v0.5.0 (2026-11-12)
 
 **Goal:** the same supervisor runs on an Intel Mac and makes its project microVMs
 locally. Intel Macs cannot use Apple's `container` CLI (Apple silicon only,
@@ -250,9 +250,10 @@ of `driver/kvm`.
   silicon: 12/12 pass, create 0.46–0.99 s, stop 0.05–0.10 s, start 0.42–0.92 s,
   destroy 0.06–0.11 s (with both Apple's Kata kernel and the built Debian one).
 
+Tested by hand on an Intel Mac with v0.5.0 (2026-11-12): the amd64 kernel
+and disk boot and projects run.
+
 **Still to do:**
-- Boot the amd64 kernel + disk on real Intel hardware (`vz.it.test.ts`); the
-  driver path is identical, but that pair has not run yet.
 - CI: GitHub's `macos-26-intel` runners have Virtualization.framework but no
   Docker. Build the amd64 disk and kernel on the Linux x86_64 job, pass them as
   artifacts, and run `vz.it.test.ts` there.

@@ -119,7 +119,7 @@ Linux. The rest (the proxy, vaults, agents, the UI) is the same everywhere.
 | **Linux x86_64 with KVM** (bare metal, a home server, a cloud VM with nested virtualization) | ✅ **Supported, new** | Cloud Hypervisor microVMs. Tested on Ubuntu 24.04 in CI on real VMs. Runs natively or [in docker compose](#linux-with-docker-compose). |
 | Linux arm64 with KVM (e.g. Graviton `.metal`) | ⚠️ Untested | Built for it, but not yet run on an arm64 KVM host. |
 | Linux without `/dev/kvm` | ❌ | No hardware virtualization: see [EC2 and other clouds](#ec2-and-other-clouds). |
-| **Mac, Intel (2018+, macOS 15+)** | ⚠️ **Built, needs an Intel run** | Pre-release only for now ([install a beta](#installing-a-beta-pre-release)); Virtualization.framework through `vfkit`, so `container` is not needed; Docker is. The driver, vsock, shared folders, stop/start and stats are tested on Apple silicon with an arm64 guest; the amd64 kernel + disk pair has not yet been booted on Intel hardware. |
+| **Mac, Intel (2018+, macOS 15+)** | ✅ **Supported, new in 0.5.0** | Virtualization.framework through `vfkit`, so `container` is not needed; Docker is. Tested by hand on an Intel Mac with v0.5.0. |
 | Mac, Apple silicon, macOS 15 | ⚠️ Opt-in | Apple's `container` CLI needs macOS 26; `SADBOX_DRIVER=vz` uses the same vfkit driver as Intel (arm64 guest), with Docker. |
 | Mac, macOS 14 or earlier | ❌ | Below vfkit's supported macOS floor (15) and Apple `container`'s (26). |
 | Docker on a Mac | ❌ | A container there cannot reach the Mac's hypervisor; run sadbox natively. See [Deploying](#deploying). |
@@ -147,9 +147,7 @@ On a Mac:
   or [colima](https://github.com/abiosoft/colima) with the docker CLI and its
   buildx plugin (`brew install docker docker-buildx colima`) — `sadbox setup`
   builds the guest kernel and the VM disk with it (BuildKit is required).
-  Until 0.5.0 is released this backend exists only in pre-release builds: follow [Installing a beta (pre-release)](#installing-a-beta-pre-release),
-  not the plain install script. It is built but has not yet been run on Intel
-  hardware; see [Supported platforms](#supported-platforms)
+  Supported since 0.5.0; see [Supported platforms](#supported-platforms)
 - **Apple silicon, macOS 15**: Apple's `container` CLI needs macOS 26; use the
   vfkit path instead by setting `SADBOX_DRIVER=vz` on every command (see
   [First run](#first-run)), with `vfkit` and Docker as above
@@ -206,7 +204,7 @@ curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh \
   | SADBOX_VERSION=v0.5.0 SADBOX_BIN_DIR=/usr/local/bin sh
 ```
 
-For a pre-release (including the current Intel Mac build), see
+For a pre-release, see
 [Installing a beta (pre-release)](#installing-a-beta-pre-release) — the plain
 command above always installs the last stable release.
 
@@ -264,10 +262,6 @@ It is not `/releases/latest`, so:
 - the beta is only reachable by its tag, from the
   [releases page](https://github.com/sgsaravana/sadbox/releases) under
   **Pre-releases**.
-
-**Intel Macs need a pre-release for now** — `0.4.4` has no Intel backend. The
-beta is the first binary that runs project VMs on an Intel Mac (through
-Virtualization.framework and `vfkit`).
 
 #### Intel Mac (macOS 15+) — beta
 
@@ -1038,8 +1032,32 @@ restart or an upgrade, and the supervisor finds them again.
 
 ### macOS: run at boot (launchd)
 
-A LaunchAgent starts `sadbox serve` at login and restarts it if it exits. Write
-`~/Library/LaunchAgents/dev.sadbox.supervisor.plist`:
+`sadbox serve` runs in the foreground; a LaunchAgent is what keeps it in the
+background — it starts at login, restarts it if it exits, and writes its output
+to a log. These are the steps for an **Intel Mac** (the default `vz` backend);
+the Apple silicon differences are at the end.
+
+First make sure sadbox works from a terminal:
+
+```sh
+sadbox setup
+sadbox doctor                 # everything ✓, including "VM disk built"
+command -v sadbox             # the absolute path the job will run
+```
+
+On an Intel Mac, Docker must be running: the `vz` backend uses it to build the
+guest kernel and project disks, and to rebuild the base image when its recipe
+changes. If you use **colima** instead of Docker Desktop, have it start at login
+too, or the first project create or rebuild after a reboot will fail while
+Docker is down:
+
+```sh
+brew services start colima
+```
+
+Write `~/Library/LaunchAgents/dev.sadbox.supervisor.plist`, replacing
+`/Users/YOU` with your home directory (launchd does not expand `~`), and the
+binary path with the one `command -v sadbox` printed:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1055,28 +1073,50 @@ A LaunchAgent starts `sadbox serve` at login and restarts it if it exits. Write
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/sadbox.log</string>
-  <key>StandardErrorPath</key><string>/tmp/sadbox.log</string>
+  <key>StandardOutPath</key><string>/Users/YOU/Library/Logs/sadbox.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/Library/Logs/sadbox.log</string>
 </dict>
 </plist>
 ```
 
+Load it and watch the log:
+
 ```sh
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.sadbox.supervisor.plist
-launchctl kickstart -k gui/$(id -u)/dev.sadbox.supervisor   # start / restart now
-launchctl bootout gui/$(id -u)/dev.sadbox.supervisor        # stop it
-tail -f /tmp/sadbox.log
+launchctl kickstart -k gui/$(id -u)/dev.sadbox.supervisor   # start (or restart) now
+tail -f ~/Library/Logs/sadbox.log
 ```
 
-- Replace `/Users/YOU/...` with the absolute path to the binary
-  (`command -v sadbox`).
+Open <http://localhost:7070>. On the first run the generated sign-in password
+is in that log and in `~/.sadbox/initial-password`; change it with
+`sadbox passwd`. From then on the job keeps sadbox running across logins and
+restarts it if it exits.
+
+To check it, restart it after updating the binary, stop it, or remove it:
+
+```sh
+launchctl print gui/$(id -u)/dev.sadbox.supervisor | head -20   # status
+launchctl kickstart -k gui/$(id -u)/dev.sadbox.supervisor        # restart (after an update)
+launchctl bootout gui/$(id -u)/dev.sadbox.supervisor             # stop (running VMs keep running)
+rm ~/Library/LaunchAgents/dev.sadbox.supervisor.plist            # remove for good
+```
+
 - Keep the `PATH` line: a LaunchAgent does not inherit your shell's environment,
-  and `openssl`, `docker` (Intel) and `container` (Apple silicon) are looked up
-  on it.
+  and `docker`, `colima`, `vfkit` and `openssl` are looked up on it. On an Intel
+  Mac Homebrew is in `/usr/local/bin`; `/opt/homebrew/bin` only matters if this
+  Mac also runs an Apple silicon setup.
+- Do not put `SADBOX_PASSWORD` in the plist (it is world-readable). The job uses
+  the stored password (`sadbox passwd`).
+- For a **beta**, put the beta binary in `ProgramArguments` and add its state
+  dir to `EnvironmentVariables` — otherwise the job falls back to `~/.sadbox`,
+  the stable install's state:
+  `<key>SADBOX_DATA</key><string>/Users/YOU/.sadbox-beta</string>`. Add
+  `<key>SADBOX_DRIVER</key><string>vz</string>` too if you want it explicit, and
+  `SADBOX_PORT` if the stable and beta supervisors run at the same time.
 - On Apple silicon running macOS 15, add
   `<key>SADBOX_DRIVER</key><string>vz</string>` to `EnvironmentVariables`.
   Intel Macs do not need it (vz is their default).
