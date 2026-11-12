@@ -7,11 +7,11 @@ name: Update README on release
 # Pre-releases are ignored, whether they arrive as a release event or by a
 # manual dispatch for a tag: a beta must never become the README's latest.
 #
-# NOTE: releases created by another workflow using the default GITHUB_TOKEN
-# (e.g. `release.yml` via action-gh-release) do NOT trigger this — GitHub
-# suppresses event chains from GITHUB_TOKEN to avoid loops. Publishing a
-# release from the GitHub UI (what this is for) does trigger it. To also cover
-# tag-push auto-releases, give release.yml a PAT, or run this manually below.
+# Tag-push releases are covered too: release.yml's bump-main runs the same
+# script (scripts/set-readme-release.sh) because the release that workflow
+# creates cannot trigger this one — GitHub suppresses event chains from
+# GITHUB_TOKEN. This workflow is then for releases published from the UI, and
+# for re-syncing a missed one by hand (workflow_dispatch).
 on:
   release:
     types: [published]
@@ -73,27 +73,7 @@ jobs:
           URL: ${{ steps.rel.outputs.url }}
           NAME: ${{ steps.rel.outputs.name }}
           DATE: ${{ steps.rel.outputs.date }}
-        run: |
-          node <<'EOF'
-          const fs = require("fs");
-          const { TAG, URL, NAME, DATE } = process.env;
-          const label = NAME && NAME !== TAG ? `${TAG} — ${NAME}` : TAG;
-          const block =
-            `**Latest release: [${label}](${URL})**` +
-            (DATE ? ` · published ${DATE}` : "") +
-            ` · [release notes →](${URL})`;
-          const START = "<!-- LATEST_RELEASE:START -->";
-          const END = "<!-- LATEST_RELEASE:END -->";
-          const path = "README.md";
-          const md = fs.readFileSync(path, "utf8");
-          const re = new RegExp(`${START}[\\s\\S]*?${END}`);
-          if (!re.test(md)) {
-            console.error("LATEST_RELEASE markers not found in README.md");
-            process.exit(1);
-          }
-          fs.writeFileSync(path, md.replace(re, `${START}\n${block}\n${END}`));
-          console.log("README updated:", block);
-          EOF
+        run: ./scripts/set-readme-release.sh "$TAG" "$URL" "$NAME" "$DATE"
 
       - name: Commit & push if changed
         if: steps.rel.outputs.prerelease != 'true' && !contains(steps.rel.outputs.tag, '-')

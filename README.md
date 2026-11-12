@@ -89,20 +89,19 @@ Every release ships prebuilt binaries for macOS/Linux (arm64/x64) plus
 `SHA256SUMS`, built by [`release.yml`](.github/workflows/release.yml). Cut one
 either way:
 
-- **push a tag** — `git tag v0.5.0 && git push origin v0.5.0`; or
+- **push a tag** — `git tag vX.Y.Z && git push origin vX.Y.Z`; or
 - **publish a release in the GitHub UI** — the tag can be created there, and the
   build attaches the binaries to the release while keeping the notes you wrote.
 
-Both paths run the same build. A tag with a dash (`v0.5.0-beta.1`) is published
+Both paths run the same build. A tag with a dash (`vX.Y.Z-beta.1`) is published
 as a **pre-release** either way: never `/releases/latest`, no version bump on
 `main`, no Homebrew update. If an event is missed, the workflow's manual run
 takes the tag as input.
 
+[`release.yml`](.github/workflows/release.yml) and
 [`update-readme-release.yml`](.github/workflows/update-readme-release.yml)
-rewrites the line above when a release is published from the UI (pre-releases are
-ignored). A tag-push release is created with `GITHUB_TOKEN`, whose `release`
-event GitHub suppresses, so after one run that workflow once if you want the line
-updated.
+rewrite the line above either way — on a tag push, and when a release is
+published from the UI. Pre-releases are ignored.
 Browse them all on the [releases page](https://github.com/sgsaravana/sadbox/releases).
 
 ## Supported platforms
@@ -254,7 +253,7 @@ published to a tap yet, so `brew install` of sadbox itself is not available.
 
 ### Installing a beta (pre-release)
 
-A tag with a dash — `v0.5.0-beta.1` — is published as a GitHub **pre-release**.
+A tag with a dash — `vX.Y.Z-beta.1` — is published as a GitHub **pre-release**.
 It is not `/releases/latest`, so:
 
 - the plain install script keeps installing the last **stable** release;
@@ -262,6 +261,9 @@ It is not `/releases/latest`, so:
 - the beta is only reachable by its tag, from the
   [releases page](https://github.com/sgsaravana/sadbox/releases) under
   **Pre-releases**.
+
+In the commands below, replace the `X.Y.Z-beta.1` placeholder with the tag of
+the beta you are installing.
 
 #### Intel Mac (macOS 15+) — beta
 
@@ -274,10 +276,10 @@ brew install vfkit
 
 # the beta binary, in its own bin dir
 curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh \
-  | SADBOX_VERSION=v0.5.0 SADBOX_BIN_DIR="$HOME/.local/bin-beta" sh
+  | SADBOX_VERSION=vX.Y.Z-beta.1 SADBOX_BIN_DIR="$HOME/.local/bin-beta" sh
 
 export PATH="$HOME/.local/bin-beta:$PATH"
-sadbox version                      # 0.5.0-beta.1
+sadbox version                      # X.Y.Z-beta.1
 
 export SADBOX_DATA="$HOME/.sadbox-beta"
 export SADBOX_DRIVER=vz             # the default on Intel; explicit is fine
@@ -303,7 +305,7 @@ macOS 15, also `export SADBOX_DRIVER=vz` — there is no Apple `container` there
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh \
-  | SADBOX_VERSION=v0.5.0 SADBOX_BIN_DIR="$HOME/.local/bin-beta" sh
+  | SADBOX_VERSION=vX.Y.Z-beta.1 SADBOX_BIN_DIR="$HOME/.local/bin-beta" sh
 
 export PATH="$HOME/.local/bin-beta:$PATH"
 export SADBOX_DATA="$HOME/.sadbox-beta"
@@ -315,7 +317,7 @@ sadbox serve
 #### Or download the pre-release binary by hand
 
 ```sh
-ver=v0.5.0-beta.1
+ver=vX.Y.Z-beta.1
 mkdir -p "$HOME/.local/bin-beta"
 curl -fLO "https://github.com/sgsaravana/sadbox/releases/download/$ver/sadbox-darwin-x64"
 curl -fLO "https://github.com/sgsaravana/sadbox/releases/download/$ver/SHA256SUMS"
@@ -334,14 +336,14 @@ the GitHub CLI.
 
 #### What a beta is, and is not
 
-- It reports the pre-release version (`sadbox version` → `0.5.0-beta.1`).
+- It reports the pre-release version (`sadbox version` → `X.Y.Z-beta.1`).
 - `install.sh` without `SADBOX_VERSION` still gives you stable; a beta never
   becomes `/releases/latest`.
 - It may migrate `~/.sadbox` forward. That is why the steps above use
   `SADBOX_DATA`; a beta pointed at your stable data dir can leave the stable
   binary unable to open it.
 - Betas can be deleted later:
-  `gh release delete v0.5.0-beta.1 --cleanup-tag` (or the releases page).
+  `gh release delete vX.Y.Z-beta.1 --cleanup-tag` (or the releases page).
 
 ### Linux, with docker compose
 
@@ -527,9 +529,11 @@ cross-compiles all four binaries and attaches them (plus `SHA256SUMS`) to a
 GitHub Release. The tag is the version: the workflow stamps it into
 `src/config.ts` and `package.json` before building (via
 `scripts/set-version.sh`) and commits the same bump to `main`, so there is no
-version to edit by hand. The same commit points `packaging/homebrew/sadbox.rb`
-at the new release (version, download URLs and sha256s, via
-`scripts/set-formula.sh`); if you publish a tap, copy that file into it.
+version to edit by hand. The same commit updates the README's pin examples and
+"latest release" line (`scripts/set-readme-release.sh`) and points
+`packaging/homebrew/sadbox.rb` at the new release (version, download URLs and
+sha256s, via `scripts/set-formula.sh`); if you publish a tap, copy that file
+into it.
 
 ## How it works
 
@@ -1134,7 +1138,7 @@ CLI. `scripts/push-ecr.sh` builds and pushes it to ECR (defaults to
 `linux/arm64`):
 
 ```sh
-AWS_REGION=ap-southeast-1 AWS_ACCOUNT_ID=1234... ./scripts/push-ecr.sh v0.1.0
+AWS_REGION=ap-southeast-1 AWS_ACCOUNT_ID=1234... ./scripts/push-ecr.sh vX.Y.Z
 ```
 
 On a Mac, run sadbox natively instead: a container there cannot reach

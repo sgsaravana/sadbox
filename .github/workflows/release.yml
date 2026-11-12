@@ -10,7 +10,8 @@ name: release
 # The tag is the version: the binaries are built with
 # it stamped into src/config.ts and package.json, and for a stable tag the same
 # change is committed to main — along with the README's version-pinning
-# examples and the Homebrew formula — so nobody bumps any of it by hand.
+# examples and latest-release line, and the Homebrew formula — so nobody bumps
+# any of it by hand.
 #
 # A release created in the UI keeps its hand-written notes: the binaries are
 # attached to it instead of replacing it. A dash in the tag (v0.5.0-beta.1)
@@ -150,9 +151,10 @@ jobs:
           # keeps serving the stable release — and bump-main skips it.
           prerelease: ${{ contains(inputs.tag || github.event.release.tag_name || github.ref_name, '-') }}
 
-  # Record the released version on main, and point the Homebrew formula at the
-  # binaries just published. Skipped for pre-release tags
-  # (v1.2.3-rc.1) and for a tag older than what main already says.
+  # Record the released version on main, point the Homebrew formula at the
+  # binaries just published, and update the README's latest-release line.
+  # Skipped for pre-release tags (v1.2.3-rc.1) and for a tag older than what
+  # main already says.
   bump-main:
     needs: build
     if: ${{ !contains(inputs.tag || github.event.release.tag_name || github.ref_name, '-') }}
@@ -167,6 +169,7 @@ jobs:
           ref: main
       - name: Bump the version on main
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ARM64_SHA: ${{ needs.build.outputs.darwin-arm64-sha }}
           X64_SHA: ${{ needs.build.outputs.darwin-x64-sha }}
         run: |
@@ -179,6 +182,13 @@ jobs:
           fi
           ./scripts/set-version.sh "$new"
           ./scripts/set-formula.sh "$new" "$ARM64_SHA" "$X64_SHA"
+          # A tag-push release is created with GITHUB_TOKEN, whose `release`
+          # event update-readme-release.yml never sees, so write the README's
+          # latest-release line here too. Same script, same line either way.
+          release_name="$(gh release view "$TAG" --json name --jq '.name // ""' 2>/dev/null || true)"
+          published="$(gh release view "$TAG" --json publishedAt --jq '.publishedAt // ""' 2>/dev/null | cut -c1-10 || true)"
+          ./scripts/set-readme-release.sh "$TAG" \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}" "$release_name" "$published"
           if git diff --quiet -- src/config.ts package.json README.md packaging/homebrew/sadbox.rb; then
             echo "main already says $new — nothing to do."
             exit 0
