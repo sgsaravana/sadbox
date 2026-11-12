@@ -2,6 +2,7 @@ import { mkdirSync } from "fs";
 import { config, VERSION } from "./config";
 import { buildBaseImage } from "./core/baseimage";
 import { getDriver } from "./driver";
+import { dockerStatus } from "./driver/docker";
 import { installService, serviceStatus, uninstallService } from "./core/service";
 import { CH_VERSION, ensureVmm, virtiofsdBin, vmmProblems } from "./driver/kvm/vmm";
 import { VFKIT_VERSION, ensureVmm as ensureVz, vmmProblems as vzProblems } from "./driver/vz/vmm";
@@ -36,17 +37,29 @@ async function has(bin: string) {
   return (await sh(["sh", "-c", `command -v ${bin}`])).code === 0;
 }
 
+/** Docker with BuildKit, which the image and kernel builds need; exit with the fix when it is missing. */
+async function requireDocker() {
+  const s = await dockerStatus();
+  if (!s.ok) {
+    console.error(`✗ ${s.error}${s.fix ? `\n    fix: ${s.fix}` : ""}`);
+    process.exit(1);
+  }
+  console.log("✓ docker (BuildKit)");
+}
+
+/** The same check as one line in `sadbox doctor`. */
+async function dockerLine() {
+  const s = await dockerStatus();
+  console.log(s.ok ? "✓ docker with BuildKit (builds the VM image)" : `✗ ${s.error} (fix: ${s.fix})`);
+}
+
 /** Linux: KVM, Cloud Hypervisor and its kernel, docker for the image. */
 async function setupKvm() {
   const host = vmmProblems().filter((p) => !p.fix?.startsWith("sadbox setup"));
   for (const p of host) console.error(`✗ ${p.error}${p.fix ? `\n    fix: ${p.fix}` : ""}`);
   if (host.length) process.exit(1);
   console.log("✓ /dev/kvm");
-  if (!(await has(process.env.SADBOX_DOCKER_BIN || "docker"))) {
-    console.error("✗ docker not found — it builds the VM image (https://docs.docker.com/engine/install/)");
-    process.exit(1);
-  }
-  console.log("✓ docker");
+  await requireDocker();
   await ensureVmm((msg) => console.log(`→ ${msg}…`));
   console.log(`✓ Cloud Hypervisor ${CH_VERSION} and its guest kernel`);
   console.log(sharingNote());
@@ -58,11 +71,7 @@ async function setupVz() {
   for (const p of host) console.error(`✗ ${p.error}${p.fix ? `\n    fix: ${p.fix}` : ""}`);
   if (host.length) process.exit(1);
   console.log("✓ Virtualization.framework");
-  if (!(await has(process.env.SADBOX_DOCKER_BIN || "docker"))) {
-    console.error("✗ docker not found — it builds the VM image (https://docs.docker.com/engine/install/)");
-    process.exit(1);
-  }
-  console.log("✓ docker");
+  await requireDocker();
   await ensureVz((msg) => console.log(`→ ${msg}…`));
   console.log(`✓ vfkit ${VFKIT_VERSION}`);
   console.log("✓ guest kernel and initramfs");
@@ -125,7 +134,7 @@ async function doctor() {
     for (const p of problems) console.log(`✗ ${p.error}${p.fix ? ` (fix: ${p.fix})` : ""}`);
     if (!problems.length) console.log(`✓ KVM and Cloud Hypervisor ${CH_VERSION}`);
     console.log(`${(await driver.images.recipe(config.baseImage)) !== undefined ? "✓" : "✗"} VM disk built (${config.baseImage})`);
-    console.log(`${(await has(process.env.SADBOX_DOCKER_BIN || "docker")) ? "✓" : "✗"} docker (builds the VM image)`);
+    await dockerLine();
     console.log(sharingNote());
     console.log(`${(await has("openssl")) ? "✓" : "✗"} openssl (egress proxy TLS interception)`);
     console.log(`proxy port:   ${config.proxyPort}`);
@@ -136,7 +145,7 @@ async function doctor() {
     for (const p of problems) console.log(`✗ ${p.error}${p.fix ? ` (fix: ${p.fix})` : ""}`);
     if (!problems.length) console.log(`✓ Virtualization.framework and vfkit ${VFKIT_VERSION}`);
     console.log(`${(await driver.images.recipe(config.baseImage)) !== undefined ? "✓" : "✗"} VM disk built (${config.baseImage})`);
-    console.log(`${(await has(process.env.SADBOX_DOCKER_BIN || "docker")) ? "✓" : "✗"} docker (builds the VM image)`);
+    await dockerLine();
     console.log("✓ virtio-fs (agent history is kept on this machine)");
     console.log(`${(await has("openssl")) ? "✓" : "✗"} openssl (egress proxy TLS interception)`);
     console.log(`proxy port:   ${config.proxyPort}`);

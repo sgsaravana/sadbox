@@ -41,10 +41,14 @@ check_vfkit() {
   fi
   if ! command -v docker >/dev/null 2>&1; then
     echo "✗ docker not found — it builds the guest kernel and the VM image:"
-    echo "  https://docs.docker.com/desktop/setup/install/mac-install/"
+    echo "  https://docs.docker.com/desktop/setup/install/mac-install/ (or: brew install docker docker-buildx colima)"
     missing=1
   elif ! docker info >/dev/null 2>&1; then
-    echo "✗ docker is installed but not running — start Docker Desktop"
+    echo "✗ docker is installed but not running — start Docker Desktop (or: colima start)"
+    missing=1
+  elif ! docker buildx version >/dev/null 2>&1; then
+    echo "✗ docker has no BuildKit (the buildx plugin) — with colima or Homebrew's docker CLI:"
+    echo "  brew install docker-buildx   (the plugin folder it mentions goes in cliPluginsExtraDirs in ~/.docker/config.json)"
     missing=1
   else
     echo "✓ docker"
@@ -114,6 +118,10 @@ else
     missing=1
   elif ! docker info >/dev/null 2>&1; then
     echo "✗ docker is installed but not usable by $(id -un):  sudo usermod -aG docker $(id -un)   (then log in again)"
+    missing=1
+  elif ! docker buildx version >/dev/null 2>&1; then
+    echo "✗ docker has no BuildKit (the buildx plugin) — install it:"
+    echo "  docker-buildx-plugin (Docker's apt/dnf repository), or docker-buildx on Homebrew"
     missing=1
   else
     echo "✓ docker"
