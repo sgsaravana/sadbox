@@ -153,3 +153,4 @@ swappable per-platform backends.
 | [13-agent-sessions.md](13-agent-sessions.md) | Agent logins and per-project conversation history |
 | [14-intel-mac.md](14-intel-mac.md) | Running locally on an Intel Mac: the `vfkit`/Virtualization.framework option, and the Linux-host workaround |
 | [15-docker-sandboxes.md](15-docker-sandboxes.md) | Docker Sandboxes (`sbx`) vs `container` and vs sadbox: layers, overlap, no Intel support |
+| [16-windows.md](16-windows.md) | Windows support: WSL 2 (shipped first) and a native OpenVMM/WHP driver; Hyper-V, Docker Sandboxes, and the host port |

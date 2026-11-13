@@ -20,6 +20,7 @@ import { LONG_TASK_MS } from "../driver/types";
 import { getProject, refFor, syncFolderOf } from "./projects";
 import { isEnvFile } from "./envfiles";
 import { isGitRepo } from "./sync";
+import { gitConfigFor } from "./wsl";
 
 const driver = getDriver();
 const WD = config.guestWorkdir;
@@ -28,7 +29,7 @@ const WD = config.guestWorkdir;
 async function folderFiles(folder: string): Promise<string[]> {
   let names: string[];
   if (await isGitRepo(folder)) {
-    const ls = Bun.spawn(["git", "-C", folder, "ls-files", "-coz", "--exclude-standard"], { stdout: "pipe", stderr: "ignore" });
+    const ls = Bun.spawn(["git", ...gitConfigFor(folder), "-C", folder, "ls-files", "-coz", "--exclude-standard"], { stdout: "pipe", stderr: "ignore" });
     const out = await new Response(ls.stdout).text();
     if ((await ls.exited) !== 0) throw new Error("git ls-files failed on the folder");
     names = [...new Set(out.split("\0").filter(Boolean))]; // -c and -o can both list a path
@@ -73,7 +74,7 @@ export async function pushProject(id: string, opts?: { force?: boolean }) {
   const regular = files.filter((n) => lstatSync(join(folder, n)).isFile());
 
   // 1. what each side holds
-  const hash = Bun.spawn(["git", "hash-object", "--no-filters", "--stdin-paths"], {
+  const hash = Bun.spawn(["git", ...gitConfigFor(folder), "hash-object", "--no-filters", "--stdin-paths"], {
     cwd: folder, stdin: new Blob([regular.map((n) => n + "\n").join("")]), stdout: "pipe", stderr: "pipe",
   });
   const [hashOut, hashErr, hashCode] = await Promise.all([new Response(hash.stdout).text(), new Response(hash.stderr).text(), hash.exited]);

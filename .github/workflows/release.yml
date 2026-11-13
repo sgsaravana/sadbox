@@ -61,7 +61,10 @@ jobs:
           skip=false
           if names=$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null); then
             exists=true
-            if printf '%s\n' "$names" | grep -qx 'sadbox-darwin-x64'; then skip=true; fi
+            # rebuild if any expected artifact is missing (e.g. a run that
+            # predates the Windows launcher)
+            if printf '%s\n' "$names" | grep -qx 'sadbox-darwin-x64' \
+               && printf '%s\n' "$names" | grep -qx 'sadbox-windows-x64.exe'; then skip=true; fi
           fi
           echo "exists=$exists" >> "$GITHUB_OUTPUT"
           echo "skip=$skip" >> "$GITHUB_OUTPUT"
@@ -134,6 +137,7 @@ jobs:
           gh release upload "$TAG" \
             dist/sadbox-darwin-arm64 dist/sadbox-darwin-x64 \
             dist/sadbox-linux-arm64 dist/sadbox-linux-x64 \
+            dist/sadbox-windows-x64.exe \
             dist/SHA256SUMS --clobber
       - name: Create the release
         if: needs.check.outputs.exists != 'true'
@@ -145,6 +149,7 @@ jobs:
             dist/sadbox-darwin-x64
             dist/sadbox-linux-arm64
             dist/sadbox-linux-x64
+            dist/sadbox-windows-x64.exe
             dist/SHA256SUMS
           body_path: ${{ runner.temp }}/notes.md
           # Downloadable by tag, but never GitHub's "latest" — so install.sh

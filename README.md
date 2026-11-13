@@ -1,7 +1,8 @@
 # sadbox
 
-Supervisor for **microVM AI-agent sandboxes** on Macs (Apple silicon and Intel)
-and on Linux hosts with KVM (see [Supported platforms](#supported-platforms)). Spin up
+Supervisor for **microVM AI-agent sandboxes** on Macs (Apple silicon and Intel),
+on Linux hosts with KVM, and on Windows 11 x64 through WSL 2 (see
+[Supported platforms](#supported-platforms)). Spin up
 isolated Linux microVMs — each one a **project** — with a copy of a source
 folder and Claude Code + toolchain baked in; watch and steer the agent through
 a browser terminal attached to tmux inside the VM; give it vault variables and
@@ -22,12 +23,14 @@ through [`vfkit`](https://github.com/crc-org/vfkit) on an Intel Mac, and
 - [Supported platforms](#supported-platforms) — [EC2 and other clouds](#ec2-and-other-clouds)
 - [Requirements](#requirements)
 - [Install](#install)
+  - [Windows 11 (WSL 2, beta)](#windows-11-wsl-2-beta)
   - [Option 1 — install script (prebuilt binary)](#option-1--install-script-prebuilt-binary)
   - [Option 2 — download the binary yourself](#option-2--download-the-binary-yourself)
   - [Option 3 — from source](#option-3--from-source)
   - [Installing a beta (pre-release)](#installing-a-beta-pre-release)
     - [Intel Mac (macOS 15+) — beta](#intel-mac-macos-15--beta)
     - [Apple silicon and Linux — beta](#apple-silicon-and-linux--beta)
+    - [Windows 11 (WSL 2) — beta](#windows-11-wsl-2--beta)
     - [Or download the pre-release binary by hand](#or-download-the-pre-release-binary-by-hand)
     - [What a beta is, and is not](#what-a-beta-is-and-is-not)
   - [Linux, with docker compose](#linux-with-docker-compose)
@@ -76,8 +79,9 @@ keeps the agents' logins (Claude's it owns and refreshes, handing VMs
 placeholders) and each project's agent history, which a new VM of the same
 name picks up. See `docs/research/` for the design research and `spikes/` for
 the de-risk experiments behind each piece, and [`docs/ROADMAP.md`](docs/ROADMAP.md)
-for what's next. It runs on Apple silicon and Intel Macs, and on Linux hosts
-with KVM (see [Supported platforms](#supported-platforms)).
+for what's next. It runs on Apple silicon and Intel Macs, on Linux hosts with
+KVM, and on **Windows 11 x64 through WSL 2** (beta; see
+[Supported platforms](#supported-platforms)).
 
 ## Releases
 
@@ -85,8 +89,9 @@ with KVM (see [Supported platforms](#supported-platforms)).
 **Latest release: [v0.5.1](https://github.com/sgsaravana/sadbox/releases/tag/v0.5.1)** · published 2026-11-13 · [release notes →](https://github.com/sgsaravana/sadbox/releases/tag/v0.5.1)
 <!-- LATEST_RELEASE:END -->
 
-Every release ships prebuilt binaries for macOS/Linux (arm64/x64) plus
-`SHA256SUMS`, built by [`release.yml`](.github/workflows/release.yml). Cut one
+Every release ships prebuilt binaries for macOS/Linux (arm64/x64), the Windows
+launcher (`sadbox-windows-x64.exe`) and `SHA256SUMS`, built by
+[`release.yml`](.github/workflows/release.yml). Cut one
 either way:
 
 - **push a tag** — `git tag vX.Y.Z && git push origin vX.Y.Z`; or
@@ -122,7 +127,9 @@ Linux. The rest (the proxy, vaults, agents, the UI) is the same everywhere.
 | Mac, Apple silicon, macOS 15 | ⚠️ Opt-in | Apple's `container` CLI needs macOS 26; `SADBOX_DRIVER=vz` uses the same vfkit driver as Intel (arm64 guest), with Docker. |
 | Mac, macOS 14 or earlier | ❌ | Below vfkit's supported macOS floor (15) and Apple `container`'s (26). |
 | Docker on a Mac | ❌ | A container there cannot reach the Mac's hypervisor; run sadbox natively. See [Deploying](#deploying). |
-| Windows | ❌ | No build, none planned. |
+| **Windows 11 x64, WSL 2** | ✅ **Beta** | The Linux/KVM backend runs inside WSL 2. Needs nested virtualization (`nestedVirtualization=true`), Docker Engine in WSL, and **Windows 11 x64** — Windows 10 and ARM64 have no nested KVM. See [Windows (WSL 2)](#windows-11-wsl-2-beta). |
+| Windows 10, Windows on ARM64 | ❌ | No nested KVM in WSL 2. A native WHP backend is researched but not built ([`docs/research/16-windows.md`](docs/research/16-windows.md)). |
+| Docker on Windows | ❌ | A container cannot reach the host hypervisor; run the Linux build inside WSL 2 natively. |
 
 ### EC2 and other clouds
 
@@ -167,7 +174,57 @@ On Linux:
 - Cloud Hypervisor and its guest kernel are fetched by `sadbox setup` (pinned
   versions, into `~/.sadbox/kvm`)
 
+On **Windows 11 x64 (WSL 2, beta)** — run everything below **inside WSL**, not
+in PowerShell:
+
+- Windows 11 x64 (Windows 10 and ARM64 are not supported)
+- WSL 2 with nested virtualization: `[wsl2] nestedVirtualization=true` in
+  `%UserProfile%\.wslconfig`, then `wsl --shutdown`
+- `/dev/kvm` present in the distro (if not, see
+  [`docs/windows-wsl2.md`](docs/windows-wsl2.md#troubleshooting))
+- Docker Engine + `docker buildx` inside the distro, `git`, `openssl`, `curl`
+- ~10 GB free; more for projects
+- Admin rights **once** to enable WSL/virtualization; after that, per-user
+
+Full guide: [`docs/windows-wsl2.md`](docs/windows-wsl2.md).
+
 ## Install
+
+### Windows 11 (WSL 2, beta)
+
+In an **elevated PowerShell**:
+
+```powershell
+wsl --install
+# add [wsl2] nestedVirtualization=true to %UserProfile%\.wslconfig, then:
+wsl --shutdown
+```
+
+Inside your WSL distro (Ubuntu or a dedicated `sadbox` distro):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh | sh
+sadbox setup
+sadbox serve
+```
+
+Open **http://localhost:7070** in Windows. WSL forwards `localhost` by default.
+The installer checks `/dev/kvm`, Docker, `git` and `openssl`, and prints the
+WSL-specific fix when nested virtualization is off.
+
+The release also ships **`sadbox-windows-x64.exe`**, a small launcher:
+
+```powershell
+.\sadbox-windows-x64.exe serve    # runs `sadbox serve` in WSL, opens the browser
+.\sadbox-windows-x64.exe doctor
+```
+
+It uses the `sadbox` distro if present, else the first WSL distro
+(`SADBOX_WSL_DISTRO` overrides). Step-by-step, Docker in WSL, Windows folders,
+auto-start and troubleshooting: [`docs/windows-wsl2.md`](docs/windows-wsl2.md).
+
+Releasing and testing a pre-release (tag, assets, acceptance checklist, what to
+capture): [`docs/windows-wsl2-beta.md`](docs/windows-wsl2-beta.md).
 
 ### Option 1 — install script (prebuilt binary)
 
@@ -296,6 +353,26 @@ so on. When you are done, open a new shell (or drop `~/.local/bin-beta` from
 
 To move to a newer beta, rerun the install script with the new
 `SADBOX_VERSION` and the same `SADBOX_BIN_DIR`; the data dir is kept.
+
+#### Windows 11 (WSL 2) — beta
+
+Run this **inside WSL**; use the tag's `install.sh` so the WSL-aware installer
+is the one you test:
+
+```sh
+VERSION=vX.Y.Z-beta.1
+curl -fsSL "https://raw.githubusercontent.com/sgsaravana/sadbox/$VERSION/install.sh" \
+  | SADBOX_VERSION="$VERSION" SADBOX_BIN_DIR="$HOME/.local/bin-beta" sh
+
+export PATH="$HOME/.local/bin-beta:$PATH"
+export SADBOX_DATA="$HOME/.sadbox-beta"
+sadbox version && sadbox doctor && sadbox setup && sadbox serve
+```
+
+Windows 11 x64 and WSL 2 only. The release also ships
+`sadbox-windows-x64.exe`; point it at the beta with `SADBOX_WSL_BIN`. Full
+steps, launcher, acceptance checklist and logs to capture:
+[`docs/windows-wsl2-beta.md`](docs/windows-wsl2-beta.md).
 
 #### Apple silicon and Linux — beta
 
@@ -448,7 +525,7 @@ SADBOX_DRIVER=vz sadbox serve
 ```
 
 To keep sadbox running in the background and start it at boot, use
-`sadbox service install` on Linux (a systemd user unit) or a launchd job on a
+`sadbox service install` on Linux/WSL 2 (a systemd user unit) or a launchd job on a
 Mac; both are in [Deploying](#deploying).
 
 The first `sadbox serve` generates a sign-in password, prints it once, and
@@ -511,7 +588,7 @@ The web UI and API need a password (one user). How it is set up:
 sadbox serve     start the supervisor (default)
 sadbox setup     check deps, start the VM backend, build the base image
 sadbox doctor    report environment health
-sadbox service   install | uninstall | status — run at boot (Linux: a systemd user unit)
+sadbox service   install | uninstall | status — run at boot (Linux/WSL 2: a systemd user unit)
 sadbox passwd    set the sign-in password
 sadbox version
 ```
@@ -522,10 +599,10 @@ State lives in `~/.sadbox` (override with `SADBOX_DATA`).
 
 ```sh
 bun run compile          # dist/sadbox for this platform
-bun run compile:all      # darwin+linux × arm64+x64
+bun run compile:all      # darwin+linux × arm64+x64, plus the Windows launcher
 ```
 Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`, which
-cross-compiles all four binaries and attaches them (plus `SHA256SUMS`) to a
+cross-compiles all five artifacts and attaches them (plus `SHA256SUMS`) to a
 GitHub Release. The tag is the version: the workflow stamps it into
 `src/config.ts` and `package.json` before building (via
 `scripts/set-version.sh`) and commits the same bump to `main`, so there is no
@@ -1293,6 +1370,15 @@ Notes:
   - Under docker compose, the VMs stop when the container does.
   - The new-project form reads tool versions from the Docker image, so keep it.
   - arm64 hosts are untested.
+- **Windows (beta)**: Windows 11 x64 only, through WSL 2. Windows 10 and
+  Windows on ARM64 have no nested KVM. WSL sleep/hibernate or `wsl --shutdown`
+  restarts the distro: project disks persist, but running agents and terminals
+  stop, and the supervisor must be started again. Keep `SADBOX_DATA` on the
+  distro's ext4 (not `/mnt/c`). UNC paths are not mounted by WSL and are
+  refused. A Windows launcher (`sadbox-windows-x64.exe`) is in the release
+  assets, but there is no one-click installer or dedicated distro image yet:
+  install inside WSL with `install.sh`. Full guide:
+  [`docs/windows-wsl2.md`](docs/windows-wsl2.md).
 - A change to an item still written to the env file reaches new shells/panes
   only — proxy items take effect on the next request, fetch items on the next
   read.

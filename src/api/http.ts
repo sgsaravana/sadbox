@@ -25,6 +25,7 @@ import { AUTH_PATH, createForward, deleteForward, getForward, listForwards, note
 import { createLink, deleteLink, listLinks } from "../net/links";
 import { AuthError, authEnabled, clearCookie, crossOrigin, forwardTicket, login, logout, safeNext, sessionCookie, signedIn, tokenFrom } from "../core/auth";
 import { FileError, commitStaged, deletePath, discardPaths, listStashes, stash, fileIndex, gitStatus, headFile, lastCommit, listBranches, listDir, makeDir, pushBranch, readFile, renamePath, stageFile, stagePaths, switchBranch, writeFile } from "../core/files";
+import { displayHostPath, isWindowsPath, normalizeHostPath, windowsPathToWsl, wslRoots } from "../core/wsl";
 
 const liveProjectNames = () => listProjects().map((p) => p.name);
 const json = (data: unknown, status = 200) =>
@@ -154,7 +155,8 @@ export function startServer() {
             : undefined;
           return json(await createProject({
             name: b.name,
-            sourcePath: (b.sourcePath && String(b.sourcePath).trim()) || undefined, // none ⇒ clone mode (or empty)
+            // a Windows path pasted on WSL becomes its /mnt/<drive> form
+            sourcePath: (b.sourcePath && normalizeHostPath(String(b.sourcePath))) || undefined, // none ⇒ clone mode (or empty)
             empty: b.empty === true,
             apps: b.apps, optionalApps: b.optionalApps, secretIds: b.secretIds, git,
           }), 201);
@@ -218,7 +220,7 @@ export function startServer() {
         m = p.match(/^\/api\/projects\/([\w-]+)\/sync-folder$/);
         if (m && req.method === "PUT") {            // connect a local folder to a cloned project
           const b = await req.json();
-          return json(await connectSyncFolder(m[1], b.path ?? null));
+          return json(await connectSyncFolder(m[1], b.path ? normalizeHostPath(String(b.path)) : null));
         }
         if (m && req.method === "DELETE") return json(await connectSyncFolder(m[1], null));
         m = p.match(/^\/api\/projects\/([\w-]+)\/git-remote$/);
@@ -392,10 +394,15 @@ export function startServer() {
           });
         }
 
-        // folder picker: list subdirectories of a host path
+        // folder picker: list subdirectories of a host path. On WSL a Windows
+        // path (C:\Users\me) is accepted and answered in its /mnt/c form, with
+        // a displayPath for the UI.
         if (p === "/api/fs/dirs" && req.method === "GET") {
           const raw = url.searchParams.get("path") || homedir();
-          const path = resolve(raw);
+          if (isWindowsPath(raw) && !windowsPathToWsl(raw)) {
+            return err("UNC paths are not mounted inside WSL — move the folder to a drive, or clone it from a git remote", 400);
+          }
+          const path = resolve(normalizeHostPath(raw));
           if (!existsSync(path) || !statSync(path).isDirectory()) {
             return err(`not a directory: ${path}`, 400);
           }
@@ -406,11 +413,15 @@ export function startServer() {
               isGitRepo: existsSync(join(path, e.name, ".git")),
             }))
             .sort((a, b) => a.name.localeCompare(b.name));
+          const parent = dirname(path) !== path ? dirname(path) : null;
           return json({
             path,
-            parent: dirname(path) !== path ? dirname(path) : null,
+            displayPath: displayHostPath(path),
+            parent,
+            parentDisplayPath: parent ? displayHostPath(parent) : null,
             isGitRepo: existsSync(join(path, ".git")),
             home: homedir(),
+            roots: wslRoots(),
             dirs,
           });
         }

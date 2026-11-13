@@ -241,7 +241,7 @@ button.mini.eye { margin-left: 0; }
   display: flex; align-items: center; gap: 6px;
 }
 #picker-list li:hover { background: #1c1c28; }
-#picker-list li.up { color: var(--dim); }
+#picker-list li.up, #picker-list li.root { color: var(--dim); }
 .git-badge {
   background: #143326; color: var(--ok); border-radius: 5px;
   font-size: 10px; padding: 1px 6px; letter-spacing: 0.5px;
