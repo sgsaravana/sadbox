@@ -5,6 +5,7 @@ on:
     branches:
       - "feature/*"
       - "fix/*"
+      - "docs/*"
   workflow_dispatch: # Allows manual triggering of the workflow.
 
 # The default GITHUB_TOKEN is read-only in repos with restricted workflow
@@ -41,5 +42,5 @@ jobs:
             gh pr create -B main -H "$BRANCH" -a sgsaravana \
               --label 'automated-pr' \
               --title "Merge $BRANCH into main" \
-              --body "This PR merges the feature branch $BRANCH into main."
+              --body "This PR merges the branch $BRANCH into main."
           fi
