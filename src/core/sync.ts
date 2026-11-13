@@ -24,14 +24,24 @@ import { db, logEvent } from "../db";
 import { getDriver } from "../driver";
 import { LONG_TASK_MS } from "../driver/types";
 import { getProject, refFor, syncFolderOf } from "./projects";
+import { gitConfigFor } from "./wsl";
 
 const driver = getDriver();
+
+/** The folder a git invocation works on: `-C <repo>` or `--work-tree <repo>`. */
+function repoOf(at: string[]): string | undefined {
+  const wt = at.indexOf("--work-tree");
+  if (wt >= 0) return at[wt + 1];
+  const c = at.indexOf("-C");
+  return c >= 0 ? at[c + 1] : undefined;
+}
 
 /** The hidden ref the workdir snapshot lives on, in the VM and in the copy here. */
 const SNAPSHOT_REF = "refs/sadbox/snapshot";
 
 async function hostGit(at: string[], args: string[], stdin?: string) {
-  const proc = Bun.spawn(["git", ...at, ...args], {
+  const repo = repoOf(at);
+  const proc = Bun.spawn(["git", ...(repo ? gitConfigFor(repo) : []), ...at, ...args], {
     stdin: stdin == null ? "ignore" : new Blob([stdin]), stdout: "pipe", stderr: "pipe",
   });
   const [out, err, code] = await Promise.all([

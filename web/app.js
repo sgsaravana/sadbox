@@ -529,7 +529,7 @@ async function refreshProjects() {
       <h3><a href="#project/${p.id}"><span class="dot ${state}"></span>${p.name}</a></h3>
       <div class="meta">
         ${state} · ${p.image}${p.live?.address ? ` · ${p.live.address}` : ""}<br>
-        ${p.source_path ? escapeHtml(p.source_path) + "<br>" : ""}${p.empty ? "empty VM — repositories cloned in it" : `branch ${escapeHtml(p.branch || `sadbox/${p.name}`)}`}${gitLine}${p.error ? `<br><span style="color:var(--bad)">${escapeHtml(p.error)}</span>` : ""}
+        ${p.source_path ? escapeHtml(p.source_path_display || p.source_path) + "<br>" : ""}${p.empty ? "empty VM — repositories cloned in it" : `branch ${escapeHtml(p.branch || `sadbox/${p.name}`)}`}${gitLine}${p.error ? `<br><span style="color:var(--bad)">${escapeHtml(p.error)}</span>` : ""}
       </div>
       <div class="row">
         <button data-details="${p.id}">Details</button>
@@ -849,13 +849,15 @@ $("#gitremote-form").addEventListener("submit", async (e) => {
 // ---- folder picker ----
 const picker = $("#picker");
 let pickerPath = null;
+let pickerDisplayPath = null;
 let pickerOnSelect = null; // what to do with the chosen folder (default: fill the create form)
 
 async function loadDir(path) {
   const q = path ? `?path=${encodeURIComponent(path)}` : "";
   const d = await api(`/api/fs/dirs${q}`);
   pickerPath = d.path;
-  $("#picker-current").textContent = d.path;
+  pickerDisplayPath = d.displayPath || d.path;
+  $("#picker-current").textContent = pickerDisplayPath;
   // a folder being connected for sync may be any folder; a project's source must be a repo
   const anyFolder = pickerOnSelect != null;
   $("#picker-hint").textContent = d.isGitRepo ? "✓ git repository"
@@ -863,6 +865,11 @@ async function loadDir(path) {
   $("#picker-hint").style.color = d.isGitRepo || anyFolder ? "var(--ok)" : "var(--warn)";
   const items = [];
   if (d.parent) items.push(`<li data-dir="${d.parent}" class="up">↩ ..</li>`);
+  // WSL: jump between the Linux home and the Windows drives
+  for (const r of d.roots || []) {
+    if (r.path === d.path) continue;
+    items.push(`<li data-dir="${r.path}" class="root">🗂 ${r.label}</li>`);
+  }
   items.push(...d.dirs.map((e) =>
     `<li data-dir="${d.path === "/" ? "" : d.path}/${e.name}">
        📁 ${e.name}${e.isGitRepo ? ` <span class="git-badge">git</span>` : ""}</li>`));
@@ -882,7 +889,10 @@ $("#picker-list").onclick = (e) => {
 };
 $("#picker-select").onclick = () => {
   const done = pickerOnSelect; pickerOnSelect = null;
-  if (pickerPath) { if (done) done(pickerPath); else $("#create-form").sourcePath.value = pickerPath; }
+  if (pickerPath) {
+    // the form shows the friendly Windows path; the API turns it into /mnt/<drive>
+    if (done) done(pickerPath); else $("#create-form").sourcePath.value = pickerDisplayPath || pickerPath;
+  }
   picker.close();
 };
 
@@ -1447,12 +1457,12 @@ function paintDetail(d) {
       <div class="panel stat">
         <h3>Folder & git</h3>
         <dl>
-          <dt>Source</dt><dd class="mono">${d.source_path ? escapeHtml(d.source_path) : d.empty ? "none — empty VM" : "git clone"}</dd>
+          <dt>Source</dt><dd class="mono">${d.source_path ? escapeHtml(d.source_path_display || d.source_path) : d.empty ? "none — empty VM" : "git clone"}</dd>
           ${d.empty ? `<dt>Repositories</dt><dd class="dim">cloned in the terminal; the vault's tokens sign git in</dd>` : ""}
           ${d.source_path || d.empty ? "" : `<dt>Local folder</dt><dd>${folderPending?.id === d.id
             ? `<span class="spinner"></span> <span class="dim">${folderPending.label}</span>`
             : d.sync_path
-            ? `<span class="mono">${escapeHtml(d.sync_path)}</span>
+            ? `<span class="mono">${escapeHtml(d.sync_path_display || d.sync_path)}</span>
                <button class="mini" data-link-folder="${d.id}" data-current="${escapeHtml(d.sync_path)}" title="Sync into a different folder">Change</button>
                <button class="mini" data-unlink-folder="${d.id}">Disconnect</button>`
             : `<span class="dim">not connected</span>

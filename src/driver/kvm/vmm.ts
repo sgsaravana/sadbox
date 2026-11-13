@@ -4,6 +4,7 @@
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "../../config";
+import { isWsl } from "../../core/wsl";
 import { CH_VERSION, KERNEL_TAG, chBinAsset, chKernelAsset, kernelUrl } from "../kernels";
 
 export { CH_VERSION, KERNEL_TAG };
@@ -23,8 +24,14 @@ export function vmmProblems(): { error: string; fix?: string }[] {
   const out: { error: string; fix?: string }[] = [];
   if (!process.env.SADBOX_TEST_FAKE_VMM) { // tests run a stand-in VMM (test/fake-ch.ts), on any machine
     if (process.platform !== "linux") out.push({ error: "KVM VMs need a Linux host" });
-    else if (!existsSync("/dev/kvm")) out.push({ error: "/dev/kvm is missing: this machine has no KVM (virtualization off in the firmware, or a VM without nested virtualization)" });
-    else {
+    else if (!existsSync("/dev/kvm")) {
+      out.push({
+        error: "/dev/kvm is missing: this machine has no KVM (virtualization off in the firmware, or a VM without nested virtualization)",
+        fix: isWsl()
+          ? "in Windows add [wsl2] nestedVirtualization=true to %UserProfile%\\.wslconfig, run `wsl --shutdown`, then reopen the distro (Windows 11 x64 only; Windows 10 and ARM64 have no nested KVM)"
+          : undefined,
+      });
+    } else {
       try { accessSync("/dev/kvm", constants.R_OK | constants.W_OK); }
       catch { out.push({ error: "/dev/kvm is not readable and writable by this user", fix: `sudo usermod -aG kvm $USER (then log in again)` }); }
     }

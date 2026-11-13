@@ -47,6 +47,9 @@ jobs:
           cache-dependency-path: guest/agent/go.sum
       - run: bun install --frozen-lockfile
 
+      - name: WSL detection and Windows path translation
+        run: bun test src/core/wsl.test.ts
+
       - name: Driver tests with a stand-in VMM (and the agent client)
         run: bun test src/driver/
 

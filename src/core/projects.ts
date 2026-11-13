@@ -18,6 +18,7 @@ import { duringSetup } from "../net/setup";
 import { type ToolInfo } from "./toolchain";
 import { ensureBaseImage } from "./baseimage";
 import { isEnvFile } from "./envfiles";
+import { displayHostPath, gitConfigFor, normalizeHostPath } from "./wsl";
 import { copyOutHistory, historyOf, linkHistory, prepareHistory } from "./history";
 import { applyLoginsQuietly, purgeProjectLogins } from "./logins";
 import { forgetVitals, liveStats, liveToolchain, QUERY_TIMEOUT_MS } from "./vitals";
@@ -68,7 +69,7 @@ export const branchFor = (name: string) => `sadbox/${name}`;
 export const isEmptyProject = (p: Pick<ProjectRow, "empty">) => p.empty === 1;
 
 async function hostGit(repo: string, args: string[]): Promise<{ code: number; out: string }> {
-  const proc = Bun.spawn(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn(["git", ...gitConfigFor(repo), "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
   const [out, err, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -105,7 +106,7 @@ async function resolveImage(note: (msg: string) => void): Promise<string> {
  *  while the archive streams out on stdout. */
 export async function tarSource(sourcePath: string): Promise<{ bytes: Uint8Array; trackedEnv: string[] }> {
   const ls = async (...args: string[]) => {
-    const list = Bun.spawn(["git", "-C", sourcePath, "ls-files", "-z", ...args], { stdout: "pipe", stderr: "ignore" });
+    const list = Bun.spawn(["git", ...gitConfigFor(sourcePath), "-C", sourcePath, "ls-files", "-z", ...args], { stdout: "pipe", stderr: "ignore" });
     const out = await new Response(list.stdout).text();
     if ((await list.exited) !== 0) throw new Error("git ls-files failed on source folder");
     return out.split("\0").filter(Boolean);
@@ -387,9 +388,10 @@ export async function createProject(opts: {
   const name = opts.name.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
   if (!name) throw new Error("invalid project name");
   const empty = opts.empty === true;
+  const sourcePath = opts.sourcePath ? normalizeHostPath(opts.sourcePath) : undefined;
   const optionalApps = normalizeAppIds(opts.optionalApps ?? []);
-  const cloneMode = !opts.sourcePath && !empty; // no local folder → clone the git remote in the VM
-  if (empty && (opts.sourcePath || opts.git?.remote)) {
+  const cloneMode = !sourcePath && !empty; // no local folder → clone the git remote in the VM
+  if (empty && (sourcePath || opts.git?.remote)) {
     throw new Error("an empty project has no local folder or git remote — clone repositories from its terminal");
   }
   if (opts.git?.remote && !/^https?:\/\//.test(opts.git.remote)) {
@@ -400,9 +402,9 @@ export async function createProject(opts: {
   } else if (cloneMode) {
     if (!opts.git?.remote) throw new Error("provide a local folder or a git repository URL");
   } else {
-    if (!existsSync(opts.sourcePath!)) throw new Error(`source folder not found: ${opts.sourcePath}`);
+    if (!existsSync(sourcePath!)) throw new Error(`source folder not found: ${sourcePath}`);
     // fail fast before booting a VM: the folder must be a git repo with a commit
-    const head = await hostGit(opts.sourcePath!, ["rev-parse", "HEAD"]);
+    const head = await hostGit(sourcePath!, ["rev-parse", "HEAD"]);
     if (head.code !== 0) {
       throw new Error("source folder must be a git repository with at least one commit (v0 limitation)");
     }
@@ -423,12 +425,12 @@ export async function createProject(opts: {
   db.query(
     `INSERT INTO projects (id, name, image, state, source_path, source_branch, base_sha, last_synced_sha, apps, optional_apps, git_remote, git_token_enc, empty)
      VALUES (?, ?, ?, 'creating', ?, NULL, NULL, NULL, ?, ?, ?, ?, ?)`,
-  ).run(id, name, image, opts.sourcePath && !empty ? opts.sourcePath : "",
+  ).run(id, name, image, sourcePath && !empty ? sourcePath : "",
         JSON.stringify(opts.apps ?? []), JSON.stringify(optionalApps), gitRemote, null, empty ? 1 : 0);
   for (const n of notes) logEvent(id, "image", n);
   const earlier = historyOf(name);
   if (earlier) logEvent(id, "history", `agent history of an earlier ${name} mounted (${earlier.tools.map((t) => t.tool).join(", ")}, ${mb(earlier.bytes)})`);
-  logEvent(id, "create.start", empty ? `${name}, empty workdir` : cloneMode ? `${name} cloning ${gitRemote}` : `${name} from ${opts.sourcePath}`);
+  logEvent(id, "create.start", empty ? `${name}, empty workdir` : cloneMode ? `${name} cloning ${gitRemote}` : `${name} from ${sourcePath}`);
 
   try {
     await provisionVM(getProject(id)!, { assignSecretIds: secretIds });
@@ -514,8 +516,11 @@ async function loadDetails(id: string) {
     state,
     image: p.image,
     source_path: p.source_path,
+    source_path_display: displayHostPath(p.source_path),   // C:\... on WSL
     sync_path: p.sync_path,           // folder connected to a cloned project, if any
+    sync_path_display: displayHostPath(p.sync_path ?? ""),
     sync_folder: syncFolderOf(p),     // where Sync back delivers ('' = nowhere yet)
+    sync_folder_display: displayHostPath(syncFolderOf(p)),
     empty: isEmptyProject(p),         // no folder, no remote: repositories are cloned in the terminal
     source_branch: p.source_branch,
     workdir: config.guestWorkdir,
@@ -577,7 +582,7 @@ export async function connectSyncFolder(id: string, path: string | null) {
     logEvent(id, "sync.disconnect", p.sync_path ?? "");
     return { sync_path: null, hasBase: null, isGitRepo: null };
   }
-  const given = String(path).trim();
+  const given = normalizeHostPath(String(path));
   if (!existsSync(given)) throw new Error(`folder not found: ${given}`);
   if (!statSync(given).isDirectory()) throw new Error(`not a folder: ${given}`);
   // inside a git repository the repository is what gets connected; any other
@@ -933,7 +938,9 @@ export async function projectsWithLiveState() {
     image: r.image,
     state: settle(r, live.get(refFor(r.name))),
     source_path: r.source_path,
+    source_path_display: displayHostPath(r.source_path),
     sync_folder: syncFolderOf(r),
+    sync_folder_display: displayHostPath(syncFolderOf(r)),
     empty: isEmptyProject(r),
     source_branch: r.source_branch,
     git_remote: r.git_remote,

@@ -28,7 +28,11 @@ echo "✓ installed sadbox to $BIN_DIR/sadbox"
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) : ;;
-  *) echo "⚠  add $BIN_DIR to your PATH:  echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.zshrc" ;;
+  *)
+    rc="$HOME/.zshrc"
+    [ "$os" = linux ] && rc="$HOME/.bashrc"
+    echo "⚠  add $BIN_DIR to your PATH:  echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> $rc"
+    ;;
 esac
 
 # The vfkit path (Intel, or Apple silicon older than macOS 26): what it needs.
@@ -102,17 +106,33 @@ else
   # Linux: project VMs are Cloud Hypervisor microVMs on KVM; `sadbox setup`
   # fetches Cloud Hypervisor and its kernel and builds the VM disk with docker
   echo
+  wsl=0
+  if [ -n "${WSL_DISTRO_NAME:-}" ] || grep -qi microsoft /proc/version 2>/dev/null; then
+    wsl=1
+    echo "Windows (WSL 2${WSL_DISTRO_NAME:+, $WSL_DISTRO_NAME}) — the Linux/KVM backend runs inside WSL."
+    echo "  Windows 11 x64 only; Windows 10 and ARM64 have no nested KVM."
+    echo
+  fi
   missing=0
   if [ ! -e /dev/kvm ]; then
     echo "✗ /dev/kvm is missing: this machine has no KVM (virtualization off in the firmware,"
     echo "  or a cloud VM without nested virtualization — see README: Supported platforms)"
+    if [ "$wsl" = 1 ]; then
+      echo "  WSL fix: add this to %UserProfile%\\.wslconfig in Windows, then run 'wsl --shutdown':"
+      echo "      [wsl2]"
+      echo "      nestedVirtualization=true"
+    fi
     missing=1
   elif [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
-    echo "✗ /dev/kvm is not usable by $(id -un):  sudo usermod -aG kvm $(id -un)   (then log in again)"
+    echo "✗ /dev/kvm is not usable by $(id -un):  sudo usermod -aG kvm $(id -un)   (then log in again"
+    echo "  or reopen the distro: 'wsl --terminate ${WSL_DISTRO_NAME:-<distro>}')"
     missing=1
   else
     echo "✓ /dev/kvm"
   fi
+  case "${SADBOX_DATA:-$HOME/.sadbox}" in
+    /mnt/[a-zA-Z]|/mnt/[a-zA-Z]/*) echo "✗ SADBOX_DATA is on a Windows drive; Unix sockets and modes need the distro's ext4 — use $HOME/.sadbox"; missing=1 ;;
+  esac
   if ! command -v docker >/dev/null 2>&1; then
     echo "✗ docker not found — it builds the VM image: https://docs.docker.com/engine/install/"
     missing=1
@@ -135,6 +155,10 @@ else
     echo "· virtiofsd not found (optional): without it agent history stays in each VM — install the virtiofsd package"
   fi
   [ "$arch" = "arm64" ] && echo "· arm64 Linux is built but not yet tested on a real KVM host"
+  if [ "$wsl" = 1 ] && [ "$arch" = "arm64" ]; then
+    echo "✗ Windows on ARM64 does not expose /dev/kvm to WSL 2 — this path cannot run project VMs"
+    missing=1
+  fi
   echo
   [ "$missing" = 1 ] && echo "Fix the ✗ items above, then:"
   [ "$missing" = 1 ] || echo "Next:"

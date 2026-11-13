@@ -1,4 +1,4 @@
-import { mkdirSync } from "fs";
+import { existsSync, mkdirSync } from "fs";
 import { config, VERSION } from "./config";
 import { buildBaseImage } from "./core/baseimage";
 import { getDriver } from "./driver";
@@ -20,6 +20,7 @@ import { startClaudeRefresher } from "./net/claudeoauth";
 import { migrateGitTokens } from "./core/gittoken";
 import { startForwards } from "./net/forwards";
 import { MIN_PASSWORD, authEnabled, ensurePassword, initialPasswordFile, setPassword } from "./core/auth";
+import { isDrvFsPath, isWsl, wslDoctorLines, wslInfo, wslSetupNote } from "./core/wsl";
 
 const BIN = config.containerBin;
 
@@ -80,6 +81,15 @@ async function setupVz() {
 
 async function setup() {
   console.log(`sadbox setup (v${VERSION})\n`);
+  const wsl = wslInfo();
+  if (wsl) {
+    console.log(`⚠ ${wslSetupNote(wsl)}`);
+    if (isDrvFsPath(config.dataDir)) {
+      console.error(`✗ the data dir is on a Windows drive (${config.dataDir})`);
+      console.error("    set SADBOX_DATA to a path inside the distro, e.g. export SADBOX_DATA=$HOME/.sadbox");
+      process.exit(1);
+    }
+  }
   if (getDriver().name === "kvm") {
     await setupKvm();
     mkdirSync(config.dataDir, { recursive: true });
@@ -128,6 +138,10 @@ async function doctor() {
   console.log(`sadbox v${VERSION}`);
   console.log(`data dir:      ${config.dataDir}`);
   console.log(`base image:   ${config.baseImage}`);
+  const wsl = wslInfo();
+  if (wsl) {
+    for (const line of wslDoctorLines(wsl, existsSync("/dev/kvm"), config.dataDir)) console.log(line);
+  }
   const driver = getDriver();
   if (driver.name === "kvm") {
     const problems = vmmProblems();
@@ -194,7 +208,7 @@ Usage: sadbox <command>
   serve      Start the web supervisor (default)   http://localhost:${config.port}
   setup      Check deps, start the VM backend, build the base image
   doctor     Report environment health
-  service    install | uninstall | status — run the supervisor at boot (Linux, systemd)
+  service    install | uninstall | status — run the supervisor at boot (Linux/WSL 2, systemd)
   passwd     Set the sign-in password (signs every browser out)
   version    Print version
   help       Show this help
@@ -203,12 +217,18 @@ Env: SADBOX_PORT, SADBOX_HOST, SADBOX_PASSWORD, SADBOX_AUTH=off, SADBOX_NETWORK,
      SADBOX_FORWARD_HOST, SADBOX_DATA, SADBOX_BASE_IMAGE, SADBOX_NET_LOG_DAYS (network log retention, ≥ 7)
 SADBOX_DRIVER (container | kvm | vz), SADBOX_DOCKER_BIN
 Linux: SADBOX_CH_BIN, SADBOX_KVM_KERNEL, SADBOX_VIRTIOFSD, SADBOX_KVM_RUN
-Intel Mac: SADBOX_VFKIT_BIN, SADBOX_VZ_KERNEL, SADBOX_VZ_INITRD, SADBOX_VZ_RUN`;
+Intel Mac: SADBOX_VFKIT_BIN, SADBOX_VZ_KERNEL, SADBOX_VZ_INITRD, SADBOX_VZ_RUN
+Windows: run these commands inside WSL 2 (Windows 11 x64); see docs/windows-wsl2.md`;
 
 export async function main(argv: string[]) {
   const cmd = argv[2] ?? "serve";
   switch (cmd) {
     case "serve":
+      if (isWsl() && isDrvFsPath(config.dataDir)) {
+        console.error(`✗ SADBOX_DATA is on a Windows drive (${config.dataDir}); Unix sockets and modes need the Linux filesystem.`);
+        console.error("    move it inside the distro, e.g. export SADBOX_DATA=$HOME/.sadbox");
+        process.exit(1);
+      }
       if (authEnabled()) {
         const generated = await ensurePassword();
         if (generated) {
