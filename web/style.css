@@ -129,6 +129,11 @@ legend { color: var(--dim); font-size: 12px; padding: 0 6px; }
 .checks { display: flex; gap: 12px; flex-wrap: wrap; }
 .checks label { display: flex; gap: 5px; align-items: center; margin: 0; }
 .checks input { width: auto; display: inline; margin: 0; }
+.app-choices { display: flex; flex-direction: column; gap: 9px; }
+.app-choices label { display: flex; gap: 8px; align-items: flex-start; margin: 0; }
+.app-choices input { width: auto; display: inline; margin: 3px 0 0; flex: none; }
+.app-choices .app-text { line-height: 1.4; }
+.app-choices .app-text b { color: var(--text); }
 
 pre.result {
   background: #0e0e15; border: 1px solid var(--border); border-radius: 7px;
@@ -301,6 +306,14 @@ button.mini.eye { margin-left: 0; }
 .tool .tv { font-family: ui-monospace, monospace; font-size: 11px; color: var(--accent); }
 .tool.absent { opacity: 0.55; }
 .tool.absent .tv { color: var(--dim); }
+/* optional apps on the project detail page */
+.app-list { display: flex; flex-direction: column; }
+.app-row { display: flex; align-items: flex-start; gap: 12px; padding: 10px 0; border-top: 1px solid var(--border); }
+.app-row:first-child { border-top: 0; padding-top: 0; }
+.app-row .app-what { flex: 1; min-width: 0; }
+.app-row .app-what b { color: var(--text); }
+.app-row .app-state { flex: none; display: flex; align-items: center; gap: 8px; }
+.app-row .app-state .ver { font-family: ui-monospace, monospace; font-size: 11px; color: var(--accent); }
 
 /* Settings pinned near the bottom of the sidebar */
 .sidenav nav { height: calc(100vh - 90px); }

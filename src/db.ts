@@ -41,6 +41,7 @@ db.run(`
     base_sha TEXT,
     last_synced_sha TEXT,
     apps TEXT NOT NULL DEFAULT '[]',
+    optional_apps TEXT NOT NULL DEFAULT '[]', -- optional apps chosen for the VM (core/apps.ts)
     git_remote TEXT,                          -- optional external git remote (origin)
     git_token_enc TEXT,                       -- encrypted access token for git_remote
     error TEXT,
@@ -63,7 +64,10 @@ for (const [col, ddl] of [["git_remote", "git_remote TEXT"], ["git_token_enc", "
   ["history_mounted", "history_mounted INTEGER NOT NULL DEFAULT 0"],
   // empty: 1 = created with neither a folder nor a git remote — the VM starts
   // with an empty workdir and repositories are cloned into it from the terminal
-  ["empty", "empty INTEGER NOT NULL DEFAULT 0"]]) {
+  ["empty", "empty INTEGER NOT NULL DEFAULT 0"],
+  // optional_apps: catalog apps (core/apps.ts) chosen at create or installed
+  // later; a Rebuild installs them again into the fresh VM
+  ["optional_apps", "optional_apps TEXT NOT NULL DEFAULT '[]'"]]) {
   const has = db.query<{ name: string }, []>("PRAGMA table_info(projects)").all().some((c) => c.name === col);
   if (!has) db.run(`ALTER TABLE projects ADD COLUMN ${ddl}`);
 }

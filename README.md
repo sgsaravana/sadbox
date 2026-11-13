@@ -691,6 +691,21 @@ over vsock instead.
   panel probes the *running VM* itself, so an older VM correctly shows which
   tools it's missing.
 
+### Optional apps
+
+- **Blender** can be installed in a VM, on top of the base image, from the new
+  project form or later from the project's detail view (start the VM first).
+  The detail view probes the running VM, so it shows whether Blender is there
+  and which version. Removal is on the same panel.
+  - The VM has no desktop, so Blender is for headless work — render, bake or
+    run Python from the terminal, for example `blender -b scene.blend -f 1`.
+  - The choice is kept on the project: **Rebuild** installs it again in the
+    fresh VM. Packages come from Debian (4.3.2 on the current trixie image) and
+    apt runs through the proxy with the provisioning window open, so no
+    approval prompt appears mid-install.
+  - The catalog lives in `src/core/apps.ts`; adding an app there puts it on the
+    create form and every project page.
+
 ### Vaults
 
 - **Vaults** (*Vaults* tab): one list of **variables** and **secrets**, typed
@@ -858,7 +873,8 @@ over vsock instead.
   is made to that same address, so a hostname cannot be used to dodge this.
   Only HTTP(S) leaves a VM — no DNS, SSH or other protocols (use `https://`
   git remotes). A VM that cannot be wired to the proxy fails to create. The
-  supervisor's own setup traffic (cloning the repo, extra apt packages) goes
+  supervisor's own setup traffic (cloning the repo, extra apt packages and
+  optional apps) goes
   through the proxy too, is logged, and skips the prompt only while setup
   runs. If the supervisor restarts, running VMs wait and carry on; if the
   relay in a VM dies, it is restarted within about half a minute. On a Mac,
@@ -941,14 +957,16 @@ over vsock instead.
 
 | Method | Path | |
 |---|---|---|
-| GET/POST | `/api/projects` | list (with live VM state and each VM's current `branch`) / create (`{name, sourcePath?, apps?, secretIds?: vault item ids, git?: {remote, token?}}` — omit `sourcePath` to clone `git.remote` in the VM) |
-| GET | `/api/projects/:id/details` | full detail: resources, tmux, git, folder |
+| GET/POST | `/api/projects` | list (with live VM state and each VM's current `branch`) / create (`{name, sourcePath?, apps?, optionalApps?, secretIds?: vault item ids, git?: {remote, token?}}` — omit `sourcePath` to clone `git.remote` in the VM) |
+| GET | `/api/projects/:id/details` | full detail: resources, tmux, git, folder, optional apps (installed + versions) |
 | GET | `/api/projects/:id/events?after=` | the project's event log, oldest first — the create form's progress |
 | DELETE | `/api/projects/:id` | destroy VM |
 | POST | `/api/projects/:id/start`, `…/stop` | boot a stopped VM / shut a running one down (its disk is kept) |
 | POST | `/api/projects/:id/sync` | sync-back (`{force?: bool}` overwrites files changed in the folder) |
 | GET | `/api/projects/:id/term/links` | links currently on the project's terminal (wrapped URLs re-joined) |
 | POST | `/api/projects/:id/rebuild` | destroy + recreate the VM from the project's original source (keeps vault access, net rules, agent history) |
+| GET | `/api/apps` | optional apps a VM can be given (`{apps}` — Blender) |
+| POST/DELETE | `/api/projects/:id/apps`, `…/apps/:appId` | install an optional app into the running VM (`{id}`) / remove it |
 | POST | `/api/projects/:id/push` | copy the folder's changed files into the VM, never env files (`{force?: bool}` overwrites uncommitted work in the VM) |
 | GET | `/api/projects/:id/net/requests?before=&limit=` | stored request log, paged back from a timestamp (without `before`: the live view's recent requests + pending approvals) |
 | GET | `/api/projects/:id/net/hosts?since=` | requests per host since a timestamp (default 24 h) |

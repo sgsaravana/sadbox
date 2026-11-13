@@ -663,6 +663,24 @@ async function changeMemory(id, name, currentMB, running) {
   }
 }
 
+/** Install or remove an optional app, keeping the panel's spinner up for the
+ *  (sometimes minutes-long) apt run. */
+async function changeApp(id, appId, install, label) {
+  appBusy.set(id, appId);
+  if (lastDetail?.id === id) paintDetail(lastDetail);
+  try {
+    await api(`/api/projects/${id}/apps${install ? "" : `/${encodeURIComponent(appId)}`}`, {
+      method: install ? "POST" : "DELETE",
+      body: install ? { id: appId } : undefined,
+    });
+  } catch (err) {
+    alert(`${label}: ${err.message}`);
+  } finally {
+    appBusy.delete(id);
+    if (location.hash === `#project/${id}`) await renderDetail(id);
+  }
+}
+
 document.addEventListener("click", async (e) => {
   const b = e.target.closest("button");
   if (!b) return;
@@ -711,6 +729,12 @@ document.addEventListener("click", async (e) => {
       openProjectSecrets(b.dataset.secrets, b.dataset.name || b.closest(".card")?.querySelector("h3").textContent.trim() || "project");
     } else if (b.dataset.memory) {
       await changeMemory(b.dataset.memory, b.dataset.name, Number(b.dataset.mb) || null, b.dataset.running === "1");
+    } else if (b.dataset.installApp) {
+      await changeApp(b.dataset.installApp, b.dataset.app, true, b.dataset.label || b.dataset.app);
+    } else if (b.dataset.removeApp) {
+      if (confirm(`Remove ${b.dataset.label} from this VM? Its disk keeps any dependencies apt left for other packages; you can install it again here.`)) {
+        await changeApp(b.dataset.removeApp, b.dataset.app, false, b.dataset.label || b.dataset.app);
+      }
     } else if (b.dataset.rebuild) {
       const what = b.dataset.empty === "1"
         ? `The VM is destroyed and an empty one takes its place: the repositories cloned in it go too — push what you want to keep first.`
@@ -885,6 +909,26 @@ async function loadCreateToolchain() {
   }
 }
 
+// Optional apps a new VM can be given now (the same list is on the project
+// page afterwards). The catalog lives in the supervisor (core/apps.ts).
+let appCatalogCache = null;
+async function loadCreateApps() {
+  const el = $("#create-apps");
+  if (!el) return;
+  try {
+    appCatalogCache ??= (await api("/api/apps")).apps;
+    el.innerHTML = appCatalogCache.length ? appCatalogCache.map((a) => `
+      <label>
+        <input type="checkbox" name="optionalApp" value="${escapeHtml(a.id)}">
+        <span class="app-text"><b>${escapeHtml(a.label)}</b>${appSize(a)}
+          <div class="hint">${escapeHtml(a.summary || "")}${a.note ? ` ${escapeHtml(a.note)}` : ""}</div></span>
+      </label>`).join("") : `<span class="hint">none available</span>`;
+  } catch (e) {
+    el.innerHTML = `<span class="hint">couldn't load (${escapeHtml(e.message)})</span>`;
+  }
+}
+const appSize = (a) => a.approxMB ? ` <span class="hint">· about ${a.approxMB >= 1024 ? (a.approxMB / 1024).toFixed(1) + " GB" : a.approxMB + " MB"}</span>` : "";
+
 // show the folder fields or the git-clone fields based on the source-mode toggle;
 // only the visible source input is `required` (a required hidden field blocks submit)
 function syncSrcMode() {
@@ -920,7 +964,9 @@ const CREATE_PHASES = {
   "vault.inject": "Preparing vault access",
   "workdir.ready": "Files are in place",
   "agent.update": "Updating the agents",
-  "app.install": "Installing extra packages",
+  "app.install": "Installing packages",
+  "app.installed": "App installed",
+  "app.install.error": "App install failed",
   "terminal.ready": "Starting the terminal",
   "create.done": "Done",
 };
@@ -1019,6 +1065,7 @@ function openCreateForm() {
   $("#projects").hidden = true;
   $("#btn-new").hidden = true;
   loadCreateToolchain();
+  loadCreateApps();
   syncSrcMode();
   // fresh items and labels, including ones made on the Vaults page or here
   refreshVault().catch(() => {});
@@ -1150,6 +1197,7 @@ $("#create-form").onsubmit = async (e) => {
         sourcePath, // undefined ⇒ backend clones the git remote instead
         empty,
         apps: (f.get("apps") || "").split(",").map((s) => s.trim()).filter(Boolean),
+        optionalApps: [...form.querySelectorAll("input[name=optionalApp]:checked")].map((c) => c.value),
         secretIds: [...form.querySelectorAll("input[name=secret]:checked")].map((c) => c.value),
         git,
       },
@@ -1309,6 +1357,39 @@ async function setSyncFolder(id, path) {
   }
 }
 
+// Optional-app install/remove for a project, by app id (kept across the 4 s
+// detail repaints so a long apt install keeps its spinner and disabled button).
+const appBusy = new Map(); // project id -> app id
+
+function optionalAppsHtml(d) {
+  const apps = d.optional_apps || [];
+  if (!apps.length) return "";
+  const running = d.state === "running";
+  return `<div class="panel" style="margin-top:16px">
+    <h3>Optional apps</h3>
+    <p class="hint">Installed inside this VM, on top of the base image. Chosen here or when the
+      project was created; a Rebuild installs them again.</p>
+    <div class="app-list">${apps.map((a) => {
+      const busy = appBusy.get(d.id) === a.id;
+      const anyBusy = appBusy.has(d.id);
+      const label = escapeHtml(a.label);
+      return `<div class="app-row">
+        <div class="app-what"><b>${label}</b> <span class="hint">${escapeHtml(a.summary || "")}</span>
+          ${a.note ? `<div class="hint">${escapeHtml(a.note)}</div>` : ""}</div>
+        <div class="app-state">${busy
+          ? `<span class="spinner"></span> <span class="hint">${a.installed ? "Removing…" : "Installing… — this can take a few minutes"}</span>`
+          : a.installed
+            ? `<span class="ok">installed</span>${a.version ? ` <span class="ver">${escapeHtml(a.version)}</span>` : ""}
+               <button class="mini" data-remove-app="${d.id}" data-app="${a.id}" data-label="${label}"
+                 ${running && !anyBusy ? "" : `disabled title="${running ? "Another app change is in progress" : "Start the VM to change apps"}"`}>Remove</button>`
+            : `<span class="dim">not installed</span>
+               <button class="mini" data-install-app="${d.id}" data-app="${a.id}" data-label="${label}"
+                 ${running && !anyBusy ? "" : `disabled title="${running ? "Another app change is in progress" : "Start the VM to install apps"}"`}>Install</button>`}</div>
+      </div>`;
+    }).join("")}</div>
+  </div>`;
+}
+
 function paintDetail(d) {
   const stats = $("#detail-stats") || $("#detail-body");
   $("#detail-name").textContent = d.name;
@@ -1398,6 +1479,7 @@ function paintDetail(d) {
         <dl><dt>Extra apt</dt><dd>${d.apps.length ? d.apps.map(escapeHtml).join(", ") : "none"}</dd></dl>
       </div>
     </div>
+    ${optionalAppsHtml(d)}
     ${d.error ? `<div class="panel" style="color:var(--bad)">${escapeHtml(d.error)}</div>` : ""}`;
 }
 

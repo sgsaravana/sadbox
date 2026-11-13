@@ -6,7 +6,8 @@ import { staticRoutes, aceFiles } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
 import { addBinding, applyItem, createItem, deleteBinding, deleteItem, getItem, injectVault, listItems, projectVaultView, revealItem, revokeFetchGrant, setItemProjects, setProjectItems, updateItem } from "../core/vault";
-import { connectSyncFolder, listProjects, setGitRemote, createProject, destroyProject, getProject, projectDetails, projectEvents, refFor, projectsWithLiveState, rebuildProject, setProjectMemory, startProject, stopProject } from "../core/projects";
+import { connectSyncFolder, listProjects, setGitRemote, createProject, destroyProject, getProject, projectDetails, projectEvents, refFor, projectsWithLiveState, rebuildProject, setProjectApp, setProjectMemory, startProject, stopProject } from "../core/projects";
+import { optionalAppCatalog } from "../core/apps";
 import { syncStatus, syncProject } from "../core/sync";
 import { pushProject } from "../core/push";
 import { terminalLinks } from "../core/links";
@@ -155,8 +156,12 @@ export function startServer() {
             name: b.name,
             sourcePath: (b.sourcePath && String(b.sourcePath).trim()) || undefined, // none ⇒ clone mode (or empty)
             empty: b.empty === true,
-            apps: b.apps, secretIds: b.secretIds, git,
+            apps: b.apps, optionalApps: b.optionalApps, secretIds: b.secretIds, git,
           }), 201);
+        }
+        // the optional apps a VM may be given (Blender, …), from the catalog
+        if (p === "/api/apps" && req.method === "GET") {
+          return json({ apps: optionalAppCatalog() });
         }
         let m = p.match(/^\/api\/projects\/([\w-]+)$/);
         if (m && req.method === "DELETE") {
@@ -172,6 +177,14 @@ export function startServer() {
           const after = Number(url.searchParams.get("after")) || 0;
           return json(projectEvents(m[1], after));
         }
+        // optional apps: install one into this VM now / remove it again
+        m = p.match(/^\/api\/projects\/([\w-]+)\/apps$/);
+        if (m && req.method === "POST") {
+          const b = await req.json();
+          return json(await setProjectApp(m[1], b.id, true));
+        }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/apps\/([\w-]+)$/);
+        if (m && req.method === "DELETE") return json(await setProjectApp(m[1], m[2], false));
         // the vault items a project may use (and what its VM holds for each)
         m = p.match(/^\/api\/projects\/([\w-]+)\/vault$/);
         if (m && req.method === "GET") return json(projectVaultView(m[1]));

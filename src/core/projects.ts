@@ -22,6 +22,10 @@ import { copyOutHistory, historyOf, linkHistory, prepareHistory } from "./histor
 import { applyLoginsQuietly, purgeProjectLogins } from "./logins";
 import { forgetVitals, liveStats, liveToolchain, QUERY_TIMEOUT_MS } from "./vitals";
 import { gitTokenForCreate, hasGitToken, migrateGitToken, setProjectGitToken } from "./gittoken";
+import {
+  guestAppVersion, installAppInGuest, normalizeAppIds, optionalApp, optionalAppProbe,
+  optionalAppsFromGuest, provisionApp, removeAppFromGuest, storedAppIds,
+} from "./apps";
 
 const driver = getDriver();
 
@@ -35,6 +39,7 @@ export interface ProjectRow {
   base_sha: string | null;
   last_synced_sha: string | null;
   apps: string;
+  optional_apps: string;      // JSON array of catalog app ids (core/apps.ts)
   git_remote: string | null;
   git_token_enc: string | null;
   sync_path: string | null;   // local folder connected to a cloned project (sync target only)
@@ -354,6 +359,12 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
     });
   }
 
+  // optional apps chosen at create (or installed later): Blender and friends,
+  // best effort like the extras above, so one failing does not fail the create.
+  for (const id of storedAppIds(p.optional_apps)) {
+    await provisionApp(p.id, ref, optionalApp(id), (type, detail) => logEvent(p.id, type, detail));
+  }
+
   // the agents' logins sadbox keeps (Claude's as placeholders)
   await applyLoginsQuietly(p);
 
@@ -369,12 +380,14 @@ export async function createProject(opts: {
   sourcePath?: string;    // omit to create from a git remote (clone-in-VM mode)
   empty?: boolean;        // neither: an empty workdir, to clone into from the terminal
   apps?: string[];
+  optionalApps?: string[]; // catalog ids (core/apps.ts) to install in the VM
   secretIds?: string[];
   git?: GitSetup;
 }): Promise<ProjectRow> {
   const name = opts.name.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
   if (!name) throw new Error("invalid project name");
   const empty = opts.empty === true;
+  const optionalApps = normalizeAppIds(opts.optionalApps ?? []);
   const cloneMode = !opts.sourcePath && !empty; // no local folder → clone the git remote in the VM
   if (empty && (opts.sourcePath || opts.git?.remote)) {
     throw new Error("an empty project has no local folder or git remote — clone repositories from its terminal");
@@ -408,10 +421,10 @@ export async function createProject(opts: {
   }
   // base_sha/source_branch recorded by provisionVM once the workdir is seeded
   db.query(
-    `INSERT INTO projects (id, name, image, state, source_path, source_branch, base_sha, last_synced_sha, apps, git_remote, git_token_enc, empty)
-     VALUES (?, ?, ?, 'creating', ?, NULL, NULL, NULL, ?, ?, ?, ?)`,
+    `INSERT INTO projects (id, name, image, state, source_path, source_branch, base_sha, last_synced_sha, apps, optional_apps, git_remote, git_token_enc, empty)
+     VALUES (?, ?, ?, 'creating', ?, NULL, NULL, NULL, ?, ?, ?, ?, ?)`,
   ).run(id, name, image, opts.sourcePath && !empty ? opts.sourcePath : "",
-        JSON.stringify(opts.apps ?? []), gitRemote, null, empty ? 1 : 0);
+        JSON.stringify(opts.apps ?? []), JSON.stringify(optionalApps), gitRemote, null, empty ? 1 : 0);
   for (const n of notes) logEvent(id, "image", n);
   const earlier = historyOf(name);
   if (earlier) logEvent(id, "history", `agent history of an earlier ${name} mounted (${earlier.tools.map((t) => t.tool).join(", ")}, ${mb(earlier.bytes)})`);
@@ -440,6 +453,7 @@ const GUEST_PROBE = [
   'echo "tmux_clients=$(tmux list-clients -t main 2>/dev/null | wc -l | tr -d \\ )"',
   'echo "uptime=$(cut -d. -f1 /proc/uptime)"',
   `cd ${config.guestWorkdir} 2>/dev/null && echo "git_dirty=$(git status --porcelain 2>/dev/null | wc -l | tr -d \\ )" && echo "git_branch=$(git branch --show-current 2>/dev/null)"`,
+  optionalAppProbe(),
 ].join("; ");
 
 function kv(text: string): Record<string, string> {
@@ -509,6 +523,7 @@ async function loadDetails(id: string) {
     base_sha: p.base_sha,
     last_synced_sha: p.last_synced_sha,
     apps: JSON.parse(p.apps),
+    optional_apps: optionalAppsFromGuest(guest, running && !unresponsive ? null : storedAppIds(p.optional_apps)), // catalog apps + what this VM has
     git_remote: p.git_remote,
     has_git_token: hasGitToken(p),
     net_cutoff: p.net_cutoff === 1,
@@ -605,6 +620,49 @@ export async function setGitRemote(id: string, git: { remote?: string; token?: s
   const after = getProject(id)!;
   logEvent(id, "git.remote", `${p.git_remote ? `${p.git_remote} → ` : ""}${remote}${token ? " (with token, kept in the vault)" : ""}`);
   return { git_remote: remote, has_git_token: hasGitToken(after) };
+}
+
+// One app change at a time per project: apt holds a lock, and two installs
+// racing would trip over each other.
+const appChanges = new Set<string>();
+
+/** Install an optional app into a running VM, or remove it. The choice is
+ *  recorded on the project, so a Rebuild installs the installed ones again.
+ *  Network for apt goes through the proxy with the provisioning window open:
+ *  the person clicked Install, so there is nobody to answer an approval. */
+export async function setProjectApp(id: string, appId: unknown, install: boolean) {
+  const p = getProject(id);
+  if (!p || p.state === "destroyed") throw new Error("project not found");
+  const app = optionalApp(appId);
+  if (p.state === "creating") throw new Error("this project is still being created");
+  if (appChanges.has(id)) throw new Error("an app change is already in progress — try again in a moment");
+  const ref = refFor(p.name);
+  if ((await driver.inspect(ref)).state !== "running") throw new Error("start the VM first — apps are kept inside it");
+
+  appChanges.add(id);
+  try {
+    const ids = storedAppIds(p.optional_apps);
+    if (!install) {
+      logEvent(id, "app.remove", app.label);
+      await removeAppFromGuest(ref, app);
+      db.query("UPDATE projects SET optional_apps = ? WHERE id = ?")
+        .run(JSON.stringify(ids.filter((x) => x !== app.id)), id);
+      logEvent(id, "app.removed", app.label);
+      return { id: app.id, installed: false, version: null };
+    }
+    logEvent(id, "app.install", `${app.label} — installing`);
+    await duringSetup(id, () => installAppInGuest(ref, app));
+    const version = await guestAppVersion(ref, app);
+    if (!ids.includes(app.id)) ids.push(app.id);
+    db.query("UPDATE projects SET optional_apps = ? WHERE id = ?").run(JSON.stringify(ids), id);
+    logEvent(id, "app.installed", `${app.label}${version ? ` ${version}` : ""}`);
+    return { id: app.id, installed: true, version };
+  } catch (e) {
+    logEvent(id, "app.error", `${app.label}: ${e instanceof Error ? e.message : e}`);
+    throw e;
+  } finally {
+    appChanges.delete(id);
+  }
 }
 
 /** A VM created before history was mounted keeps its agents' history on its own
