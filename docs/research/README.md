@@ -152,3 +152,4 @@ swappable per-platform backends.
 | [12-vaults.md](12-vaults.md) | Vaults: variables and secrets, proxy and fetch-at-runtime modes |
 | [13-agent-sessions.md](13-agent-sessions.md) | Agent logins and per-project conversation history |
 | [14-intel-mac.md](14-intel-mac.md) | Running locally on an Intel Mac: the `vfkit`/Virtualization.framework option, and the Linux-host workaround |
+| [15-docker-sandboxes.md](15-docker-sandboxes.md) | Docker Sandboxes (`sbx`) vs `container` and vs sadbox: layers, overlap, no Intel support |
