@@ -162,6 +162,30 @@ export function projectEvents(projectId: string, after = 0, limit = 100): Projec
   ).all(projectId, after, limit);
 }
 
+/** Clean command output before it goes into a project's create log: a git
+ *  remote may carry a token in its URL, and error text can echo it. */
+export function redactLog(text: string): string {
+  return String(text)
+    .replace(/(https?:\/\/)[^\s/@]+@/gi, "$1***@")
+    .replace(/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,})\b/g, "***");
+}
+
+/** One raw log line, shown under the "Logs" tab while a project is created. */
+export function logLine(projectId: string, source: string, line: string): void {
+  const text = redactLog(line).replace(/\r/g, "").replace(/\s+$/, "");
+  if (!text) return;
+  logEvent(projectId, `log.${source}`, text.slice(0, 8000));
+}
+
+/** Command output: one event per line, bounded so a trace cannot flood the
+ *  event log. */
+export function logOutput(projectId: string, source: string, text: string): void {
+  const lines = redactLog(text).split(/\r?\n/);
+  const shown = lines.slice(0, 500);
+  for (const line of shown) logLine(projectId, source, line);
+  if (lines.length > shown.length) logLine(projectId, source, `… ${lines.length - shown.length} more line(s)`);
+}
+
 /** Point the workdir's `origin` at an external remote. Its token, if any, is a
  *  proxy vault item (core/gittoken.ts): git's credential helper signs in with
  *  the placeholder, and the real token never enters the VM. */
@@ -184,13 +208,14 @@ async function configureGitRemote(ref: string, project: ProjectRow) {
  *  temp dir then copies in, so it works even when workdir is a sized volume
  *  with a lost+found.
  *  Returns the cloned default branch + its HEAD (the project's base). */
-async function cloneIntoWorkdir(ref: string, url: string, name: string): Promise<{ base: string; branch: string }> {
+async function cloneIntoWorkdir(ref: string, url: string, name: string, projectId: string): Promise<{ base: string; branch: string }> {
   const wd = config.guestWorkdir;
+  logLine(projectId, "clone", `git clone ${url}`);
   const script =
     `set -e; ` +
     `[ -f ${config.guestNetEnvFile} ] && . ${config.guestNetEnvFile}; ` +
     `tmp=$(mktemp -d); ` +
-    `git clone --quiet ${shellArg(url)} "$tmp/repo"; ` +
+    `GIT_TERMINAL_PROMPT=0 git clone --quiet ${shellArg(url)} "$tmp/repo"; ` +
     `mkdir -p ${wd}; ` +
     `cp -a "$tmp/repo/." ${wd}/; ` +
     `rm -rf "$tmp"; ` +
@@ -201,9 +226,20 @@ async function cloneIntoWorkdir(ref: string, url: string, name: string): Promise
     `base=$(git rev-parse HEAD); ` +
     `git checkout -q -b ${branchFor(name)}; ` +
     `echo "defbr=$defbr"; echo "base=$base"`;
-  const r = await driver.exec(ref, ["sh", "-c", script], { timeoutMs: LONG_TASK_MS });
-  if (r.exitCode !== 0) throw new Error(`git clone failed: ${r.stderr || r.stdout}`);
+  const r = await driver.exec(ref, ["sh", "-c", script], { timeoutMs: LONG_TASK_MS }).catch((e) => {
+    logLine(projectId, "clone.error", String(e));
+    throw e;
+  });
+  if (r.exitCode !== 0) {
+    const out = (r.stderr || r.stdout || "").trim();
+    logLine(projectId, "clone.error", `git clone exited ${r.exitCode}`);
+    logOutput(projectId, "clone.error", out || "(no output)");
+    logLine(projectId, "clone.error", "If the egress proxy blocked the host, approve it under Network → Activity and retry.");
+    throw new Error(`git clone failed (exit ${r.exitCode}): ${redactLog(out).slice(-2000) || "no output"}`);
+  }
+  if (r.stderr.trim()) logOutput(projectId, "clone", r.stderr);
   const info = kv(r.stdout);
+  logLine(projectId, "clone", `cloned ${info.defbr || "HEAD"} at ${(info.base || "").slice(0, 12)}`);
   return { base: info.base || "", branch: info.defbr || "HEAD" };
 }
 
@@ -245,11 +281,16 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   // out before the VM goes (rescueHistory)
   const shared = driver.capabilities.sharedMount;
   const mounts = shared ? prepareHistory(p.name) : [];
-  await driver.create(ref, p.image, {
-    cpus: s.defaultCpus, memoryMB, diskGB: s.defaultDiskGB, network: config.network,
-    socket: isolated ? { host: openProjectSocket(p.id), guest: config.guestCarrierSocket } : undefined,
-    mounts,
-  });
+  try {
+    await driver.create(ref, p.image, {
+      cpus: s.defaultCpus, memoryMB, diskGB: s.defaultDiskGB, network: config.network,
+      socket: isolated ? { host: openProjectSocket(p.id), guest: config.guestCarrierSocket } : undefined,
+      mounts,
+    });
+  } catch (e) {
+    logLine(p.id, "vm.error", String(e));
+    throw e;
+  }
   logEvent(p.id, "vm.ready", "VM booted");
   db.query("UPDATE projects SET history_mounted = ? WHERE id = ?").run(shared ? 1 : 0, p.id);
 
@@ -268,6 +309,7 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
     logEvent(p.id, "proxy.configure", isolated ? "CA installed, egress only via supervisor" : "CA installed, egress routed via supervisor (not enforced)");
   } catch (e) {
     logEvent(p.id, "proxy.configure.error", String(e));
+    logLine(p.id, "proxy.error", String(e));
     if (isolated) throw new Error(`could not connect the VM to the egress proxy: ${e instanceof Error ? e.message : e}`);
   }
 
@@ -276,7 +318,8 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   // placeholder. A token stored the old way moves to the vault first.
   if (opts.assignSecretIds?.length) setProjectItems(p.id, opts.assignSecretIds);
   await migrateGitToken(p, { fresh: true });
-  await injectVault(p.id);
+  try { await injectVault(p.id); }
+  catch (e) { logLine(p.id, "vault.error", String(e)); throw e; }
 
   if (empty) {
     // nothing to seed: the workdir is where repositories get cloned, and commits
@@ -285,13 +328,17 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
       `mkdir -p ${config.guestWorkdir} && ` +
       `git config --global user.name "sadbox project ${p.name}" && ` +
       `git config --global user.email "project@sadbox.local"`]);
-    if (setup.exitCode !== 0) throw new Error(`guest setup failed: ${setup.stderr}`);
+    if (setup.exitCode !== 0) {
+      logLine(p.id, "git.error", `guest setup exited ${setup.exitCode}`);
+      logOutput(p.id, "git.error", setup.stderr || "(no output)");
+      throw new Error(`guest setup failed: ${setup.stderr}`);
+    }
     db.query("UPDATE projects SET base_sha = NULL, last_synced_sha = NULL, source_branch = NULL WHERE id = ?").run(p.id);
   } else if (cloneMode) {
     if (!p.git_remote) throw new Error("no git remote to clone from");
     // clone straight into the workdir (a private repo signs in through the vault)
     const remote = p.git_remote;
-    const info = await duringSetup(p.id, () => cloneIntoWorkdir(ref, remote, p.name));
+    const info = await duringSetup(p.id, () => cloneIntoWorkdir(ref, remote, p.name, p.id));
     db.query("UPDATE projects SET base_sha = ?, last_synced_sha = ?, source_branch = ? WHERE id = ?")
       .run(info.base, info.base, info.branch, p.id);
   } else {
@@ -308,7 +355,11 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
       tarBytes,
       { timeoutMs: LONG_TASK_MS },
     );
-    if (cp.exitCode !== 0) throw new Error(`copy-in failed: ${cp.stderr}`);
+    if (cp.exitCode !== 0) {
+      logLine(p.id, "copy.error", `copy-in exited ${cp.exitCode}`);
+      logOutput(p.id, "copy.error", cp.stderr || "(no output)");
+      throw new Error(`copy-in failed: ${cp.stderr}`);
+    }
     await markEnvFilesSkipped(ref, trackedEnv);
     const setup = await driver.exec(ref, ["sh", "-c",
       `cd ${config.guestWorkdir} && ` +
@@ -316,7 +367,11 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
       `git config user.email "project@sadbox.local" && ` +
       `git checkout -q -b ${branchFor(p.name)}`,
     ]);
-    if (setup.exitCode !== 0) throw new Error(`guest setup failed: ${setup.stderr}`);
+    if (setup.exitCode !== 0) {
+      logLine(p.id, "git.error", `guest setup exited ${setup.exitCode}`);
+      logOutput(p.id, "git.error", setup.stderr || "(no output)");
+      throw new Error(`guest setup failed: ${setup.stderr}`);
+    }
   }
   logEvent(p.id, "workdir.ready", empty ? "empty workdir ready" : cloneMode ? "repository cloned" : "source copied in");
 
@@ -324,7 +379,10 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   await installShellHooks(ref);
 
   // external git remote — local mode only; clone mode already has origin (from the clone)
-  if (!cloneMode && !empty) await configureGitRemote(ref, p);
+  if (!cloneMode && !empty) {
+    try { await configureGitRemote(ref, p); }
+    catch (e) { logLine(p.id, "git.error", String(e)); throw e; }
+  }
 
   // The base image is built once and its agents go stale, so bring claude, omp
   // and opencode to their latest releases in every new or rebuilt VM. Best
@@ -372,7 +430,11 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   // tmux starts last so its shells are born with the secrets + proxy env in place
   const tmux = await driver.exec(ref, ["tmux", "new-session", "-d",
     "-s", config.tmuxSession, "-c", config.guestWorkdir]);
-  if (tmux.exitCode !== 0) throw new Error(`tmux start failed: ${tmux.stderr}`);
+  if (tmux.exitCode !== 0) {
+    logLine(p.id, "terminal.error", `tmux exited ${tmux.exitCode}`);
+    logOutput(p.id, "terminal.error", tmux.stderr || "(no output)");
+    throw new Error(`tmux start failed: ${tmux.stderr}`);
+  }
   logEvent(p.id, "terminal.ready", `tmux session ${config.tmuxSession} started`);
 }
 
@@ -430,16 +492,18 @@ export async function createProject(opts: {
   for (const n of notes) logEvent(id, "image", n);
   const earlier = historyOf(name);
   if (earlier) logEvent(id, "history", `agent history of an earlier ${name} mounted (${earlier.tools.map((t) => t.tool).join(", ")}, ${mb(earlier.bytes)})`);
-  logEvent(id, "create.start", empty ? `${name}, empty workdir` : cloneMode ? `${name} cloning ${gitRemote}` : `${name} from ${sourcePath}`);
+  logEvent(id, "create.start", redactLog(empty ? `${name}, empty workdir` : cloneMode ? `${name} cloning ${gitRemote}` : `${name} from ${sourcePath}`));
 
   try {
     await provisionVM(getProject(id)!, { assignSecretIds: secretIds });
     db.query("UPDATE projects SET state = 'running' WHERE id = ?").run(id);
     logEvent(id, "create.done");
   } catch (e) {
-    db.query("UPDATE projects SET state = 'error', error = ? WHERE id = ?").run(String(e), id);
-    logEvent(id, "create.error", String(e));
-    throw e;
+    const message = redactLog(String(e));
+    db.query("UPDATE projects SET state = 'error', error = ? WHERE id = ?").run(message, id);
+    logEvent(id, "create.error", message);
+    logLine(id, "create.error", message);
+    throw new Error(message);
   }
   return getProject(id)!;
 }
@@ -740,9 +804,9 @@ export async function rebuildProject(id: string): Promise<ProjectRow> {
   // added to the base after this project — e.g. nvm — land in the fresh VM.
   const image = await resolveImage((m) => logEvent(id, "image", m));
   await rescueHistory(p); // an older VM's agent history, before the VM goes
-  logEvent(id, "rebuild.start",
+  logEvent(id, "rebuild.start", redactLog(
     (empty ? "empty workdir" : cloneMode ? `re-clone ${p.git_remote}` : `re-copy ${p.source_path}`) +
-    (image !== p.image ? ` · image ${p.image} → ${image}` : ""));
+    (image !== p.image ? ` · image ${p.image} → ${image}` : "")));
   db.query("UPDATE projects SET state = 'creating', error = NULL, image = ? WHERE id = ?").run(image, id);
   try {
     await driver.destroy(refFor(p.name)); // tear down the old VM; keep row + secrets + rules
@@ -753,9 +817,11 @@ export async function rebuildProject(id: string): Promise<ProjectRow> {
     db.query("UPDATE projects SET state = 'running' WHERE id = ?").run(id);
     logEvent(id, "rebuild.done");
   } catch (e) {
-    db.query("UPDATE projects SET state = 'error', error = ? WHERE id = ?").run(String(e), id);
-    logEvent(id, "rebuild.error", String(e));
-    throw e;
+    const message = redactLog(String(e));
+    db.query("UPDATE projects SET state = 'error', error = ? WHERE id = ?").run(message, id);
+    logEvent(id, "rebuild.error", message);
+    logLine(id, "rebuild.error", message);
+    throw new Error(message);
   }
   return getProject(id)!;
 }

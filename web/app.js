@@ -277,6 +277,9 @@ function wireBindings(root, after) {
 
 // a secret's value, once revealed, until hidden again (or 30 s pass)
 const revealed = new Map(); // id → value
+// a proxy item's placeholder is not secret, but it is token-shaped; show it
+// only when asked, like the value beside it
+const revealedPlaceholders = new Map(); // id → true
 const MASK = "••••••••";
 
 function valueCell(s) {
@@ -764,11 +767,15 @@ document.addEventListener("click", async (e) => {
 const psec = $("#psec");
 let psecProjectId = null;
 
-// what this VM holds for a proxy item — safe to show and copy (it's not the value)
+// what this VM holds for a proxy item — not the value, but token-shaped, so it
+// stays masked until the eye is clicked
 function placeholderLine(s) {
   if (s.mode !== "proxy") return "";
   if (!s.placeholder) return `<div class="phline hint">placeholder made when the VM next gets its vault items</div>`;
-  return `<div class="phline"><span class="hint">in this VM:</span> <code>${escapeHtml(s.placeholder)}</code>
+  const shown = revealedPlaceholders.has(s.id);
+  return `<div class="phline"><span class="hint">in this VM (placeholder):</span>
+    <code class="vval${shown ? "" : " masked"}">${shown ? escapeHtml(s.placeholder) : MASK}</code>
+    <button type="button" class="mini eye" data-ph-reveal="${s.id}" title="${shown ? "Hide" : "Show the placeholder"}">${shown ? "🙈" : "👁"}</button>
     <button type="button" class="link-add" data-copy="${escapeHtml(s.placeholder)}">copy</button></div>`;
 }
 
@@ -779,7 +786,8 @@ async function renderProjectVault() {
     ? vaultCache.map((s) => {
         const m = mine.get(s.id);
         return `<div class="psec-g"><label><input type="checkbox" name="psec-g" value="${s.id}" ${m ? "checked" : ""}>
-          <span class="sec-name">${escapeHtml(s.name)}</span></label> ${kindBadge(s)}${modeBadges(s)}${m ? placeholderLine(m) : ""}</div>`;
+          <span class="sec-name">${escapeHtml(s.name)}</span></label> ${kindBadge(s)}${modeBadges(s)}
+          <div class="vrow vvalue">${valueCell(s)}</div>${m ? placeholderLine(m) : ""}</div>`;
       }).join("")
     : `<span class="empty">the vault is empty</span>`;
   $("#psec-status").textContent = "";
@@ -795,6 +803,30 @@ async function openProjectSecrets(id, name) {
 $("#psec-close").onclick = () => psec.close();
 $("#psec-new").onclick = () => openItemDialog(null, { projectIds: [psecProjectId], after: renderProjectVault });
 psec.addEventListener("click", async (e) => {
+  const eye = e.target.closest("[data-reveal]");
+  if (eye) {
+    const id = eye.dataset.reveal;
+    try {
+      if (revealed.has(id)) revealed.delete(id);
+      else {
+        revealed.set(id, (await api(`/api/vault/${id}/value`)).value);
+        setTimeout(() => { revealed.delete(id); if (psec.open) renderProjectVault(); }, 30_000);
+      }
+      await renderProjectVault();
+    } catch (err) { alert(err.message); }
+    return;
+  }
+  const ph = e.target.closest("[data-ph-reveal]");
+  if (ph) {
+    const id = ph.dataset.phReveal;
+    if (revealedPlaceholders.has(id)) revealedPlaceholders.delete(id);
+    else {
+      revealedPlaceholders.set(id, true);
+      setTimeout(() => { revealedPlaceholders.delete(id); if (psec.open) renderProjectVault(); }, 30_000);
+    }
+    await renderProjectVault();
+    return;
+  }
   const b = e.target.closest("[data-copy]");
   if (!b) return;
   try { await navigator.clipboard.writeText(b.dataset.copy); b.textContent = "copied"; }
@@ -990,6 +1022,25 @@ const eventTime = (at) => {
   return Number.isNaN(d.getTime()) ? "" : d.toTimeString().slice(0, 8);
 };
 
+const cpRaw = $("#cp-raw");
+function showCreateTab(tab) {
+  const logs = tab === "logs";
+  $("#cp-log").hidden = logs;
+  cpRaw.hidden = !logs;
+  $("#cp-tab-steps").classList.toggle("active", !logs);
+  $("#cp-tab-logs").classList.toggle("active", logs);
+  $("#cp-tab-steps").setAttribute("aria-selected", String(!logs));
+  $("#cp-tab-logs").setAttribute("aria-selected", String(logs));
+}
+$("#cp-tab-steps").onclick = () => showCreateTab("steps");
+$("#cp-tab-logs").onclick = () => showCreateTab("logs");
+$("#cp-copy-logs").onclick = async () => {
+  const b = $("#cp-copy-logs");
+  try { await navigator.clipboard.writeText(cpRaw.textContent); b.textContent = "copied"; }
+  catch { b.textContent = "copy failed"; }
+  setTimeout(() => { b.textContent = "copy logs"; }, 1500);
+};
+
 function resetCreateProgress() {
   createBusy = false;
   createWatch?.stop();
@@ -999,6 +1050,8 @@ function resetCreateProgress() {
   form.removeAttribute("aria-busy");
   $("#create-progress").hidden = true;
   $("#cp-log").innerHTML = "";
+  cpRaw.textContent = "";
+  showCreateTab("steps");
   $("#cp-phase").textContent = "Starting…";
   $("#cp-elapsed").textContent = "0:00";
   $("#cp-error").hidden = true;
@@ -1021,6 +1074,8 @@ function startCreateProgress(name, mode, startedAt) {
     : "Preparing the image and booting the VM…";
   $("#cp-elapsed").textContent = "0:00";
   $("#cp-log").innerHTML = "";
+  cpRaw.textContent = "";
+  showCreateTab("steps");
   $("#cp-error").hidden = true;
   $("#cp-error").textContent = "";
   $("#cp-actions").hidden = true;
@@ -1031,7 +1086,15 @@ function startCreateProgress(name, mode, startedAt) {
   let stopped = false, timer = null, lastId = 0, id = null;
   const tick = setInterval(() => { $("#cp-elapsed").textContent = elapsedText(Date.now() - startedAt); }, 500);
   const phase = (text) => { $("#cp-phase").textContent = text; };
+  const addLog = (ev) => {
+    const source = ev.type.slice(4) || "log";
+    const line = `${eventTime(ev.at)} [${source}] ${ev.detail}`;
+    cpRaw.textContent += (cpRaw.textContent ? "\n" : "") + line;
+    cpRaw.scrollTop = cpRaw.scrollHeight;
+  };
   const addEvent = (ev) => {
+    // raw command output goes to its own tab; the step list stays readable
+    if (ev.type.startsWith("log.")) { addLog(ev); return; }
     const li = document.createElement("li");
     const t = document.createElement("span");
     t.className = "t";
@@ -1045,26 +1108,37 @@ function startCreateProgress(name, mode, startedAt) {
     $("#cp-log").scrollTop = $("#cp-log").scrollHeight;
     phase(label);
   };
+  const read = async () => {
+    if (!id) {
+      // the row appears as soon as the supervisor starts provisioning
+      const list = await api("/api/projects");
+      const found = list.find((x) => normProjectName(x.name) === name && x.state === "creating")
+        || list.find((x) => normProjectName(x.name) === name);
+      if (!found) return 0;
+      id = found.id;
+      phase("Booting the VM…");
+    }
+    const events = await api(`/api/projects/${encodeURIComponent(id)}/events?after=${lastId}`);
+    for (const ev of events) { lastId = ev.id; addEvent(ev); }
+    return events.length;
+  };
   const poll = async () => {
     if (stopped) return;
-    try {
-      if (!id) {
-        // the row appears as soon as the supervisor starts provisioning
-        const list = await api("/api/projects");
-        const found = list.find((x) => normProjectName(x.name) === name && x.state === "creating")
-          || list.find((x) => normProjectName(x.name) === name);
-        if (found) { id = found.id; phase("Booting the VM…"); }
-      } else {
-        const events = await api(`/api/projects/${encodeURIComponent(id)}/events?after=${lastId}`);
-        for (const ev of events) { lastId = ev.id; addEvent(ev); }
-      }
-    } catch {}
+    try { await read(); } catch {}
     if (!stopped) timer = setTimeout(poll, id ? 700 : 600);
+  };
+  const drain = async () => {
+    for (let i = 0; i < 20 && !stopped; i++) {
+      let n = 0;
+      try { n = await read(); } catch { break; }
+      if (n < 100) break;
+    }
   };
   poll();
   createWatch = {
     stop() { stopped = true; clearInterval(tick); clearTimeout(timer); },
     phase,
+    drain,
   };
 }
 
@@ -1224,12 +1298,15 @@ $("#create-form").onsubmit = async (e) => {
     // select it: route() opens the detail view and marks it in the nav
     location.hash = `project/${created.id}`;
   } catch (err) {
-    // keep the form's values; Back returns to them
+    // pick up the last events before the watcher goes quiet, including the
+    // command output that says why a clone failed
+    try { await createWatch?.drain(); } catch {}
     createWatch?.stop();
     $("#cp-phase").textContent = "Could not create the project";
     $("#cp-error").textContent = err.message;
     $("#cp-error").hidden = false;
     $("#cp-actions").hidden = false;
+    if (cpRaw.textContent.trim()) showCreateTab("logs");
   }
 };
 

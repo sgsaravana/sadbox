@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { db, logEvent } from "../db";
-import { projectEvents } from "./projects";
+import { logLine, logOutput, projectEvents, redactLog } from "./projects";
 
 // The create form reads this log for real progress; multiple projects share the
 // events table, so a unique id keeps these rows out of anyone else's way.
@@ -35,5 +35,28 @@ describe("a project's event log", () => {
 
   test("an empty or unknown project is an empty log", () => {
     expect(projectEvents("no-such-project")).toEqual([]);
+  });
+});
+
+describe("raw create logs", () => {
+  const logId = `${id}-raw`;
+  afterAll(() => db.query("DELETE FROM events WHERE project_id = ?").run(logId));
+
+  test("credentials never reach the event log", () => {
+    expect(redactLog("https://user:ghp_abcdefghijklmnopqrstuvwxyz@github.com/o/r"))
+      .toBe("https://***@github.com/o/r");
+    expect(redactLog("fatal: token ghp_abcdefghijklmnopqrstuvwxyz rejected")).toBe("fatal: token *** rejected");
+  });
+
+  test("log lines keep their source and are one event each", () => {
+    logLine(logId, "clone", "first");
+    logOutput(logId, "clone.error", "second\nthird");
+    logLine(logId, "clone", "");
+    const events = projectEvents(logId);
+    expect(events.map((e) => [e.type, e.detail])).toEqual([
+      ["log.clone", "first"],
+      ["log.clone.error", "second"],
+      ["log.clone.error", "third"],
+    ]);
   });
 });
