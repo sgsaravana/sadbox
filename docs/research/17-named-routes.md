@@ -13,6 +13,11 @@
 >
 > Tested 2026-11-15 with Bun 1.4.4, Caddy 2.11.9 and Vite 6.4.6. The prototype
 > is in [`spikes/g-named-routes/`](../../spikes/g-named-routes/).
+>
+> **Status (2026-11-15):** host-based routes are implemented on
+> `feature/named-routes` (`src/net/routes.ts`, the **Named routes** panel, API,
+> tests, `SADBOX_ROUTE_DOMAIN`/`SADBOX_ROUTES_PORT`). Path-based routes are not
+> implemented and are not planned for the UI origin; see §7–§8.
 
 ## 1. Why the current setup fails behind Caddy
 
@@ -253,7 +258,8 @@ host-based by default, path-based for the explicit base-path case.
 ### Data
 
 New table (avoids making `port_forwards.host_port` nullable and its `UNIQUE`
-constraint awkward):
+constraint awkward). The built host-only version omits `base_path`; that column
+belongs to the optional path mode, which is not built:
 
 ```sql
 CREATE TABLE named_routes (

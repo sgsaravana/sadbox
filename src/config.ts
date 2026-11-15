@@ -39,6 +39,13 @@ export const config = {
   // in to sadbox unless it is opened to anyone (net/forwards.ts). Set
   // SADBOX_FORWARD_HOST=localhost to keep them on this machine only.
   forwardHost: process.env.SADBOX_FORWARD_HOST ?? "0.0.0.0",
+  // Named routes: <name>.<routeDomain> → one VM port, all through a single
+  // HTTP listener. Empty disables the feature (and SADBOX_ROUTES_PORT is not
+  // opened). The listener is loopback-only because a reverse proxy owns the
+  // public name; Caddy must route *.<routeDomain> to it (packaging/caddy).
+  routeDomain: process.env.SADBOX_ROUTE_DOMAIN || undefined,
+  routesPort: Number(process.env.SADBOX_ROUTES_PORT ?? 7072),
+  routesHost: process.env.SADBOX_ROUTES_HOST || "127.0.0.1",
   // how long a blocked request is held awaiting an approve/deny decision
   approvalTimeoutMs: Number(process.env.SADBOX_APPROVAL_TIMEOUT_MS ?? 120_000),
   // how long each VM's network request log is kept in the database, in days

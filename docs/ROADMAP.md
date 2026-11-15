@@ -1,7 +1,11 @@
 # sadbox — Roadmap
 
 > What has shipped, what is next, and the plan for Linux support.
-> Last updated 2026-11-11. Design background lives in [`research/`](research/README.md).
+> Last updated 2026-11-16. Design background lives in [`research/`](research/README.md).
+>
+> **Shipped since v0:** credential proxy, vaults, agent logins/history, the
+> network panel and controls (v0.5.0 Linux, v0.5.1, Intel/`vz`, Windows 11/WSL 2
+> beta). The remaining work and validation are in [`TODO.md`](TODO.md).
 
 ## Shipped (v0, macOS)
 
@@ -19,22 +23,21 @@ All on Apple silicon + macOS 26, through the Apple `container` driver
 | Sync-back | git-bundle sync to the source folder, including uncommitted work; GitHub-sourced projects can connect to a local folder |
 | Editor | Built-in browser editor with stage / commit / push / branch switch / stash / discard |
 | Network | VMs have no NIC; all egress goes through the supervisor's MITM proxy over a published unix socket. Block-by-default with time-boxed approvals, allow/block + header-rewrite rules (global or per-project), live request log |
-| Ports & links | Port forwarding into a VM; links section on the detail page |
+| Ports & links | Port forwarding into a VM; named host routes (`<name>.<domain>`, branch `feature/named-routes`); links section on the detail page |
 | UI | Home overview, side nav with project list, live CPU/memory/disk/network vitals |
 | Auth | Password sign-in with session cookie |
-| Distribution | Release workflow (darwin + linux binaries), `install.sh`, Homebrew formula, version workflow, Caddy LAN deployment guide |
+| Distribution | Release workflow (darwin + linux binaries), `install.sh`, Homebrew formula, version workflow, Caddy LAN deployment guide; `sadbox update` self-update (branch `feature/named-routes`) |
 
-## Current: credential proxy + network controls — built on `feature/proxy-credentials`, not merged
+## Shipped: credential proxy, vaults and network controls
 
-Remaining before merge: Spike D **round 2** with real, short-lived tokens
-(create them as *proxy* vault items in the UI; see the spike README), and a
-real Claude `/login` + refresh through the proxy (Agent logins, below).
-Both are **ready to run** (prepared 2026-11-04): the step-by-step procedure,
-`round2-vm.sh` (VM checks) and `round2-report.ts` (request log + leak scan)
-are in [`spikes/d-credential-proxy/`](../spikes/d-credential-proxy/README.md#vm-experiments-round-2-real-tokens).
+These are merged on `main` and documented in the README. One verification is
+still open: Spike D **round 2** with real, short-lived tokens (create them as
+*proxy* vault items in the UI; see the spike README), and a real Claude
+`/login` + refresh through the proxy (Agent logins, below). Both are **ready to
+run** (prepared 2026-11-04): the step-by-step procedure, `round2-vm.sh` (VM
+checks) and `round2-report.ts` (request log + leak scan) are in
+[`spikes/d-credential-proxy/`](../spikes/d-credential-proxy/README.md#vm-experiments-round-2-real-tokens).
 Only the tokens and the run are left.
-Merge `feature/proxy` into `main` first, then this branch. In `acceptClient`,
-the cutoff check must stay before link handling.
 
 **Goal:** a secret can be delivered *via the proxy*. The VM only holds a
 placeholder (in its env / `.env`); the supervisor's MITM proxy swaps the
@@ -53,7 +56,7 @@ Design: [`research/11-credential-proxy.md`](research/11-credential-proxy.md).
 | C4 ✓ | UI: delivery toggle, bindings editor with presets, placeholder display |
 | C5 ✓ | README (Secrets, API, Known limitations), `research/05` §(e) marked built, spike harness retired |
 
-### Also on this branch: network panel and controls
+### Also shipped: network panel and controls
 
 | Item | What it does |
 |---|---|
@@ -63,7 +66,7 @@ Design: [`research/11-credential-proxy.md`](research/11-credential-proxy.md).
 | Internet cutoff ✓ | One-click switch on the project page that blocks all egress for the VM: CONNECT and HTTP are refused before rules are checked, and pending approvals are denied. Persisted (`projects.net_cutoff`), shown as "internet off" on the status card (`PUT /api/projects/:id/network`) |
 | Persistent request log ✓ | Requests are stored in SQLite `net_requests` (metadata and secret names only, never headers, bodies or values), batched every second and flushed on shutdown. Kept for **≥ 7 days** (`SADBOX_NET_LOG_DAYS`), pruned hourly. Activity can show the last 24 hours or 7 days by host, and "Load older requests" pages back through history. The log survives restarts and rebuilds |
 
-### Also on this branch: Vaults and agent sessions (built 2026-11-04)
+### Also shipped: Vaults and agent sessions (built 2026-11-04)
 
 Design: [`research/12-vaults.md`](research/12-vaults.md),
 [`research/13-agent-sessions.md`](research/13-agent-sessions.md).
@@ -83,7 +86,7 @@ Design: [`research/12-vaults.md`](research/12-vaults.md),
 | Forwarded ports behind sign-in ✓ | A forward is HTTP for a browser signed in to sadbox by default: the UI hands out a one-time ticket, the forward trades it for a cookie for that port only (ends with the UI session), and sadbox's cookies never reach the app. WebSockets included. A forward can be opened to anyone (raw TCP) for non-HTTP servers. Existing forwards move behind sign-in |
 | Bindings allow their hosts ✓ | A project with access to a proxy item is allowed to the item's bound hosts (host, path, method, expiry) without a network rule, so the first, unauthenticated `git clone` request isn't held. Derived at request time, shown read-only in Rules (🔑 vault · NAME); a block rule still wins |
 
-## Then: Linux support
+## Linux support — shipped in v0.5.0
 
 **Goal:** the same supervisor runs on a Linux host with `/dev/kvm` (bare metal,
 a home server, or EC2), natively or under docker-compose, and every feature
@@ -258,6 +261,21 @@ and disk boot and projects run.
   Docker. Build the amd64 disk and kernel on the Linux x86_64 job, pass them as
   artifacts, and run `vz.it.test.ts` there.
 - L6's contract suite now has three drivers to cover.
+
+## Named routes — built on `feature/named-routes` (host mode)
+
+Give a VM port a hostname, `<name>.<SADBOX_ROUTE_DOMAIN>`, so it can be opened
+from the same Caddy-managed domain without a second host port. One loopback
+listener serves every name; the app runs at `/` on its own origin, keeping the
+UI session cookie and web storage separate. Sign-in/open passes, WebSockets,
+the UI panel, API and tests are built. `SADBOX_ROUTE_DOMAIN` plus a wildcard
+DNS record/certificate and the Caddy block turn it on.
+
+The path form (`sadbox.domain.com/sample`) is **not** planned: it breaks
+root-absolute URLs and would put the app on the UI's origin, where it could
+call sadbox's API with the operator's session. The study and spike are in
+[`research/17-named-routes.md`](research/17-named-routes.md) and
+[`spikes/g-named-routes/`](../spikes/g-named-routes/).
 
 ## Other planned work
 

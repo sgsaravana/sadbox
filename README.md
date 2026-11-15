@@ -50,7 +50,7 @@ through [`vfkit`](https://github.com/crc-org/vfkit) on an Intel Mac, and
   - [Git setup and sync-back](#git-setup-and-sync-back)
   - [Project detail view](#project-detail-view)
   - [Network proxy and isolation](#network-proxy-and-isolation)
-  - [Port forwards and project links](#port-forwards-and-project-links)
+  - [Port forwards, named routes and project links](#port-forwards-named-routes-and-project-links)
   - [Sign-in and sessions](#sign-in-and-sessions)
 - [API](#api)
 - [Deploying](#deploying)
@@ -454,6 +454,26 @@ SADBOX_PASSWORD='choose-a-password' docker compose up -d   # http://localhost:70
 
 Your projects, vault, agent logins and history live in `~/.sadbox` and are
 kept across updates; nothing there needs to be exported or migrated by hand.
+
+**Installed with `install.sh` or a downloaded binary? One command:**
+
+```sh
+sadbox update
+```
+
+It checks GitHub for the latest stable release, downloads the matching binary,
+verifies the release's `SHA256SUMS`, replaces the binary atomically, and
+restarts a systemd or launchd service if it finds one. Useful flags:
+`--check` (report only), `--prerelease` (follow the pre-release track),
+`--version v0.6.0` (install an exact release), `--no-restart`, `--force`.
+A beta build follows pre-releases automatically. Forked builds can set
+`SADBOX_REPO=owner/repo`; `SADBOX_GITHUB_TOKEN` avoids GitHub API rate limits.
+Homebrew, docker compose and source checkouts are told their own update
+command instead of having the binary replaced underneath them. (Homebrew
+follows the formula, so `--version`/`--prerelease` are for the install-script
+and downloaded-binary paths.)
+
+Or update by hand:
 
 1. **Stop the supervisor**: Ctrl-C on `sadbox serve` (or unload its launchd
    job — see [macOS: run at boot](#macos-run-at-boot-launchd); on Linux,
@@ -960,8 +980,23 @@ over vsock instead.
   **Rebuild** them, and `SADBOX_NETWORK=default` opts new projects out. Linux
   VMs are always isolated: the KVM driver has no VM networks to opt into.
 
-### Port forwards and project links
+### Port forwards, named routes and project links
 
+- **Named routes** (inbound HTTP): give a port in the VM a name and open it at
+  `<name>.<SADBOX_ROUTE_DOMAIN>` — for example `sample.sadbox.internal.example.com`
+  — with no extra host port. One listener (loopback `127.0.0.1:7072`) serves
+  every name; Caddy routes the wildcard to it. The app runs at `/` on its own
+  origin, so it needs no base-path configuration and never sees the web UI's
+  session cookie. Set `SADBOX_ROUTE_DOMAIN` (e.g. `sadbox.internal.example.com`)
+  and route `*.<domain>` to `127.0.0.1:7072`; without it the feature is off and
+  no port is opened. A route is **🔒 sign-in** (the default) or **🔓 anyone**,
+  exactly like a forward, and `/__sadbox/auth` is sadbox's path, not the app's.
+  Names are DNS labels; `sadbox`, `www`, `api`, `admin` and a few others are
+  reserved. HTTP and WebSockets only (a database or SSH still uses a port
+  forward). A **path** form (`sadbox.example.com/sample`) is deliberately not
+  offered: it breaks root-absolute URLs in normal apps and would put the app on
+  the UI's origin, where it could call sadbox's API with your session — see
+  [`docs/research/17-named-routes.md`](docs/research/17-named-routes.md).
 - **Port forwards** (inbound): on the detail view, map a port on the supervisor
   host to a port inside the VM (e.g. host `8080` → VM `8000`) and open the app
   the agent is running at `<supervisor-host>:8080`. Since a VM has no network
@@ -1092,6 +1127,8 @@ over vsock instead.
 | GET/POST | `/api/projects/:id/links`, DELETE `…/:lid` | project links: `{outgoing, incoming}` / allow this VM to reach another project's port (`{to, port}`, `to` = id or name) / remove (from either end) |
 | GET/POST | `/api/projects/:id/forwards`, PATCH/DELETE `…/:fid` | port forwards (`{hostPort, guestPort, access}`) — host port → VM port; `access` is `signin` (default) or `open`, and PATCH `{access}` switches it |
 | GET | `/forwards/:fid/open?next=/path` | open a forward in the browser: a sign-in forward gets a one-time ticket at its own address |
+| GET/POST | `/api/projects/:id/routes`, PATCH/DELETE `…/:rid` | named routes (`{name, guestPort, access}`) — `<name>.<SADBOX_ROUTE_DOMAIN>` → VM port; `access` is `signin` (default) or `open`, and PATCH `{access}` switches it |
+| GET | `/routes/:rid/open?next=/path` | open a named route in the browser: a sign-in route gets a one-time ticket at its own host |
 | GET/POST | `/api/net/rules`, DELETE `/api/net/rules/:id` | global allow/block rules |
 | GET/POST | `/api/net/headers`, DELETE `/api/net/headers/:id` | global header rewrites |
 | GET | `/api/net/pending` | `{projectId: count}` pending approvals (nav badges) |
@@ -1315,6 +1352,30 @@ cert — then `wss://` (terminal) and SSE work with no client cert-trust steps:
 (For a standalone hostname without a wildcard, give the block its own `tls`
 directive — real certs, or `tls internal` plus `caddy trust` on each client.)
 
+**Named routes** need a wildcard of their own. With
+`SADBOX_ROUTE_DOMAIN=sadbox.internal.example.com`, `sample.sadbox.internal.example.com`
+is a *second-level* wildcard, which a `*.internal.example.com` certificate does
+not cover. Add a block (Caddy gets the wildcard through the same DNS challenge):
+
+```caddy
+*.sadbox.internal.example.com {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+    reverse_proxy 127.0.0.1:7072 {   # Docker/colima: host.docker.internal:7072
+        flush_interval -1        # keep an app's SSE/streaming responses unbuffered
+    }
+}
+```
+
+If your existing one-level `*.internal.example.com` wildcard is **dedicated to
+sadbox**, you can instead set `SADBOX_ROUTE_DOMAIN=internal.example.com`: routes
+are then `sample.internal.example.com`, and the `sadbox.internal.example.com`
+host stays the UI. Do not do that on a wildcard shared with other services,
+because sadbox's route listener would receive their hostnames too. Either way,
+names are first-label DNS names and `sadbox` is reserved so a route can never
+shadow the UI.
+
 The `dns cloudflare` challenge needs a Caddy built with
 [`caddy-dns/cloudflare`](https://github.com/caddy-dns/cloudflare): the official
 `caddy` Docker image and Homebrew's `caddy` do not include it. Build one with
@@ -1339,11 +1400,13 @@ Notes:
   `caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile`; an empty
   `CLOUDFLARE_API_TOKEN` fails at config load with
   `API token '' appears invalid`.
-- **Only route 7070.** Port 7071 is the egress proxy for older VMs that still
-  sit on a network (new ones use a private socket instead); it refuses any
-  client that is not a project VM and must not be proxied.
+- **Only route 7070 and (for named routes) 7072.** Port 7071 is the egress proxy
+  for older VMs that still sit on a network (new ones use a private socket
+  instead); it refuses any client that is not a project VM and must not be
+  proxied.
 - Use a **dedicated hostname** (or the root), not a subpath — sadbox serves its
-  assets and API from `/`.
+  assets and API from `/`. Named routes are the supported way to put apps on
+  the same domain (each on its own hostname).
 - Run it under **launchd** so it survives reboots (or `brew services` once the
   formula is in use; on Linux, `sadbox service install`); Caddy keeps proxying
   to the same localhost port.
@@ -1360,6 +1423,9 @@ Notes:
 - **Forwarded ports are plain HTTP**: a sign-in forward's cookie crosses the
   network unencrypted when it is opened from another machine, and a forward
   opened to anyone is raw TCP that anyone who can reach this machine can use.
+  Named routes avoid this for HTTP apps by going through Caddy's TLS, but they
+  need `SADBOX_ROUTE_DOMAIN` and a wildcard DNS record/certificate; they are
+  HTTP/WebSockets only, and a path form is not supported.
 - Platforms: Apple silicon Macs on macOS 26+, Intel Macs (built, see
   [Supported platforms](#supported-platforms)), and Linux with KVM. On Linux:
   - Creating a project copies the image's disk (about 2 GB), which takes a few seconds on ext4.

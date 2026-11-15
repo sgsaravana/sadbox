@@ -13,6 +13,7 @@ import { purgeProjectNet } from "../net/rules";
 import { clearProjectApprovals } from "../net/approvals";
 import { clearProjectFeed } from "../net/events";
 import { purgeProjectForwards } from "../net/forwards";
+import { purgeProjectNamedRoutes } from "../net/routes";
 import { purgeProjectLinks } from "../net/links";
 import { duringSetup } from "../net/setup";
 import { type ToolInfo } from "./toolchain";
@@ -706,6 +707,7 @@ export async function destroyProject(id: string): Promise<void> {
   purgeProjectLogins(id);  // …and its login placeholders; the logins stay
   purgeProjectNet(id);     // per-project net rules die with the VM too
   purgeProjectForwards(id); // …and so do its port forwards (frees the host ports)
+  purgeProjectNamedRoutes(id); // …and its named routes (frees their names)
   purgeProjectLinks(id);    // …and its links, both ways
   await rm(join(config.dataDir, "sync", `${id}.git`), { recursive: true, force: true });
   closeProjectSocket(id);

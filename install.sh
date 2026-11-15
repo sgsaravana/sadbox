@@ -25,6 +25,7 @@ mkdir -p "$BIN_DIR"
 curl -fSL "$url" -o "$BIN_DIR/sadbox"
 chmod +x "$BIN_DIR/sadbox"
 echo "✓ installed sadbox to $BIN_DIR/sadbox"
+echo "· update later with: sadbox update"
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) : ;;

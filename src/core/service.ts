@@ -90,3 +90,29 @@ export async function serviceStatus(): Promise<string> {
   if (!existsSync(unitPath())) return `not installed (sadbox service install)`;
   return (await systemctl("status", "--no-pager", "--lines=5", UNIT_NAME)).out;
 }
+
+/** Restart the installed supervisor service after an update, if there is one.
+ *  Returns the command used, or null when sadbox is not running as a service. */
+export async function restartService(): Promise<string | null> {
+  if (process.platform === "linux") {
+    if (!existsSync(unitPath()) || !Bun.which("systemctl")) return null;
+    const r = await systemctl("restart", UNIT_NAME);
+    if (r.code !== 0) throw new Error(`systemctl --user restart ${UNIT_NAME}: ${r.out}`);
+    return `systemctl --user restart ${UNIT_NAME}`;
+  }
+  if (process.platform === "darwin") {
+    const plist = join(homedir(), "Library", "LaunchAgents", "dev.sadbox.supervisor.plist");
+    if (!existsSync(plist) || !Bun.which("launchctl")) return null;
+    const uid = typeof process.getuid === "function" ? process.getuid() : null;
+    if (uid == null) return null;
+    const r = Bun.spawnSync(["launchctl", "kickstart", "-k", `gui/${uid}/dev.sadbox.supervisor`], {
+      stdout: "pipe", stderr: "pipe",
+    });
+    if (r.exitCode !== 0) {
+      const err = new TextDecoder().decode(r.stderr).trim();
+      throw new Error(`launchctl kickstart: ${err || `exit ${r.exitCode}`}`);
+    }
+    return `launchctl kickstart -k gui/${uid}/dev.sadbox.supervisor`;
+  }
+  return null;
+}

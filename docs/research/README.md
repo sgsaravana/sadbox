@@ -131,8 +131,11 @@ swappable per-platform backends.
    ([12](12-vaults.md)); agent logins and per-project conversation history
    kept by the supervisor ([13](13-agent-sessions.md)). Spikes in
    `spikes/f-agent-sessions/`.
-7. **Linux support (Cloud Hypervisor driver)** — **← next.** Phased plan,
-   starting with Spike E, in [`../ROADMAP.md`](../ROADMAP.md).
+7. **Linux support (Cloud Hypervisor driver)** — **shipped in v0.5.0**;
+   Intel/`vz` shipped in v0.5.0, Windows 11/WSL 2 beta merged. Remaining
+   validation (Intel CI, arm64, L6 contract suite, snapshots) is tracked in
+   [`../TODO.md`](../TODO.md), with the phased plan in
+   [`../ROADMAP.md`](../ROADMAP.md).
 
 ## Doc index
 
