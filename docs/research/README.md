@@ -154,3 +154,4 @@ swappable per-platform backends.
 | [14-intel-mac.md](14-intel-mac.md) | Running locally on an Intel Mac: the `vfkit`/Virtualization.framework option, and the Linux-host workaround |
 | [15-docker-sandboxes.md](15-docker-sandboxes.md) | Docker Sandboxes (`sbx`) vs `container` and vs sadbox: layers, overlap, no Intel support |
 | [16-windows.md](16-windows.md) | Windows support: WSL 2 (shipped first) and a native OpenVMM/WHP driver; Hyper-V, Docker Sandboxes, and the host port |
+| [17-named-routes.md](17-named-routes.md) | Named routes for port forwards behind Caddy: path vs host routing, app compatibility, same-origin security, recommendation |
