@@ -19,6 +19,7 @@ import { startLoginLoop } from "./core/logins";
 import { startClaudeRefresher } from "./net/claudeoauth";
 import { migrateGitTokens } from "./core/gittoken";
 import { startForwards } from "./net/forwards";
+import { startRoutes } from "./net/routes";
 import { MIN_PASSWORD, authEnabled, ensurePassword, initialPasswordFile, setPassword } from "./core/auth";
 import { isDrvFsPath, isWsl, wslDoctorLines, wslInfo, wslSetupNote } from "./core/wsl";
 
@@ -152,6 +153,7 @@ async function doctor() {
     console.log(sharingNote());
     console.log(`${(await has("openssl")) ? "✓" : "✗"} openssl (egress proxy TLS interception)`);
     console.log(`proxy port:   ${config.proxyPort}`);
+    console.log(namedRoutesLine());
     return;
   }
   if (driver.name === "vz") {
@@ -163,6 +165,7 @@ async function doctor() {
     console.log("✓ virtio-fs (agent history is kept on this machine)");
     console.log(`${(await has("openssl")) ? "✓" : "✗"} openssl (egress proxy TLS interception)`);
     console.log(`proxy port:   ${config.proxyPort}`);
+    console.log(namedRoutesLine());
     return;
   }
   const bin = await has(BIN);
@@ -176,6 +179,13 @@ async function doctor() {
   const ssl = await has("openssl");
   console.log(`${ssl ? "✓" : "✗"} openssl (egress proxy TLS interception)`);
   console.log(`proxy port:   ${config.proxyPort}`);
+  console.log(namedRoutesLine());
+}
+
+function namedRoutesLine(): string {
+  return config.routeDomain
+    ? `named routes: <name>.${config.routeDomain} → ${config.routesHost}:${config.routesPort}`
+    : "named routes: off (set SADBOX_ROUTE_DOMAIN to enable)";
 }
 
 /** Read a line from the terminal without echoing it (falls back to a plain
@@ -214,7 +224,8 @@ Usage: sadbox <command>
   help       Show this help
 
 Env: SADBOX_PORT, SADBOX_HOST, SADBOX_PASSWORD, SADBOX_AUTH=off, SADBOX_NETWORK, SADBOX_PROXY_PORT, SADBOX_PROXY_HOST,
-     SADBOX_FORWARD_HOST, SADBOX_DATA, SADBOX_BASE_IMAGE, SADBOX_NET_LOG_DAYS (network log retention, ≥ 7)
+     SADBOX_FORWARD_HOST, SADBOX_DATA, SADBOX_BASE_IMAGE, SADBOX_NET_LOG_DAYS (network log retention, ≥ 7),
+     SADBOX_ROUTE_DOMAIN (named routes, e.g. sadbox.example.com), SADBOX_ROUTES_PORT, SADBOX_ROUTES_HOST
 SADBOX_DRIVER (container | kvm | vz), SADBOX_DOCKER_BIN
 Linux: SADBOX_CH_BIN, SADBOX_KVM_KERNEL, SADBOX_VIRTIOFSD, SADBOX_KVM_RUN
 Intel Mac: SADBOX_VFKIT_BIN, SADBOX_VZ_KERNEL, SADBOX_VZ_INITRD, SADBOX_VZ_RUN
@@ -244,6 +255,7 @@ export async function main(argv: string[]) {
       // filtered until it's available.
       startProxy().catch((e) => console.error(`⚠ proxy not started: ${e instanceof Error ? e.message : e}`));
       startForwards().catch((e) => console.error(`⚠ port forwards not started: ${e instanceof Error ? e.message : e}`));
+      startRoutes().catch((e) => console.error(`⚠ named routes not started: ${e instanceof Error ? e.message : e}`));
       // agent logins: capture from running VMs, and Claude's refresh, owned by sadbox
       startLoginLoop();
       startClaudeRefresher();

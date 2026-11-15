@@ -91,13 +91,13 @@ export function logout(token: string | null | undefined): void {
   if (token) db.query("DELETE FROM sessions WHERE token_hash = ?").run(sha(token).toString("hex"));
 }
 
-// ---- passes to sign-in port forwards (net/forwards.ts) ----
-// A forwarded app is on another port, so another origin: the UI's session
-// cookie is not the way in (it would reach the app itself, and a Secure one is
-// never sent to a plain-HTTP port). Instead the UI, for a signed-in browser,
-// hands out a one-time ticket in a redirect to the forward, which trades it for
-// a cookie good for that forward only. The pass ends with the UI session it came
-// from (sign-out, a new password).
+// ---- passes to sign-in port forwards and named routes (net/forwards.ts, net/routes.ts) ----
+// A forwarded app is on another port or host, so another origin: the UI's
+// session cookie is not the way in (it would reach the app itself, and a Secure
+// one is never sent to a plain-HTTP port). Instead the UI, for a signed-in
+// browser, hands out a one-time ticket in a redirect to the forward/route, which
+// trades it for a cookie good for that target only. The pass ends with the UI
+// session it came from (sign-out, a new password).
 const TICKET_MS = 60_000;
 const tickets = new Map<string, { forwardId: string; sessionHash: string | null; expires: number }>();
 

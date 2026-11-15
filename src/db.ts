@@ -337,6 +337,22 @@ db.run(`
     .some((c) => c.name === "access");
   if (!has) db.run("ALTER TABLE port_forwards ADD COLUMN access TEXT NOT NULL DEFAULT 'signin'");
 }
+// Named routes: <name>.<route domain> → a port inside one project's VM, served
+// by the one routes listener (net/routes.ts). Unlike a port forward this has no
+// host port of its own; Caddy (or a wildcard DNS record) sends every
+// <name>.<domain> request to that listener. Names are DNS labels and unique
+// across all projects.
+db.run(`
+  CREATE TABLE IF NOT EXISTS named_routes (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    guest_port INTEGER NOT NULL,
+    access TEXT NOT NULL DEFAULT 'signin',      -- signin | open
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+db.run("CREATE INDEX IF NOT EXISTS named_routes_project ON named_routes(project_id)");
+
 // A browser's pass to one sign-in forward, handed out by a signed-in session of
 // the web UI and ending with it (core/auth.ts). Only hashes are stored.
 db.run(`

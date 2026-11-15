@@ -22,6 +22,7 @@ import { resolveApproval, listPending, pendingCounts } from "../net/approvals";
 import { hostSummary, recentRequests, requestsBefore, subscribe } from "../net/events";
 import { caCertPem } from "../net/ca";
 import { AUTH_PATH, createForward, deleteForward, getForward, listForwards, noteUiOrigin, setForwardAccess } from "../net/forwards";
+import { createNamedRoute, deleteNamedRoute, getNamedRoute, listNamedRoutes, routeDomain, routeHost, setNamedRouteAccess } from "../net/routes";
 import { createLink, deleteLink, listLinks } from "../net/links";
 import { AuthError, authEnabled, clearCookie, crossOrigin, forwardTicket, login, logout, safeNext, sessionCookie, signedIn, tokenFrom } from "../core/auth";
 import { FileError, commitStaged, deletePath, discardPaths, listStashes, stash, fileIndex, gitStatus, headFile, lastCommit, listBranches, listDir, makeDir, pushBranch, readFile, renamePath, stageFile, stagePaths, switchBranch, writeFile } from "../core/files";
@@ -107,7 +108,8 @@ export function startServer() {
       // Everything else needs a session, except the login page and the static
       // script/style/vendor files (which are just this public repo's assets).
       const forwardOpen = p.match(/^\/forwards\/([\w-]+)\/open$/);
-      const page = p === "/" || p === "/terminal" || p === "/editor" || forwardOpen != null;
+      const routeOpen = p.match(/^\/routes\/([\w-]+)\/open$/);
+      const page = p === "/" || p === "/terminal" || p === "/editor" || forwardOpen != null || routeOpen != null;
       const needsSession = page || termMatch != null || p.startsWith("/api/");
       if (needsSession && !signedIn(req)) {
         if (page) {
@@ -130,6 +132,19 @@ export function startServer() {
         const next = safeNext(url.searchParams.get("next"));
         const location = f.access === "open" ? base + next
           : `${base}${AUTH_PATH}?t=${forwardTicket(req, f.id)}&next=${encodeURIComponent(next)}`;
+        return new Response(null, { status: 302, headers: { location, "cache-control": "no-store" } });
+      }
+
+      // open a named route: its own host, through the same ticket/pass trade
+      if (routeOpen) {
+        const r = getNamedRoute(routeOpen[1]);
+        if (!r) return new Response("no such named route", { status: 404 });
+        if (!routeDomain()) return new Response("named routes need SADBOX_ROUTE_DOMAIN", { status: 400 });
+        const scheme = req.headers.get("x-forwarded-proto") === "https" ? "https" : url.protocol.slice(0, -1);
+        const base = `${scheme}://${routeHost(r.name)}`;
+        const next = safeNext(url.searchParams.get("next"));
+        const location = r.access === "open" ? base + next
+          : `${base}${AUTH_PATH}?t=${forwardTicket(req, r.id)}&next=${encodeURIComponent(next)}`;
         return new Response(null, { status: 302, headers: { location, "cache-control": "no-store" } });
       }
       if (p === "/login" && signedIn(req)) {
@@ -371,6 +386,17 @@ export function startServer() {
         m = p.match(/^\/api\/projects\/([\w-]+)\/forwards\/([\w-]+)$/);
         if (m && req.method === "DELETE") { deleteForward(m[1], m[2]); return json({ ok: true }); }
         if (m && req.method === "PATCH") return json(await setForwardAccess(m[1], m[2], (await req.json()).access));
+
+        // --- per-project named routes (name.domain → VM port, via Caddy) ---
+        m = p.match(/^\/api\/projects\/([\w-]+)\/routes$/);
+        if (m && req.method === "GET") return json({ domain: routeDomain() || null, routes: listNamedRoutes(m[1]) });
+        if (m && req.method === "POST") {
+          const b = await req.json();
+          return json(await createNamedRoute(m[1], { name: b.name, guestPort: b.guestPort, access: b.access }), 201);
+        }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/routes\/([\w-]+)$/);
+        if (m && req.method === "DELETE") { deleteNamedRoute(m[1], m[2]); return json({ ok: true }); }
+        if (m && req.method === "PATCH") return json(setNamedRouteAccess(m[1], m[2], (await req.json()).access));
 
         // --- global network rules + shared proxy endpoints ---
         if (p === "/api/net/rules" && req.method === "GET") return json(listRules());

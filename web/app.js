@@ -1292,6 +1292,7 @@ function showDetailSkeleton() {
        <div class="loading-bar"><span class="spinner"></span> Loading VM details…</div>
        <div class="detail-grid">${skeletonPanel(6) + skeletonPanel(6) + skeletonPanel(5) + skeletonPanel(4)}</div>
      </div>
+     <div id="detail-routes"></div>
      <div id="detail-ports"></div>
      <div id="detail-links"></div>
      <div id="detail-net">${skeletonNet()}</div>
@@ -1300,6 +1301,7 @@ function showDetailSkeleton() {
 
 async function openDetail(id) {
   showDetailSkeleton();
+  openRoutes(id);
   openPorts(id);
   openLinks(id);
   openNet(id);
@@ -1491,6 +1493,82 @@ function paintDetail(d) {
     </div>
     ${optionalAppsHtml(d)}
     ${d.error ? `<div class="panel" style="color:var(--bad)">${escapeHtml(d.error)}</div>` : ""}`;
+}
+
+// ---- named routes panel (<name>.<domain> → VM port) ----
+async function openRoutes(id) {
+  const el = $("#detail-routes");
+  if (!el) return;
+  el.innerHTML = `
+  <div class="panel net-panel">
+    <div class="net-head"><h3>Named routes</h3></div>
+    <div class="net-section">
+      <div class="net-subhead">Open an app at its own hostname <span class="hint">a name on the wildcard domain, through Caddy — the app runs at /</span></div>
+      <div id="route-list"></div>
+      <form id="route-add" class="net-form">
+        <input name="name" placeholder="name (e.g. sample)" pattern="[a-z0-9][a-z0-9-]*" title="a-z, 0-9 and hyphens" required>
+        <span class="hint">→</span>
+        <input name="guestPort" type="number" min="1" max="65535" placeholder="VM port (e.g. 3000)" required>
+        <label class="hint" title="HTTP without a sadbox sign-in pass: anyone who can reach the hostname. For an API called from another app, not for a UI you want protected."><input name="open" type="checkbox"> open to anyone</label>
+        <button type="submit">Add route</button>
+      </form>
+    </div>
+  </div>`;
+  el.addEventListener("click", async (e) => {
+    const acc = e.target.closest("[data-route-access]");
+    if (acc) {
+      const open = acc.dataset.routeAccess === "open";
+      if (open && !confirm("Open this route to anyone who can reach the hostname, without signing in?")) return;
+      try { await api(`/api/projects/${id}/routes/${acc.dataset.routeId}`, { method: "PATCH", body: { access: acc.dataset.routeAccess } }); }
+      catch (err) { alert(err.message); }
+      renderRoutes(id);
+      return;
+    }
+    const del = e.target.closest("[data-del-route]");
+    if (!del) return;
+    try { await api(`/api/projects/${id}/routes/${del.dataset.delRoute}`, { method: "DELETE" }); } catch {}
+    renderRoutes(id);
+  });
+  el.querySelector("#route-add").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try {
+      await api(`/api/projects/${id}/routes`, {
+        method: "POST",
+        body: { name: String(f.get("name")), guestPort: Number(f.get("guestPort")), access: f.get("open") ? "open" : "signin" },
+      });
+      e.target.reset(); renderRoutes(id);
+    } catch (err) { alert(err.message); }
+  });
+  renderRoutes(id);
+}
+
+async function renderRoutes(id) {
+  const el = $("#route-list");
+  if (!el) return;
+  let data;
+  try { data = await api(`/api/projects/${id}/routes`); }
+  catch (e) { el.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  if (!data.domain) {
+    el.innerHTML = `<div class="empty">named routes are off — set <span class="mono">SADBOX_ROUTE_DOMAIN</span> and point <span class="mono">*.&lt;domain&gt;</span> at the routes port</div>`;
+    return;
+  }
+  if (!data.routes.length) { el.innerHTML = `<div class="empty">no named routes</div>`; return; }
+  el.innerHTML = data.routes.map((r) => {
+    const host = `${r.name}.${data.domain}`;
+    // a sign-in route is opened through the UI, which hands the browser its pass
+    const url = r.access === "open" ? `${location.protocol}//${host}` : `/routes/${r.id}/open`;
+    const other = r.access === "open" ? "signin" : "open";
+    return `<div class="rule">
+      <span class="ract ${r.active ? "allow" : "block"}">${r.active ? "up" : "down"}</span>
+      <span class="rspec"><a href="${url}" target="_blank" rel="noopener">${escapeHtml(host)}</a> → VM port ${r.guest_port}${
+        r.active ? "" : ` <span class="hint">its socket was in use at startup</span>`}</span>
+      <button class="link-del" data-route-id="${r.id}" data-route-access="${other}" title="${r.access === "open"
+        ? "Open to anyone who reaches the hostname. Click to require sign-in."
+        : "HTTP, for a browser signed in to sadbox only. Click to open it to anyone."}">${r.access === "open" ? "🔓 anyone" : "🔒 sign-in"}</button>
+      <button class="link-del" data-del-route="${r.id}" title="remove">✕</button>
+    </div>`;
+  }).join("");
 }
 
 // ---- port forwards panel (host port → VM port) ----

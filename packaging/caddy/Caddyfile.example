@@ -7,9 +7,10 @@
 # already on the same box, is the only thing exposed to the network.
 #
 #   - Caddy in Docker/colima: `127.0.0.1` in reverse_proxy is Caddy's own
-#     container. Use `host.docker.internal:7070` (Docker Desktop) or the host
-#     address colima maps it to (usually 192.168.5.2); if the name does not
-#     resolve, add `extra_hosts: ["host.docker.internal:192.168.5.2"]`.
+#     container. Use `host.docker.internal:7070` (and `:7072` for named routes)
+#     on Docker Desktop, or the host address colima maps it to (usually
+#     192.168.5.2); if the name does not resolve, add
+#     `extra_hosts: ["host.docker.internal:192.168.5.2"]`.
 #   - `dns cloudflare` needs a Caddy built with
 #     github.com/caddy-dns/cloudflare — the official image and brew's caddy do
 #     not include it. `zone_id` is not a supported option; scope the API token
@@ -19,8 +20,10 @@
 #   - sadbox has its own password sign-in; basic_auth here (or Tailscale /
 #     forward_auth) is an optional second layer. It can create/destroy VMs
 #     and open shells, so always serve it over TLS.
-#   - Only port 7070 is routed. Port 7071 is the egress proxy for older VMs
-#     still on a network (it refuses anything else) — never proxy it.
+#   - Port 7070 is the UI/API. Port 7072 is the named-routes listener (only when
+#     SADBOX_ROUTE_DOMAIN is set); route *.<domain> to it. Port 7071 is the
+#     egress proxy for older VMs still on a network (it refuses anything else)
+#     — never proxy it.
 #   - Use a dedicated hostname (or root), not a subpath: sadbox serves from "/".
 
 # --- Option A: slot into an existing wildcard block (recommended) -------------
@@ -45,6 +48,25 @@
 #
 #   # …your other per-host handle blocks…
 # }
+
+# --- Option A2: named routes (a wildcard of their own) -----------------------
+# With SADBOX_ROUTE_DOMAIN=sadbox.internal.example.com,
+# <name>.sadbox.internal.example.com is one wildcard level below the UI. A
+# *.internal.example.com certificate does NOT cover it, so give it its own
+# block; Caddy gets the cert through the same DNS challenge. This keeps other
+# *.internal.example.com services untouched.
+#
+# *.sadbox.internal.example.com {
+#   tls { dns cloudflare {env.CLOUDFLARE_API_TOKEN} }
+#   reverse_proxy 127.0.0.1:7072 {
+#     flush_interval -1
+#   }
+# }
+#
+# If your one-level *.internal.example.com wildcard is dedicated to sadbox, you
+# can instead set SADBOX_ROUTE_DOMAIN=internal.example.com and put the route
+# listener in that block (the "sadbox" name is reserved, so it cannot shadow
+# the UI). Do not do that on a wildcard shared with other services.
 
 # --- Option B: a standalone site block ---------------------------------------
 # If sadbox gets its own block, give it TLS too. With a real domain, reuse your

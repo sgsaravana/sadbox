@@ -19,7 +19,7 @@ All on Apple silicon + macOS 26, through the Apple `container` driver
 | Sync-back | git-bundle sync to the source folder, including uncommitted work; GitHub-sourced projects can connect to a local folder |
 | Editor | Built-in browser editor with stage / commit / push / branch switch / stash / discard |
 | Network | VMs have no NIC; all egress goes through the supervisor's MITM proxy over a published unix socket. Block-by-default with time-boxed approvals, allow/block + header-rewrite rules (global or per-project), live request log |
-| Ports & links | Port forwarding into a VM; links section on the detail page |
+| Ports & links | Port forwarding into a VM; named host routes (`<name>.<domain>`, branch `feature/named-routes`); links section on the detail page |
 | UI | Home overview, side nav with project list, live CPU/memory/disk/network vitals |
 | Auth | Password sign-in with session cookie |
 | Distribution | Release workflow (darwin + linux binaries), `install.sh`, Homebrew formula, version workflow, Caddy LAN deployment guide |
@@ -258,6 +258,21 @@ and disk boot and projects run.
   Docker. Build the amd64 disk and kernel on the Linux x86_64 job, pass them as
   artifacts, and run `vz.it.test.ts` there.
 - L6's contract suite now has three drivers to cover.
+
+## Named routes — built on `feature/named-routes` (host mode)
+
+Give a VM port a hostname, `<name>.<SADBOX_ROUTE_DOMAIN>`, so it can be opened
+from the same Caddy-managed domain without a second host port. One loopback
+listener serves every name; the app runs at `/` on its own origin, keeping the
+UI session cookie and web storage separate. Sign-in/open passes, WebSockets,
+the UI panel, API and tests are built. `SADBOX_ROUTE_DOMAIN` plus a wildcard
+DNS record/certificate and the Caddy block turn it on.
+
+The path form (`sadbox.domain.com/sample`) is **not** planned: it breaks
+root-absolute URLs and would put the app on the UI's origin, where it could
+call sadbox's API with the operator's session. The study and spike are in
+[`research/17-named-routes.md`](research/17-named-routes.md) and
+[`spikes/g-named-routes/`](../spikes/g-named-routes/).
 
 ## Other planned work
 
