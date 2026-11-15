@@ -556,7 +556,11 @@ browser:
 1. **Create a project** under **Projects**: give it a name and either a local
    folder that is a git repository with at least one commit, or a git URL to
    clone. Tick any **vault** items it should use (add them under **Vaults**
-   first — API keys, tokens, settings).
+   first — API keys, tokens, settings). While it is created, the form shows the
+   steps and a **Logs** tab with the real command output (git clone, proxy,
+   vault and git errors); **copy logs** puts them on the clipboard for a bug
+   report. URLs with embedded credentials and token-shaped values are redacted
+   before they reach the log.
 2. Open **Terminal ↗** and run `claude` (or `omp`, `opencode`). The first time,
    `/login` in Claude: sadbox keeps that login and every VM after this one is
    logged in already (see [Agent logins](#how-it-works)). The first
@@ -810,7 +814,8 @@ over vsock instead.
   variable's value shows in the list; a secret's shows `••••` and an eye icon
   that reveals it (each reveal is logged). Each item is given to the projects
   you tick — on the item, on the create form, or from a project's **Vault…**
-  button — and has a **mode**:
+  button (the dialog masks secret values and proxy placeholders until the eye
+  is clicked) — and has a **mode**:
   - **proxy**: the VM holds a **placeholder** shaped like the token
     (`ghp_sbx…`, same prefix and length), different in every VM and stable
     across restarts. The item lists the hosts it may be sent to (**bindings**:
@@ -1071,7 +1076,7 @@ over vsock instead.
 |---|---|---|
 | GET/POST | `/api/projects` | list (with live VM state and each VM's current `branch`) / create (`{name, sourcePath?, apps?, optionalApps?, secretIds?: vault item ids, git?: {remote, token?}}` — omit `sourcePath` to clone `git.remote` in the VM) |
 | GET | `/api/projects/:id/details` | full detail: resources, tmux, git, folder, optional apps (installed + versions) |
-| GET | `/api/projects/:id/events?after=` | the project's event log, oldest first — the create form's progress |
+| GET | `/api/projects/:id/events?after=` | the project's event log, oldest first — the create form's progress; `log.*` entries are raw command output (credentials redacted) for the **Logs** tab |
 | DELETE | `/api/projects/:id` | destroy VM |
 | POST | `/api/projects/:id/start`, `…/stop` | boot a stopped VM / shut a running one down (its disk is kept) |
 | POST | `/api/projects/:id/sync` | sync-back (`{force?: bool}` overwrites files changed in the folder) |

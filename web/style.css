@@ -211,6 +211,7 @@ button.mini.eye { margin-left: 0; }
 .phline { font-size: 12px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .phline code { font-size: 12px; color: var(--ok); word-break: break-all; }
 .psec-g { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.psec-g .vvalue { flex-basis: 100%; padding-left: 22px; }
 .psec-g .phline { flex-basis: 100%; padding-left: 22px; }
 .bind-add select {
   margin: 0; padding: 6px 8px; background: #0e0e15; color: var(--text);
@@ -532,6 +533,11 @@ table.net-log tr:hover td.rowact .mini, table.net-log td.rowact .mini:focus-visi
 .cp-bar { height: 5px; border-radius: 3px; background: var(--border); overflow: hidden; margin: 16px 0 10px; }
 .cp-bar span { display: block; width: 35%; height: 100%; border-radius: 3px; background: var(--accent); animation: cp-slide 1.3s ease-in-out infinite; }
 @keyframes cp-slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(320%); } }
+.cp-tabs { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; }
+.cp-tab { padding: 4px 10px; border: 1px solid var(--border); border-radius: 7px; background: transparent; color: var(--dim); font-size: 12px; cursor: pointer; }
+.cp-tab.active { color: var(--text); border-color: var(--accent); background: #141421; }
+#cp-copy-logs { margin-left: auto; }
+.cp-raw { margin: 0; padding: 10px 12px; max-height: 280px; overflow: auto; background: #0b0b11; border: 1px solid var(--border); border-radius: 8px; color: var(--text); font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
 .cp-log { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow: auto; }
 .cp-log li { display: flex; gap: 10px; padding: 7px 0; border-top: 1px solid var(--border); font-size: 13px; }
 .cp-log li:first-child { border-top: 0; }
