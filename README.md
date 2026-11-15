@@ -455,6 +455,26 @@ SADBOX_PASSWORD='choose-a-password' docker compose up -d   # http://localhost:70
 Your projects, vault, agent logins and history live in `~/.sadbox` and are
 kept across updates; nothing there needs to be exported or migrated by hand.
 
+**Installed with `install.sh` or a downloaded binary? One command:**
+
+```sh
+sadbox update
+```
+
+It checks GitHub for the latest stable release, downloads the matching binary,
+verifies the release's `SHA256SUMS`, replaces the binary atomically, and
+restarts a systemd or launchd service if it finds one. Useful flags:
+`--check` (report only), `--prerelease` (follow the pre-release track),
+`--version v0.6.0` (install an exact release), `--no-restart`, `--force`.
+A beta build follows pre-releases automatically. Forked builds can set
+`SADBOX_REPO=owner/repo`; `SADBOX_GITHUB_TOKEN` avoids GitHub API rate limits.
+Homebrew, docker compose and source checkouts are told their own update
+command instead of having the binary replaced underneath them. (Homebrew
+follows the formula, so `--version`/`--prerelease` are for the install-script
+and downloaded-binary paths.)
+
+Or update by hand:
+
 1. **Stop the supervisor**: Ctrl-C on `sadbox serve` (or unload its launchd
    job — see [macOS: run at boot](#macos-run-at-boot-launchd); on Linux,
    `systemctl --user stop sadbox`). Running VMs keep running — agents and

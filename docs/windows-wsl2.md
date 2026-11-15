@@ -217,6 +217,16 @@ size projects with **Settings → default VM memory** or per-project.
 Update sadbox inside the distro the same way you installed it:
 
 ```sh
+sadbox update
+# or, from Windows:
+sadbox.exe update
+```
+
+This replaces the Linux supervisor inside WSL; the small Windows launcher is
+replaced by reinstalling the release. If `sadbox update` is not available on an
+older install, run the installer again:
+
+```sh
 curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh | sh
 ```
 

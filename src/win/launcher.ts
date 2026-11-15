@@ -20,6 +20,7 @@ Usage: sadbox.exe <command>
 
   serve      Start sadbox in WSL and open ${URL}   (default)
   setup      Build the VM image inside WSL (a few minutes, once)
+  update     Install the latest supervisor inside WSL (alias: upgrade)
   doctor     Report environment health inside WSL
   open       Open ${URL} in the default browser
   version    Print version
@@ -29,6 +30,9 @@ Env: SADBOX_WSL_DISTRO (default: sadbox, else the first WSL distro)
      SADBOX_WSL_BIN    (default: sadbox)
      SADBOX_PORT       (default: 7070; forwarded to WSL)
      SADBOX_DATA       (optional Linux data dir; forwarded to WSL)
+
+"update" replaces the Linux supervisor inside WSL; reinstall the release to
+replace this Windows launcher too.
 
 First time? In an elevated PowerShell:
   wsl --install
@@ -151,6 +155,7 @@ async function main() {
   const distro = pickDistro();
   if (cmd === "serve") { await serve(); return; }
   if (cmd === "setup") { process.exit(await run(distro, ["setup"])); }
+  if (cmd === "update" || cmd === "upgrade") { process.exit(await run(distro, process.argv.slice(2))); }
   if (cmd === "doctor") { process.exit(await run(distro, ["doctor"])); }
   fail(`unknown command: ${cmd}\n\n${HELP}`);
 }

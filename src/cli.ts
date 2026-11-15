@@ -4,6 +4,7 @@ import { buildBaseImage } from "./core/baseimage";
 import { getDriver } from "./driver";
 import { dockerStatus } from "./driver/docker";
 import { installService, serviceStatus, uninstallService } from "./core/service";
+import { parseUpdateArgs, runUpdate } from "./core/update";
 import { CH_VERSION, ensureVmm, virtiofsdBin, vmmProblems } from "./driver/kvm/vmm";
 import { VFKIT_VERSION, ensureVmm as ensureVz, vmmProblems as vzProblems } from "./driver/vz/vmm";
 
@@ -217,6 +218,7 @@ Usage: sadbox <command>
 
   serve      Start the web supervisor (default)   http://localhost:${config.port}
   setup      Check deps, start the VM backend, build the base image
+  update     Install the latest release (alias: upgrade; --check, --prerelease, --no-restart)
   doctor     Report environment health
   service    install | uninstall | status — run the supervisor at boot (Linux/WSL 2, systemd)
   passwd     Set the sign-in password (signs every browser out)
@@ -225,7 +227,8 @@ Usage: sadbox <command>
 
 Env: SADBOX_PORT, SADBOX_HOST, SADBOX_PASSWORD, SADBOX_AUTH=off, SADBOX_NETWORK, SADBOX_PROXY_PORT, SADBOX_PROXY_HOST,
      SADBOX_FORWARD_HOST, SADBOX_DATA, SADBOX_BASE_IMAGE, SADBOX_NET_LOG_DAYS (network log retention, ≥ 7),
-     SADBOX_ROUTE_DOMAIN (named routes, e.g. sadbox.example.com), SADBOX_ROUTES_PORT, SADBOX_ROUTES_HOST
+     SADBOX_ROUTE_DOMAIN (named routes, e.g. sadbox.example.com), SADBOX_ROUTES_PORT, SADBOX_ROUTES_HOST,
+     SADBOX_REPO / SADBOX_GITHUB_TOKEN (sadbox update)
 SADBOX_DRIVER (container | kvm | vz), SADBOX_DOCKER_BIN
 Linux: SADBOX_CH_BIN, SADBOX_KVM_KERNEL, SADBOX_VIRTIOFSD, SADBOX_KVM_RUN
 Intel Mac: SADBOX_VFKIT_BIN, SADBOX_VZ_KERNEL, SADBOX_VZ_INITRD, SADBOX_VZ_RUN
@@ -263,6 +266,10 @@ export async function main(argv: string[]) {
       migrateGitTokens().catch((e) => console.error(`⚠ git token migration: ${e instanceof Error ? e.message : e}`));
       break;
     case "setup": await setup(); break;
+    case "update": case "upgrade":
+      try { await runUpdate(parseUpdateArgs(argv.slice(3))); }
+      catch (e) { console.error(`✗ ${e instanceof Error ? e.message : e}`); process.exit(1); }
+      break;
     case "doctor": await doctor(); break;
     case "service": {
       const sub = argv[3] ?? "status";
