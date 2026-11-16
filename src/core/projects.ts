@@ -152,6 +152,24 @@ export function getProject(id: string): ProjectRow | null {
   return db.query<ProjectRow, [string]>("SELECT * FROM projects WHERE id = ?").get(id);
 }
 
+/** The one live (not destroyed) project using this name, if any. */
+function projectNamed(name: string): ProjectRow | null {
+  return db.query<ProjectRow, [string]>(
+    "SELECT * FROM projects WHERE name = ? AND state != 'destroyed'").get(name);
+}
+
+/** Whether this row's last finished attempt was a create that failed. Those
+ *  are safe to start over on the spot; a project that once ran and then failed
+ *  a Rebuild keeps its row (and its work) until it is rebuilt or destroyed. */
+function lastAttemptFailedCreate(id: string): boolean {
+  const last = db.query<{ type: string }, [string]>(
+    `SELECT type FROM events WHERE project_id = ?
+       AND type IN ('create.done', 'rebuild.done', 'create.error', 'rebuild.error')
+     ORDER BY id DESC LIMIT 1`,
+  ).get(id);
+  return last?.type === "create.error";
+}
+
 /** An entry in a project's event log (the `events` table), for the create
  *  progress view: real phases, in order, as the supervisor reaches them. */
 export interface ProjectEvent { id: number; type: string; detail: string; at: string }
@@ -235,7 +253,7 @@ async function cloneIntoWorkdir(ref: string, url: string, name: string, projectI
     const out = (r.stderr || r.stdout || "").trim();
     logLine(projectId, "clone.error", `git clone exited ${r.exitCode}`);
     logOutput(projectId, "clone.error", out || "(no output)");
-    logLine(projectId, "clone.error", "If the egress proxy blocked the host, approve it under Network → Activity and retry.");
+    logLine(projectId, "clone.error", "If the egress proxy blocked the host, approve it under Network → Activity, then Rebuild.");
     throw new Error(`git clone failed (exit ${r.exitCode}): ${redactLog(out).slice(-2000) || "no output"}`);
   }
   if (r.stderr.trim()) logOutput(projectId, "clone", r.stderr);
@@ -473,7 +491,21 @@ export async function createProject(opts: {
     }
   }
 
-  const id = crypto.randomUUID().slice(0, 8);
+  // The name is unique among live projects (db.ts). A row left in error by a
+  // create that never finished is that same attempt waiting to be retried:
+  // reuse its row — and keep its id, so the project's network rules and
+  // approvals survive — instead of failing on the unique name. Anything else
+  // is a real clash, said in words rather than as a UNIQUE constraint.
+  const retryOf = projectNamed(name);
+  if (retryOf && (retryOf.state !== "error" || !lastAttemptFailedCreate(retryOf.id))) {
+    throw new Error(retryOf.state === "creating"
+      ? `a project named "${name}" is still being created`
+      : retryOf.state === "error"
+        ? `a project named "${name}" exists and is in error — open it and use Rebuild, or Destroy it first`
+        : `a project named "${name}" already exists`);
+  }
+
+  const id = retryOf?.id ?? crypto.randomUUID().slice(0, 8);
   const notes: string[] = []; // logged once the project's row exists
   const image = await resolveImage((m) => notes.push(m));
   const gitRemote = opts.git?.remote ?? null;
@@ -484,18 +516,50 @@ export async function createProject(opts: {
     const tokenItem = gitTokenForCreate(gitRemote, token, secretIds, name);
     if (!secretIds.includes(tokenItem)) secretIds.push(tokenItem);
   }
-  // base_sha/source_branch recorded by provisionVM once the workdir is seeded
-  db.query(
-    `INSERT INTO projects (id, name, image, state, source_path, source_branch, base_sha, last_synced_sha, apps, optional_apps, git_remote, git_token_enc, empty)
-     VALUES (?, ?, ?, 'creating', ?, NULL, NULL, NULL, ?, ?, ?, ?, ?)`,
-  ).run(id, name, image, sourcePath && !empty ? sourcePath : "",
-        JSON.stringify(opts.apps ?? []), JSON.stringify(optionalApps), gitRemote, null, empty ? 1 : 0);
+  const source = sourcePath && !empty ? sourcePath : "";
+  const appList = JSON.stringify(opts.apps ?? []);
+  const optional = JSON.stringify(optionalApps);
+  if (retryOf) {
+    db.query(
+      `UPDATE projects SET image = ?, state = 'creating', source_path = ?, source_branch = NULL,
+         base_sha = NULL, last_synced_sha = NULL, apps = ?, optional_apps = ?, git_remote = ?,
+         git_token_enc = NULL, sync_path = NULL, branch = NULL, memory_mb = NULL,
+         net_cutoff = 0, history_mounted = 0, empty = ?, error = NULL,
+         created_at = datetime('now')
+       WHERE id = ?`,
+    ).run(image, source, appList, optional, gitRemote, empty ? 1 : 0, id);
+  } else {
+    // base_sha/source_branch recorded by provisionVM once the workdir is seeded
+    try {
+      db.query(
+        `INSERT INTO projects (id, name, image, state, source_path, source_branch, base_sha, last_synced_sha, apps, optional_apps, git_remote, git_token_enc, empty)
+         VALUES (?, ?, ?, 'creating', ?, NULL, NULL, NULL, ?, ?, ?, ?, ?)`,
+      ).run(id, name, image, source, appList, optional, gitRemote, null, empty ? 1 : 0);
+    } catch (e) {
+      // two creates racing for a new name: the loser says so, not the SQL
+      if (String(e).includes("UNIQUE constraint failed: projects.name")) {
+        throw new Error(`a project named "${name}" already exists`);
+      }
+      throw e;
+    }
+  }
   for (const n of notes) logEvent(id, "image", n);
   const earlier = historyOf(name);
   if (earlier) logEvent(id, "history", `agent history of an earlier ${name} mounted (${earlier.tools.map((t) => t.tool).join(", ")}, ${mb(earlier.bytes)})`);
   logEvent(id, "create.start", redactLog(empty ? `${name}, empty workdir` : cloneMode ? `${name} cloning ${gitRemote}` : `${name} from ${sourcePath}`));
 
   try {
+    if (retryOf) {
+      // start from a clean VM: whatever the failed attempt left goes, and the
+      // vault access is exactly what this create asked for
+      await driver.destroy(refFor(name));
+      forgetVitals(refFor(name));
+      clearProjectApprovals(id, "retrying the create");
+      clearProjectFeed(id);
+      closeProjectSocket(id);
+      await rm(join(config.dataDir, "sync", `${id}.git`), { recursive: true, force: true });
+      setProjectItems(id, secretIds);
+    }
     await provisionVM(getProject(id)!, { assignSecretIds: secretIds });
     db.query("UPDATE projects SET state = 'running' WHERE id = ?").run(id);
     logEvent(id, "create.done");
