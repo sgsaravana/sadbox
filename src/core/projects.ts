@@ -6,6 +6,7 @@ import { db, logEvent } from "../db";
 import { getDriver } from "../driver";
 import { LONG_TASK_MS, type ProjectInfo, type ProjectStats } from "../driver/types";
 import { injectVault, setProjectItems, purgeProjectVault } from "./vault";
+import { repeatableGuestExec } from "./guestops";
 import { getSettings, validMemoryMB } from "./settings";
 import { installGuestProxy, openProjectSocket, closeProjectSocket, redialProjectSocket } from "../net/proxy";
 import { forgetGuestTools, startGuestRelay } from "../net/guest";
@@ -216,7 +217,7 @@ async function configureGitRemote(ref: string, project: ProjectRow) {
     `(git remote get-url origin >/dev/null 2>&1 ` +
     `&& git remote set-url origin ${shellArg(url)} ` +
     `|| git remote add origin ${shellArg(url)})`;
-  const r = await driver.exec(ref, ["sh", "-c", setRemote]);
+  const r = await repeatableGuestExec(ref, setRemote);
   if (r.exitCode !== 0) throw new Error(`git remote setup failed: ${r.stderr}`);
 }
 
@@ -265,12 +266,12 @@ async function cloneIntoWorkdir(ref: string, url: string, name: string, projectI
 /** Append the secrets + proxy env source-hooks to the guest's shells (common to
  *  both create modes). .bashrc for interactive tmux shells, .profile for login. */
 async function installShellHooks(ref: string) {
-  const r = await driver.exec(ref, ["sh", "-c",
+  const r = await repeatableGuestExec(ref,
     `for f in ~/.bashrc ~/.profile; do ` +
     `grep -q sadbox/env $f 2>/dev/null || printf 'set -a; [ -f ~/.sadbox/env ] && . ~/.sadbox/env; set +a\\n' >> $f; ` +
     `grep -q sadbox/net.env $f 2>/dev/null || printf '[ -f ~/.sadbox/net.env ] && . ~/.sadbox/net.env\\n' >> $f; ` +
     `done`,
-  ]);
+  );
   if (r.exitCode !== 0) throw new Error(`shell hook setup failed: ${r.stderr}`);
 }
 
@@ -343,10 +344,10 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   if (empty) {
     // nothing to seed: the workdir is where repositories get cloned, and commits
     // in them need an author
-    const setup = await driver.exec(ref, ["sh", "-c",
+    const setup = await repeatableGuestExec(ref,
       `mkdir -p ${config.guestWorkdir} && ` +
       `git config --global user.name "sadbox project ${p.name}" && ` +
-      `git config --global user.email "project@sadbox.local"`]);
+      `git config --global user.email "project@sadbox.local"`);
     if (setup.exitCode !== 0) {
       logLine(p.id, "git.error", `guest setup exited ${setup.exitCode}`);
       logOutput(p.id, "git.error", setup.stderr || "(no output)");
@@ -454,8 +455,9 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   await applyLoginsQuietly(p);
 
   // tmux starts last so its shells are born with the secrets + proxy env in place
-  const tmux = await driver.exec(ref, ["tmux", "new-session", "-d",
-    "-s", config.tmuxSession, "-c", config.guestWorkdir]);
+  const tmux = await repeatableGuestExec(ref,
+    `tmux has-session -t ${config.tmuxSession} 2>/dev/null || ` +
+    `tmux new-session -d -s ${config.tmuxSession} -c ${config.guestWorkdir}`);
   if (tmux.exitCode !== 0) {
     logLine(p.id, "terminal.error", `tmux exited ${tmux.exitCode}`);
     logOutput(p.id, "terminal.error", tmux.stderr || "(no output)");
