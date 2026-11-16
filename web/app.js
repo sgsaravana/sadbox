@@ -1005,6 +1005,7 @@ const CREATE_PHASES = {
   "proxy.configure": "Connecting the egress proxy",
   "vault.inject": "Preparing vault access",
   "workdir.ready": "Files are in place",
+  "agent.update.start": "Updating the agents",
   "agent.update": "Updating the agents",
   "app.install": "Installing packages",
   "app.installed": "App installed",

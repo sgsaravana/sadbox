@@ -405,17 +405,24 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
 
   // The base image is built once and its agents go stale, so bring claude, omp
   // and opencode to their latest releases in every new or rebuilt VM. Best
-  // effort (an offline registry must not fail the create), each tool on its own.
+  // effort (an offline registry must not fail the create), each tool on its own
+  // and each with its own shorter limit: a slow package that never finishes
+  // leaves the image's version in place instead of stalling the whole rebuild.
   await duringSetup(p.id, async () => {
-    const env = `[ -f ${config.guestNetEnvFile} ] && . ${config.guestNetEnvFile}; export PATH="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.nvm/current/bin:$PATH"; `;
+    const env = `[ -f ${config.guestNetEnvFile} ] && . ${config.guestNetEnvFile}; ` +
+      `export CI=1 PATH="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.nvm/current/bin:$PATH"; `;
     const steps: [string, string][] = [
       ["claude", "claude update"],
       ["omp", "bun install -g @oh-my-pi/pi-coding-agent@latest"],
       ["opencode", "bun install -g opencode-ai@latest"],
     ];
     for (const [tool, cmd] of steps) {
-      const r = await driver.exec(ref, ["sh", "-c", env + cmd], { timeoutMs: LONG_TASK_MS });
-      logEvent(p.id, "agent.update", `${tool}: ${r.exitCode === 0 ? "latest" : `exit ${r.exitCode} ${r.stderr.trim().slice(-200)}`}`);
+      logEvent(p.id, "agent.update.start", `${tool}: ${tool === "claude" ? "checking" : "downloading"}`);
+      const r = await driver.exec(ref, ["sh", "-c", env + cmd], { timeoutMs: config.agentUpdateMs });
+      const outcome = r.exitCode === 0 ? "latest"
+        : r.exitCode === 124 ? `timed out after ${Math.round(config.agentUpdateMs / 1000)} s — kept the image's version`
+        : `exit ${r.exitCode} ${r.stderr.trim().slice(-200)}`;
+      logEvent(p.id, "agent.update", `${tool}: ${outcome}`);
     }
   });
 
