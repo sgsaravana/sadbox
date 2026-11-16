@@ -29,6 +29,7 @@ import { ensureCA, certForHost, leafKey, caCertPem, caReady } from "./ca";
 import { evaluate, applyHeaders } from "./rules";
 import { requestApproval } from "./approvals";
 import { inSetup } from "./setup";
+import { repeatableGuestExec } from "../core/guestops";
 import { recordRequest, startRequestLog, type RequestEntry } from "./events";
 import { bodyRedactor, redactResponse, substituteRequest, swapsBodies, textualType, type SwapBody, type SwapResult } from "./credentials";
 import { CUTOFF_MESSAGE, isCutOff } from "./cutoff";
@@ -524,11 +525,10 @@ export async function installGuestProxy(ref: string): Promise<void> {
   if (!caReady()) throw new Error("proxy CA not initialized (is openssl installed?)");
   const ca = caCertPem();
 
-  const install = await driver.execWithStdin(
+  const install = await repeatableGuestExec(
     ref,
     `umask 022 && cat > ${config.guestCaPath} && update-ca-certificates >/dev/null 2>&1`,
-    new TextEncoder().encode(ca),
-    { user: "root" },
+    { stdin: new TextEncoder().encode(ca), user: "root" },
   );
   if (install.exitCode !== 0) throw new Error(`CA install failed: ${install.stderr}`);
 
@@ -559,10 +559,10 @@ export async function installGuestProxy(ref: string): Promise<void> {
     `export GIT_SSL_CAINFO="${config.guestCaBundle}"`,
     "",
   ].join("\n");
-  const write = await driver.execWithStdin(
+  const write = await repeatableGuestExec(
     ref,
     `mkdir -p $(dirname ${config.guestNetEnvFile}) && umask 077 && cat > ${config.guestNetEnvFile}`,
-    new TextEncoder().encode(env),
+    { stdin: new TextEncoder().encode(env) },
   );
   if (write.exitCode !== 0) throw new Error(`net.env write failed: ${write.stderr}`);
 }

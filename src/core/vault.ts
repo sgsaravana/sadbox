@@ -16,13 +16,11 @@
 import { config } from "../config";
 import { decrypt, encrypt } from "../crypto";
 import { db, logEvent } from "../db";
-import { getDriver } from "../driver";
 import { getProject, refFor } from "./projects";
+import { repeatableGuestExec } from "./guestops";
 import { dropItemPlaceholders, dropPlaceholders, existingPlaceholder, placeholderFor, prefixOf } from "./placeholders";
 import { normalizeHost } from "../net/rules";
 import { listFetchGrants, revokeFetchGrants } from "../net/fetchgrants";
-
-const driver = getDriver();
 
 const ITEM_NAME = /^[A-Z][A-Z0-9_]*$/;
 
@@ -360,12 +358,12 @@ export async function injectVault(projectId: string) {
     if (r.in_env) return [`${r.name}=${shellQuote(decrypt(r.value_enc))}`];
     return [];
   });
-  const r = await driver.execWithStdin(
+  const r = await repeatableGuestExec(
     refFor(p.name),
     `mkdir -p $(dirname ${config.guestSecretsFile}) && umask 077 && cat > ${config.guestSecretsFile}`,
-    new TextEncoder().encode(lines.join("\n") + "\n"),
+    { stdin: new TextEncoder().encode(lines.join("\n") + "\n") },
   );
-  if (r.exitCode !== 0) throw new Error(`vault injection failed: ${r.stderr}`);
+  if (r.exitCode !== 0) throw new Error(`vault injection failed: ${r.stderr.trim() || `exit ${r.exitCode}`}`);
   db.query("UPDATE project_secrets SET status = 'injected' WHERE project_id = ?").run(projectId);
   logEvent(projectId, "vault.inject", `${lines.length} of ${rows.length} item(s) in the env file`);
 }
