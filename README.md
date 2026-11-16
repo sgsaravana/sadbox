@@ -503,7 +503,11 @@ What does not:
 
 - **Existing VMs stay on the image they were built from.** **Rebuild** a
   project to give it the new base image; a create or rebuild also brings
-  Claude Code, omp and opencode to their latest releases. Rebuild keeps the
+  Claude Code, omp and opencode to their latest releases. Each update is
+  best effort and capped at five minutes (`SADBOX_AGENT_UPDATE_MS` changes
+  that; a launchd job takes it in `EnvironmentVariables`), so a slow or
+  unreachable registry leaves the image's version in place instead of holding
+  the project in *creating*. Rebuild keeps the
   project's vault access, network rules, agent history and logins, but
   replaces the VM's disk — sync back or push what you want to keep first.
 - The programs sadbox puts in a VM (`sadbox-vault`, git's credential helper,
@@ -1285,6 +1289,17 @@ port forwards go down.
 - On Apple silicon running macOS 15, add
   `<key>SADBOX_DRIVER</key><string>vz</string>` to `EnvironmentVariables`.
   Intel Macs do not need it (vz is their default).
+- Any other `SADBOX_*` setting goes in the same `EnvironmentVariables`
+  dictionary. For example, this caps each agent self-update during a create or
+  rebuild at two minutes instead of five (milliseconds, minimum 30000):
+  `<key>SADBOX_AGENT_UPDATE_MS</key><string>120000</string>`. After editing the
+  plist, reload the job with `launchctl bootout` + `launchctl bootstrap` —
+  `kickstart -k` restarts the process, but with the old environment. Check it
+  took with
+  `launchctl print gui/$(id -u)/dev.sadbox.supervisor | grep SADBOX_AGENT`.
+  Running `sadbox serve` in the foreground instead? Export it in that shell
+  before starting. If the job came from `brew services`, the same dictionary is
+  in `~/Library/LaunchAgents/homebrew.mxcl.sadbox.plist`.
 - This runs at login. To run before anyone logs in, install the same file as a
   LaunchDaemon in `/Library/LaunchDaemons` (owned by root, with a `UserName`
   key); it is not needed for a normal desktop Mac.
