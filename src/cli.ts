@@ -218,7 +218,7 @@ Usage: sadbox <command>
 
   serve      Start the web supervisor (default)   http://localhost:${config.port}
   setup      Check deps, start the VM backend, build the base image
-  update     Install the latest release (alias: upgrade; --check, --prerelease, --no-restart)
+  update     Install the latest release (alias: upgrade; --check, --prerelease, --no-restart, --no-image)
   doctor     Report environment health
   service    install | uninstall | status — run the supervisor at boot (Linux/WSL 2, systemd)
   passwd     Set the sign-in password (signs every browser out)

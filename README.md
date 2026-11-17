@@ -462,10 +462,12 @@ sadbox update
 ```
 
 It checks GitHub for the latest stable release, downloads the matching binary,
-verifies the release's `SHA256SUMS`, replaces the binary atomically, and
-restarts a systemd or launchd service if it finds one. Useful flags:
-`--check` (report only), `--prerelease` (follow the pre-release track),
-`--version v0.6.0` (install an exact release), `--no-restart`, `--force`.
+verifies the release's `SHA256SUMS`, replaces the binary atomically, rebuilds
+the base image and VM disk so new VMs get the current Claude Code, omp and
+opencode, and restarts a systemd or launchd service if it finds one. Useful
+flags: `--check` (report only), `--prerelease` (follow the pre-release track),
+`--version v0.6.0` (install an exact release), `--no-restart`, `--no-image`
+(leave the image alone), `--force`.
 A beta build follows pre-releases automatically. Forked builds can set
 `SADBOX_REPO=owner/repo`; `SADBOX_GITHUB_TOKEN` avoids GitHub API rate limits.
 Homebrew, docker compose and source checkouts are told their own update
@@ -489,23 +491,28 @@ Or update by hand:
      [Option 2](#option-2--download-the-binary-yourself);
    - from source: `git pull && bun install`.
 3. **Start it again** — `sadbox serve` (or load the launchd job, or
-   `systemctl --user start sadbox`) — and check `sadbox version`. With docker
-   compose: `git pull && docker compose build && docker compose up -d`.
+   `systemctl --user start sadbox`) — and check `sadbox version`. Run
+   `sadbox setup` once to rebuild the base image with the new agents (the
+   one-command path above does this for you). With docker compose:
+   `git pull && docker compose build && docker compose up -d`, then
+   `docker compose run --rm sadbox sadbox setup`.
 
 What happens on its own:
 
 - The database is migrated when the new version starts.
-- If the release changed the **base image** (new tools in the VM), it is
-  rebuilt before the next project is created or rebuilt — that one create
-  takes a few minutes longer. No `sadbox setup` is needed.
+- `sadbox update` rebuilds the **base image** (and the VM disk) with the new
+  binary, so the next create or rebuild starts with the current agents. Use
+  `--no-image` to skip that when Docker is not available, then run
+  `sadbox setup` later. If a release changed the image recipe, the first
+  create or rebuild also rebuilds it if `sadbox update` did not.
 
 What does not:
 
 - **Existing VMs stay on the image they were built from.** **Rebuild** a
   project to give it the new base image. The base image carries the agents —
   Claude Code, omp and opencode are installed when it is built — so a create
-  or rebuild starts with the versions `sadbox setup` last fetched; run it to
-  refresh them. Rebuild keeps the
+  or rebuild starts with the versions `sadbox update` (or `sadbox setup`)
+  last fetched; run one to refresh them. Rebuild keeps the
   project's vault access, network rules, agent history and logins, but
   replaces the VM's disk — sync back or push what you want to keep first.
 - The programs sadbox puts in a VM (`sadbox-vault`, git's credential helper,
