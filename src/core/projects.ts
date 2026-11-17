@@ -583,6 +583,7 @@ const GUEST_PROBE = [
   'echo "uptime=$(cut -d. -f1 /proc/uptime)"',
   `cd ${config.guestWorkdir} 2>/dev/null && echo "git_dirty=$(git status --porcelain 2>/dev/null | wc -l | tr -d \\ )" && echo "git_branch=$(git branch --show-current 2>/dev/null)"`,
   optionalAppProbe(),
+  "true", // a missing optional app must not make the whole probe look like a dead VM
 ].join("; ");
 
 function kv(text: string): Record<string, string> {
@@ -607,6 +608,16 @@ export function projectDetails(id: string) {
 }
 const detailsInFlight = new Map<string, ReturnType<typeof loadDetails>>();
 
+/** Did the guest not answer at all? A shell command that ran and returned
+ *  nonzero is not unresponsive — the probe's last command may simply have
+ *  found nothing (e.g. an optional app that is not installed). */
+export function guestUnreachable(r: { exitCode: number; stderr?: string } | null): boolean {
+  if (r == null || r.exitCode === 124 || r.exitCode === 255) return true;
+  // the container CLI answers nonzero when its service is down; that is not a
+  // shell command failing inside a healthy VM
+  return /XPC connection error|container system start|apiserver is not running/i.test(r.stderr ?? "");
+}
+
 async function loadDetails(id: string) {
   const p = getProject(id);
   if (!p) throw new Error("project not found");
@@ -621,6 +632,7 @@ async function loadDetails(id: string) {
   let guest: Record<string, string> = {};
   let toolchain: ToolInfo[] | null = null;
   let partial = false; // some readings are still on their way — ask again shortly
+  let probeIncomplete = false; // the probe was too slow, but the VM did answer a trivial command
   let unresponsive = false; // up as far as the runtime knows, but not answering
   if (running) {
     // only the guest probe is waited for; see vitals.ts for the other two
@@ -629,8 +641,15 @@ async function loadDetails(id: string) {
       liveStats(ref, info?.cpus),
       liveToolchain(ref),
     ]);
-    if (g?.exitCode === 0) guest = kv(g.stdout);
-    else unresponsive = true;
+    if (g) guest = kv(g.stdout);
+    if (guestUnreachable(g)) {
+      // A big workdir or git status can outrun the probe's 8 s. Ask the agent
+      // something trivial before calling a running VM "not responding".
+      const alive = await driver.exec(ref, ["true"], { timeoutMs: 3_000 })
+        .then((r) => !guestUnreachable(r)).catch(() => false);
+      unresponsive = !alive;
+      probeIncomplete = alive;
+    }
     ({ stats, cpuPercent } = live);
     toolchain = tc.tools;
     partial = live.pending || tc.pending;
@@ -655,7 +674,7 @@ async function loadDetails(id: string) {
     base_sha: p.base_sha,
     last_synced_sha: p.last_synced_sha,
     apps: JSON.parse(p.apps),
-    optional_apps: optionalAppsFromGuest(guest, running && !unresponsive ? null : storedAppIds(p.optional_apps)), // catalog apps + what this VM has
+    optional_apps: optionalAppsFromGuest(guest, running && !unresponsive && !probeIncomplete ? null : storedAppIds(p.optional_apps)), // catalog apps + what this VM has
     git_remote: p.git_remote,
     has_git_token: hasGitToken(p),
     net_cutoff: p.net_cutoff === 1,
