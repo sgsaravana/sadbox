@@ -404,28 +404,11 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
     catch (e) { logLine(p.id, "git.error", String(e)); throw e; }
   }
 
-  // The base image is built once and its agents go stale, so bring claude, omp
-  // and opencode to their latest releases in every new or rebuilt VM. Best
-  // effort (an offline registry must not fail the create), each tool on its own
-  // and each with its own shorter limit: a slow package that never finishes
-  // leaves the image's version in place instead of stalling the whole rebuild.
-  await duringSetup(p.id, async () => {
-    const env = `[ -f ${config.guestNetEnvFile} ] && . ${config.guestNetEnvFile}; ` +
-      `export CI=1 PATH="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.nvm/current/bin:$PATH"; `;
-    const steps: [string, string][] = [
-      ["claude", "claude update"],
-      ["omp", "bun install -g @oh-my-pi/pi-coding-agent@latest"],
-      ["opencode", "bun install -g opencode-ai@latest"],
-    ];
-    for (const [tool, cmd] of steps) {
-      logEvent(p.id, "agent.update.start", `${tool}: ${tool === "claude" ? "checking" : "downloading"}`);
-      const r = await driver.exec(ref, ["sh", "-c", env + cmd], { timeoutMs: config.agentUpdateMs });
-      const outcome = r.exitCode === 0 ? "latest"
-        : r.exitCode === 124 ? `timed out after ${Math.round(config.agentUpdateMs / 1000)} s — kept the image's version`
-        : `exit ${r.exitCode} ${r.stderr.trim().slice(-200)}`;
-      logEvent(p.id, "agent.update", `${tool}: ${outcome}`);
-    }
-  });
+  // The agents come from the base image (images/base installs the latest at
+  // build time). They are deliberately not updated here: an updater needs
+  // network approval while nobody is watching, and a slow registry would hold
+  // the project in `creating`. Run `sadbox setup` to rebuild the image with
+  // newer releases.
 
   // extra apps (best effort — base toolchain is baked into the image). Run as
   // root with the proxy env, inside the provisioning window; the image ships

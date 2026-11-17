@@ -462,10 +462,13 @@ sadbox update
 ```
 
 It checks GitHub for the latest stable release, downloads the matching binary,
-verifies the release's `SHA256SUMS`, replaces the binary atomically, and
-restarts a systemd or launchd service if it finds one. Useful flags:
-`--check` (report only), `--prerelease` (follow the pre-release track),
-`--version v0.6.0` (install an exact release), `--no-restart`, `--force`.
+verifies the release's `SHA256SUMS`, replaces the binary atomically, rebuilds
+the base image and VM disk so new VMs get the current Claude Code, omp and
+opencode, and restarts a systemd or launchd service if it finds one. The image
+is refreshed even when the supervisor is already current; `--no-image` skips
+that. Useful flags: `--check` (report only), `--prerelease` (follow the
+pre-release track), `--version v0.6.0` (install an exact release),
+`--no-restart`, `--no-image`, `--force`.
 A beta build follows pre-releases automatically. Forked builds can set
 `SADBOX_REPO=owner/repo`; `SADBOX_GITHUB_TOKEN` avoids GitHub API rate limits.
 Homebrew, docker compose and source checkouts are told their own update
@@ -489,25 +492,29 @@ Or update by hand:
      [Option 2](#option-2--download-the-binary-yourself);
    - from source: `git pull && bun install`.
 3. **Start it again** — `sadbox serve` (or load the launchd job, or
-   `systemctl --user start sadbox`) — and check `sadbox version`. With docker
-   compose: `git pull && docker compose build && docker compose up -d`.
+   `systemctl --user start sadbox`) — and check `sadbox version`. Run
+   `sadbox setup` once to rebuild the base image with the new agents (the
+   one-command path above does this for you). With docker compose:
+   `git pull && docker compose build && docker compose up -d`, then
+   `docker compose run --rm sadbox sadbox setup`.
 
 What happens on its own:
 
 - The database is migrated when the new version starts.
-- If the release changed the **base image** (new tools in the VM), it is
-  rebuilt before the next project is created or rebuilt — that one create
-  takes a few minutes longer. No `sadbox setup` is needed.
+- `sadbox update` rebuilds the **base image** (and the VM disk) with the new
+  binary — or with the current binary when there is no new release — so the
+  next create or rebuild starts with the current agents. Use `--no-image` to
+  skip that when Docker is not available, then run `sadbox setup` later. If a
+  release changed the image recipe, the first create or rebuild also rebuilds
+  it if `sadbox update` did not.
 
 What does not:
 
 - **Existing VMs stay on the image they were built from.** **Rebuild** a
-  project to give it the new base image; a create or rebuild also brings
-  Claude Code, omp and opencode to their latest releases. Each update is
-  best effort and capped at five minutes (`SADBOX_AGENT_UPDATE_MS` changes
-  that; a launchd job takes it in `EnvironmentVariables`), so a slow or
-  unreachable registry leaves the image's version in place instead of holding
-  the project in *creating*. Rebuild keeps the
+  project to give it the new base image. The base image carries the agents —
+  Claude Code, omp and opencode are installed when it is built — so a create
+  or rebuild starts with the versions `sadbox update` (or `sadbox setup`)
+  last fetched; run one to refresh them. Rebuild keeps the
   project's vault access, network rules, agent history and logins, but
   replaces the VM's disk — sync back or push what you want to keep first.
 - The programs sadbox puts in a VM (`sadbox-vault`, git's credential helper,
@@ -874,6 +881,12 @@ over vsock instead.
     VM, like a key you typed there. Their **OAuth** logins are not shared (a
     copy stops working once another VM refreshes it): log in per VM.
   - **Apply to running VMs** copies the current logins in now.
+- **Updating the agents**: the base image carries the versions — `sadbox update`
+  (or `sadbox setup`) refreshes it for the next create or rebuild. To update
+  inside a running VM instead, run `claude update`,
+  `bun install -g @oh-my-pi/pi-coding-agent@latest` and
+  `bun install -g opencode-ai@latest`; `api.anthropic.com`,
+  `downloads.claude.ai` and `registry.npmjs.org` are allowed by default.
 - **Agent history**: Claude's projects, file history and prompt history, omp's
   sessions and history, and opencode's database and snapshots live on this
   machine under `~/.sadbox/agents/history/<project name>/`, mounted into the
@@ -937,7 +950,10 @@ over vsock instead.
   VM trusts (installed into the guest trust store + `NODE_EXTRA_CA_CERTS` at
   create), so it sees full URLs, headers, and bodies. It is **block-by-default**:
   a request with no matching rule is *held* while the detail view prompts for
-  approval — **Allow once / 1m / 5m / 30m / 60m / forever**, or **Block**. Timed
+  approval — **Allow once / 1m / 5m / 30m / 60m / forever**, or **Block**.
+  The agents' own hosts — `api.anthropic.com`, `downloads.claude.ai` and the
+  npm registry (`registry.npmjs.org`, for omp and opencode) — are allowed
+  without a rule (a block rule still stops them). Timed
   and forever answers persist as rules so the host isn't re-prompted. Rules
   (allow/block by host `*.example.com`/`*`, optional path glob + method) and
   header rewrites (set/remove on request or response) are **global** (all VMs)
@@ -1290,16 +1306,13 @@ port forwards go down.
   `<key>SADBOX_DRIVER</key><string>vz</string>` to `EnvironmentVariables`.
   Intel Macs do not need it (vz is their default).
 - Any other `SADBOX_*` setting goes in the same `EnvironmentVariables`
-  dictionary. For example, this caps each agent self-update during a create or
-  rebuild at two minutes instead of five (milliseconds, minimum 30000):
-  `<key>SADBOX_AGENT_UPDATE_MS</key><string>120000</string>`. After editing the
-  plist, reload the job with `launchctl bootout` + `launchctl bootstrap` —
-  `kickstart -k` restarts the process, but with the old environment. Check it
-  took with
-  `launchctl print gui/$(id -u)/dev.sadbox.supervisor | grep SADBOX_AGENT`.
-  Running `sadbox serve` in the foreground instead? Export it in that shell
-  before starting. If the job came from `brew services`, the same dictionary is
-  in `~/Library/LaunchAgents/homebrew.mxcl.sadbox.plist`.
+  dictionary. After editing the plist, reload the job with `launchctl bootout`
+  + `launchctl bootstrap` — `kickstart -k` restarts the process, but with the
+  old environment. Check it took with
+  `launchctl print gui/$(id -u)/dev.sadbox.supervisor | grep SADBOX`.
+  Running `sadbox serve` in the foreground instead? Export the variable in
+  that shell before starting. If the job came from `brew services`, the same
+  dictionary is in `~/Library/LaunchAgents/homebrew.mxcl.sadbox.plist`.
 - This runs at login. To run before anyone logs in, install the same file as a
   LaunchDaemon in `/Library/LaunchDaemons` (owned by root, with a `UserName`
   key); it is not needed for a normal desktop Mac.

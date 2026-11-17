@@ -24,6 +24,8 @@ export interface UpdateOptions {
   prerelease?: boolean;
   /** Restart an installed systemd/launchd service after replacing the binary. */
   restart?: boolean;
+  /** Rebuild the base image (and VM disk) so new VMs get the latest agents. */
+  refreshImage?: boolean;
   /** Install an exact tag, e.g. v0.6.0. */
   version?: string;
 }
@@ -43,7 +45,7 @@ interface Release {
 }
 
 export function parseUpdateArgs(args: string[]): UpdateOptions {
-  const out: UpdateOptions = { restart: true };
+  const out: UpdateOptions = { restart: true, refreshImage: true };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     switch (a) {
@@ -52,6 +54,8 @@ export function parseUpdateArgs(args: string[]): UpdateOptions {
       case "--prerelease": case "--beta": out.prerelease = true; break;
       case "--no-restart": out.restart = false; break;
       case "--restart": out.restart = true; break;
+      case "--no-image": out.refreshImage = false; break;
+      case "--image": out.refreshImage = true; break;
       case "--version": {
         const v = args[++i];
         if (!v) throw new Error("--version needs a tag, e.g. --version v0.6.0");
@@ -193,10 +197,10 @@ async function download(url: string): Promise<Uint8Array> {
 export async function runUpdate(opts: UpdateOptions, log = (s: string) => console.log(s)): Promise<void> {
   const method = updateMethod();
   if (method === "docker") {
-    throw new Error("this is a container install. On the host:\n  git pull && docker compose build && docker compose up -d\n(or `docker compose pull` if you use a published image)");
+    throw new Error("this is a container install. On the host:\n  git pull && docker compose build && docker compose up -d\n  docker compose run --rm sadbox sadbox setup   # rebuild the base image + agents\n(or `docker compose pull` if you use a published image)");
   }
   if (method === "source") {
-    throw new Error("this is a source checkout, not an installed binary. Update it with:\n  git pull && bun install");
+    throw new Error("this is a source checkout, not an installed binary. Update it with:\n  git pull && bun install && bun run setup");
   }
   if (method === "unsupported") {
     throw new Error("sadbox update runs inside macOS or Linux. On Windows it runs inside WSL; update the Windows launcher by reinstalling the release.");
@@ -214,16 +218,17 @@ export async function runUpdate(opts: UpdateOptions, log = (s: string) => consol
     else log(`sadbox ${VERSION} is up to date (latest ${tag})`);
     return;
   }
-  if (!opts.force && cmp === 0) {
-    log(`sadbox ${VERSION} is already current (${tag})`);
-    return;
-  }
+  const current = !opts.force && cmp === 0;
   if (!opts.force && !opts.version && cmp < 0) {
     log(`sadbox ${VERSION} is newer than the latest release (${tag}); use --force to install it anyway`);
     return;
   }
 
-  if (method === "homebrew") {
+  if (current) {
+    log(`sadbox ${VERSION} is already current (${tag})`);
+    if (!opts.refreshImage) return;
+    log("· refreshing the base image so new VMs get the current agents");
+  } else if (method === "homebrew") {
     if (opts.version || opts.prerelease) {
       throw new Error("Homebrew installs follow the formula, not an exact or pre-release tag. Use the install script for --version/--prerelease, or `brew upgrade sadbox` for the latest formula.");
     }
@@ -253,7 +258,22 @@ export async function runUpdate(opts: UpdateOptions, log = (s: string) => consol
     log(`✓ replaced ${realpathSync(process.execPath)} (${VERSION} → ${latest})`);
   }
 
-  if (opts.restart) {
+  // Agents come from the base image, not from an update inside each VM. Build
+  // it with the new binary so the next create or rebuild starts with the
+  // current Claude Code, omp and opencode.
+  if (opts.refreshImage) {
+    const exe = method === "homebrew" ? (Bun.which("sadbox") ?? process.execPath) : process.execPath;
+    log("→ rebuilding the base image and VM disk so new VMs get the current agents (a few minutes)…");
+    let ok = false;
+    try {
+      const r = Bun.spawn([exe, "setup"], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+      ok = (await r.exited) === 0;
+    } catch {}
+    if (ok) log("✓ base image rebuilt — Rebuild a project to pick it up");
+    else log("⚠ the base image was not rebuilt — run `sadbox setup` when Docker is available. Existing VMs keep their agents.");
+  }
+
+  if (opts.restart && !current) {
     try {
       const how = await restartService();
       if (how) log(`✓ restarted the supervisor (${how})`);

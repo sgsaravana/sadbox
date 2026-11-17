@@ -51,11 +51,6 @@ export const config = {
   // how long each VM's network request log is kept in the database, in days
   // (SADBOX_NET_LOG_DAYS; never less than 7)
   netLogDays: Math.max(7, Number(process.env.SADBOX_NET_LOG_DAYS) || 7),
-  // per tool, how long a create/rebuild waits for claude, omp and opencode to
-  // update themselves before leaving the image's version in place. They are a
-  // best-effort refresh: a slow registry must not hold the project in `creating`
-  // for the 15 minutes a generic long task is allowed (SADBOX_AGENT_UPDATE_MS).
-  agentUpdateMs: Math.max(30_000, Number(process.env.SADBOX_AGENT_UPDATE_MS) || 5 * 60_000),
   // per-user state dir — works the same for a repo checkout or an installed binary
   dataDir: process.env.SADBOX_DATA ?? join(homedir(), ".sadbox"),
   // base image every project VM boots from; built by `sadbox setup`.

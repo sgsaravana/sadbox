@@ -45,9 +45,10 @@ describe("assets and checksums", () => {
 
 describe("arguments", () => {
   test("flags and an exact version", () => {
-    expect(parseUpdateArgs(["--check", "--prerelease", "--no-restart", "--force"])).toEqual({
-      check: true, prerelease: true, restart: false, force: true,
+    expect(parseUpdateArgs(["--check", "--prerelease", "--no-restart", "--no-image", "--force"])).toEqual({
+      check: true, prerelease: true, restart: false, refreshImage: false, force: true,
     });
+    expect(parseUpdateArgs([]).refreshImage).toBe(true);
     expect(parseUpdateArgs(["--version", "0.6.0"]).version).toBe("0.6.0");
     expect(parseUpdateArgs(["--version=v0.6.0"]).version).toBe("v0.6.0");
     expect(() => parseUpdateArgs(["--wat"])).toThrow(/unknown update option/);
