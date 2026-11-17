@@ -1023,17 +1023,6 @@ const eventTime = (at) => {
 };
 
 const cpRaw = $("#cp-raw");
-function showCreateTab(tab) {
-  const logs = tab === "logs";
-  $("#cp-log").hidden = logs;
-  cpRaw.hidden = !logs;
-  $("#cp-tab-steps").classList.toggle("active", !logs);
-  $("#cp-tab-logs").classList.toggle("active", logs);
-  $("#cp-tab-steps").setAttribute("aria-selected", String(!logs));
-  $("#cp-tab-logs").setAttribute("aria-selected", String(logs));
-}
-$("#cp-tab-steps").onclick = () => showCreateTab("steps");
-$("#cp-tab-logs").onclick = () => showCreateTab("logs");
 $("#cp-copy-logs").onclick = async () => {
   const b = $("#cp-copy-logs");
   try { await navigator.clipboard.writeText(cpRaw.textContent); b.textContent = "copied"; }
@@ -1051,7 +1040,6 @@ function resetCreateProgress() {
   $("#create-progress").hidden = true;
   $("#cp-log").innerHTML = "";
   cpRaw.textContent = "";
-  showCreateTab("steps");
   $("#cp-phase").textContent = "Starting…";
   $("#cp-elapsed").textContent = "0:00";
   $("#cp-error").hidden = true;
@@ -1075,7 +1063,6 @@ function startCreateProgress(name, mode, startedAt) {
   $("#cp-elapsed").textContent = "0:00";
   $("#cp-log").innerHTML = "";
   cpRaw.textContent = "";
-  showCreateTab("steps");
   $("#cp-error").hidden = true;
   $("#cp-error").textContent = "";
   $("#cp-actions").hidden = true;
@@ -1420,7 +1407,6 @@ $("#create-form").onsubmit = async (e) => {
     $("#cp-error").textContent = err.message;
     $("#cp-error").hidden = false;
     $("#cp-actions").hidden = false;
-    if (cpRaw.textContent.trim()) showCreateTab("logs");
   }
 };
 
