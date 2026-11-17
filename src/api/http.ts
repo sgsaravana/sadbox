@@ -192,7 +192,9 @@ export function startServer() {
         if (m && req.method === "GET") {
           if (!getProject(m[1])) return json({ error: "project not found" }, 404);
           const after = Number(url.searchParams.get("after")) || 0;
-          return json(projectEvents(m[1], after));
+          const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit")) || 100));
+          const tail = url.searchParams.get("tail") === "1";
+          return json(projectEvents(m[1], after, limit, tail));
         }
         // optional apps: install one into this VM now / remove it again
         m = p.match(/^\/api\/projects\/([\w-]+)\/apps$/);

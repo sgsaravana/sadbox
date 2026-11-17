@@ -436,6 +436,29 @@
       <button type="button" id="picker-select" class="primary">Select this folder</button>
     </div>
   </dialog>
+
+  <!-- Blocking progress while a project is destroyed; the supervisor's event
+       log drives the steps. -->
+  <dialog id="destroy-progress">
+    <div class="picker-head">
+      <strong id="dp-title">Destroying project</strong>
+      <button type="button" id="dp-close" hidden>✕</button>
+    </div>
+    <div class="cp-head">
+      <span class="spinner"></span>
+      <div class="cp-what">
+        <strong id="dp-phase">Starting…</strong>
+        <div class="hint">The agents' conversation history is kept.</div>
+      </div>
+      <span id="dp-elapsed" class="cp-elapsed">0:00</span>
+    </div>
+    <div class="cp-bar" role="progressbar" aria-label="Destroying the project"><span></span></div>
+    <ol id="dp-log" class="cp-log"></ol>
+    <p id="dp-error" class="cp-error" hidden></p>
+    <div class="row" id="dp-actions" hidden>
+      <button type="button" id="dp-back">Close</button>
+    </div>
+  </dialog>
   <script src="/app.js"></script>
 </body>
 </html>

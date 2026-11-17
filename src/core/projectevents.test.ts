@@ -33,6 +33,13 @@ describe("a project's event log", () => {
     expect(page.map((e) => e.detail)).toEqual(["x", "y", "0"]);
   });
 
+  test("tail returns the newest events, oldest first", () => {
+    const t = `${id}-tail`;
+    for (const d of ["a", "b", "c", "d"]) logEvent(t, "step", d);
+    expect(projectEvents(t, 0, 2, true).map((e) => e.detail)).toEqual(["c", "d"]);
+    db.query("DELETE FROM events WHERE project_id = ?").run(t);
+  });
+
   test("an empty or unknown project is an empty log", () => {
     expect(projectEvents("no-such-project")).toEqual([]);
   });
