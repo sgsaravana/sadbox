@@ -522,6 +522,37 @@ What does not:
   running across the update: **Stop** then **Start** a project to give it
   the new ones without a Rebuild.
 
+#### Keeping the agents current
+
+Claude Code, omp and opencode are installed **when the base image is built**,
+not while a VM is being created. That is deliberate: a new VM's egress is
+block-by-default and nobody is watching its approvals during provisioning.
+
+- `sadbox update` refreshes the base image and VM disk as part of the update —
+  including when the supervisor is already current. `--no-image` skips it.
+- `sadbox setup` refreshes them on its own, without touching the supervisor.
+- Both run Docker/colima on the **host**, so the downloads never go through the
+  VM's proxy and need no network approval. Docker must be running.
+- Existing VMs keep the agents they booted with; **Rebuild** a project to use
+  the new image.
+
+To update inside a **running** VM instead (for example, between image
+refreshes), open its terminal and run:
+
+```sh
+claude update
+bun install -g @oh-my-pi/pi-coding-agent@latest
+bun install -g opencode-ai@latest
+```
+
+`api.anthropic.com`, `downloads.claude.ai` and `registry.npmjs.org` are
+allowed by default (a block rule still stops them). A different npm registry
+needs its own rule.
+
+To keep the image fresh between supervisor releases, schedule `sadbox setup`
+(for example weekly) with cron or a launchd job; Docker/colima must be running
+at that time.
+
 Pre-releases are installed and updated on their own track — see
 [Installing a beta (pre-release)](#installing-a-beta-pre-release).
 
