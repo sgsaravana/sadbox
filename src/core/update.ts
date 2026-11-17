@@ -218,16 +218,17 @@ export async function runUpdate(opts: UpdateOptions, log = (s: string) => consol
     else log(`sadbox ${VERSION} is up to date (latest ${tag})`);
     return;
   }
-  if (!opts.force && cmp === 0) {
-    log(`sadbox ${VERSION} is already current (${tag})`);
-    return;
-  }
+  const current = !opts.force && cmp === 0;
   if (!opts.force && !opts.version && cmp < 0) {
     log(`sadbox ${VERSION} is newer than the latest release (${tag}); use --force to install it anyway`);
     return;
   }
 
-  if (method === "homebrew") {
+  if (current) {
+    log(`sadbox ${VERSION} is already current (${tag})`);
+    if (!opts.refreshImage) return;
+    log("· refreshing the base image so new VMs get the current agents");
+  } else if (method === "homebrew") {
     if (opts.version || opts.prerelease) {
       throw new Error("Homebrew installs follow the formula, not an exact or pre-release tag. Use the install script for --version/--prerelease, or `brew upgrade sadbox` for the latest formula.");
     }
@@ -272,7 +273,7 @@ export async function runUpdate(opts: UpdateOptions, log = (s: string) => consol
     else log("⚠ the base image was not rebuilt — run `sadbox setup` when Docker is available. Existing VMs keep their agents.");
   }
 
-  if (opts.restart) {
+  if (opts.restart && !current) {
     try {
       const how = await restartService();
       if (how) log(`✓ restarted the supervisor (${how})`);

@@ -202,9 +202,14 @@ export function purgeProjectNet(projectId: string): void {
 
 // ---- evaluation ----
 
-/** Hosts the agents need for their own work: Claude Code's API and its
- *  installer/updater. No prompt for these; a block rule still wins. */
-const AGENT_HOSTS = new Set(["api.anthropic.com", "downloads.claude.ai"]);
+/** Hosts the agents need for their own work and updates: Claude Code's API and
+ *  installer/updater, and the npm registry Bun installs omp and opencode from.
+ *  No prompt for these; a block rule still wins. */
+const AGENT_HOSTS = new Set([
+  "api.anthropic.com",
+  "downloads.claude.ai",
+  "registry.npmjs.org",
+]);
 
 export function evaluate(
   projectId: string | null,

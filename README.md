@@ -464,10 +464,11 @@ sadbox update
 It checks GitHub for the latest stable release, downloads the matching binary,
 verifies the release's `SHA256SUMS`, replaces the binary atomically, rebuilds
 the base image and VM disk so new VMs get the current Claude Code, omp and
-opencode, and restarts a systemd or launchd service if it finds one. Useful
-flags: `--check` (report only), `--prerelease` (follow the pre-release track),
-`--version v0.6.0` (install an exact release), `--no-restart`, `--no-image`
-(leave the image alone), `--force`.
+opencode, and restarts a systemd or launchd service if it finds one. The image
+is refreshed even when the supervisor is already current; `--no-image` skips
+that. Useful flags: `--check` (report only), `--prerelease` (follow the
+pre-release track), `--version v0.6.0` (install an exact release),
+`--no-restart`, `--no-image`, `--force`.
 A beta build follows pre-releases automatically. Forked builds can set
 `SADBOX_REPO=owner/repo`; `SADBOX_GITHUB_TOKEN` avoids GitHub API rate limits.
 Homebrew, docker compose and source checkouts are told their own update
@@ -501,10 +502,11 @@ What happens on its own:
 
 - The database is migrated when the new version starts.
 - `sadbox update` rebuilds the **base image** (and the VM disk) with the new
-  binary, so the next create or rebuild starts with the current agents. Use
-  `--no-image` to skip that when Docker is not available, then run
-  `sadbox setup` later. If a release changed the image recipe, the first
-  create or rebuild also rebuilds it if `sadbox update` did not.
+  binary — or with the current binary when there is no new release — so the
+  next create or rebuild starts with the current agents. Use `--no-image` to
+  skip that when Docker is not available, then run `sadbox setup` later. If a
+  release changed the image recipe, the first create or rebuild also rebuilds
+  it if `sadbox update` did not.
 
 What does not:
 
@@ -879,6 +881,12 @@ over vsock instead.
     VM, like a key you typed there. Their **OAuth** logins are not shared (a
     copy stops working once another VM refreshes it): log in per VM.
   - **Apply to running VMs** copies the current logins in now.
+- **Updating the agents**: the base image carries the versions — `sadbox update`
+  (or `sadbox setup`) refreshes it for the next create or rebuild. To update
+  inside a running VM instead, run `claude update`,
+  `bun install -g @oh-my-pi/pi-coding-agent@latest` and
+  `bun install -g opencode-ai@latest`; `api.anthropic.com`,
+  `downloads.claude.ai` and `registry.npmjs.org` are allowed by default.
 - **Agent history**: Claude's projects, file history and prompt history, omp's
   sessions and history, and opencode's database and snapshots live on this
   machine under `~/.sadbox/agents/history/<project name>/`, mounted into the
@@ -943,8 +951,9 @@ over vsock instead.
   create), so it sees full URLs, headers, and bodies. It is **block-by-default**:
   a request with no matching rule is *held* while the detail view prompts for
   approval — **Allow once / 1m / 5m / 30m / 60m / forever**, or **Block**.
-  Claude Code's own hosts, `api.anthropic.com` and `downloads.claude.ai`, are
-  allowed without a rule (a block rule still stops them). Timed
+  The agents' own hosts — `api.anthropic.com`, `downloads.claude.ai` and the
+  npm registry (`registry.npmjs.org`, for omp and opencode) — are allowed
+  without a rule (a block rule still stops them). Timed
   and forever answers persist as rules so the host isn't re-prompted. Rules
   (allow/block by host `*.example.com`/`*`, optional path glob + method) and
   header rewrites (set/remove on request or response) are **global** (all VMs)
