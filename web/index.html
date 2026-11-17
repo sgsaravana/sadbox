@@ -224,13 +224,19 @@
               <span id="cp-elapsed" class="cp-elapsed">0:00</span>
             </div>
             <div class="cp-bar" role="progressbar" aria-label="Creating the project"><span></span></div>
-            <div class="cp-tabs" role="tablist">
-              <button type="button" id="cp-tab-steps" class="cp-tab active" role="tab" aria-selected="true">Steps</button>
-              <button type="button" id="cp-tab-logs" class="cp-tab" role="tab" aria-selected="false">Logs</button>
-              <button type="button" id="cp-copy-logs" class="mini" title="Copy the raw log for a bug report">copy logs</button>
+            <div class="cp-columns">
+              <div class="cp-col">
+                <div class="cp-col-head"><strong>Steps</strong></div>
+                <ol id="cp-log" class="cp-log"></ol>
+              </div>
+              <div class="cp-col">
+                <div class="cp-col-head">
+                  <strong>Logs</strong>
+                  <button type="button" id="cp-copy-logs" class="mini" title="Copy the raw log for a bug report">copy logs</button>
+                </div>
+                <pre id="cp-raw" class="cp-raw"></pre>
+              </div>
             </div>
-            <ol id="cp-log" class="cp-log"></ol>
-            <pre id="cp-raw" class="cp-raw" hidden></pre>
             <p id="cp-error" class="cp-error" hidden></p>
             <div class="row" id="cp-actions" hidden>
               <button type="button" id="cp-back">Back to the form</button>
