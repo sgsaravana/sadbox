@@ -8,6 +8,10 @@
 import indexHtml from "../web/index.html" with { type: "file" };
 import loginHtml from "../web/login.html" with { type: "file" };
 import terminalHtml from "../web/terminal.html" with { type: "file" };
+import faviconSvg from "../web/favicon.svg" with { type: "file" };
+import faviconIco from "../web/favicon.ico" with { type: "file" };
+import faviconPng from "../web/favicon-32.png" with { type: "file" };
+import appleTouchIcon from "../web/apple-touch-icon.png" with { type: "file" };
 import appJs from "../web/app.js" with { type: "file" };
 import styleCss from "../web/style.css" with { type: "file" };
 import netAsksJs from "../web/net-asks.js" with { type: "file" };
@@ -103,6 +107,11 @@ export const staticRoutes: Record<string, [string, string]> = {
   "/login": [loginHtml, "text/html; charset=utf-8"],
   "/app.js": [appJs, "text/javascript"],
   "/style.css": [styleCss, "text/css"],
+  "/favicon.svg": [faviconSvg, "image/svg+xml"],
+  "/favicon.ico": [faviconIco, "image/x-icon"],
+  "/favicon-32.png": [faviconPng, "image/png"],
+  "/favicon.png": [faviconPng, "image/png"],
+  "/apple-touch-icon.png": [appleTouchIcon, "image/png"],
   "/net-asks.js": [netAsksJs, "text/javascript"],
   "/vm-warn.js": [vmWarnJs, "text/javascript"],
   "/vendor/xterm.js": [xtermJs, "text/javascript"],
