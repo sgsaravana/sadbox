@@ -145,12 +145,13 @@ pre.result {
 .input-with-btn { margin-top: 3px; }
 .input-with-btn input { flex: 1; margin: 0; }
 
-dialog#picker, dialog#psec, dialog#gitremote, dialog#vitem {
+dialog#picker, dialog#psec, dialog#gitremote, dialog#vitem, dialog#destroy-progress {
   background: var(--panel); color: var(--text);
   border: 1px solid var(--border); border-radius: 12px;
   width: min(560px, 90vw); padding: 16px 18px;
 }
-dialog#picker::backdrop, dialog#psec::backdrop, dialog#gitremote::backdrop, dialog#vitem::backdrop { background: rgba(0, 0, 0, 0.6); }
+dialog#picker::backdrop, dialog#psec::backdrop, dialog#gitremote::backdrop, dialog#vitem::backdrop,
+dialog#destroy-progress::backdrop { background: rgba(0, 0, 0, 0.6); }
 
 /* vault items: badges, bindings (hosts a proxy item may go to), placeholder */
 .sec-name { font-family: ui-monospace, monospace; }

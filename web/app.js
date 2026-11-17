@@ -751,10 +751,10 @@ document.addEventListener("click", async (e) => {
         } finally { b.disabled = false; b.textContent = "Rebuild"; }
       }
     } else if (b.dataset.destroy) {
+      const id = b.dataset.destroy;
+      if (destroying.has(id)) return;
       if (confirm(`Destroy project "${b.dataset.name}"? The VM and any unsynced work in it are deleted. The agents' conversation history is kept, and comes back if you create a project with the same name.`)) {
-        await api(`/api/projects/${b.dataset.destroy}`, { method: "DELETE" });
-        if (location.hash.startsWith("#project/")) location.hash = "projects";
-        else { refreshProjects(); refreshNavTree(); }
+        await destroyWithProgress(id, b.dataset.name || id);
       }
     }
   } catch (err) {
@@ -1165,6 +1165,120 @@ $("#btn-new").onclick = openCreateForm;
 $("#home-new").onclick = () => { openCreateNext = true; location.hash = "projects"; };
 $("#btn-cancel").onclick = closeCreateForm;
 $("#cp-back").onclick = resetCreateProgress;
+
+// ---- destroy progress: a blocking dialog while the VM and its data go ----
+const destroying = new Set();
+const DESTROY_PHASES = {
+  "destroy.start": "Removing the VM and its data",
+  "history.copyout": "Saving agent history",
+  "history.copyout.error": "Agent history could not be saved",
+  "destroy.vm": "VM removed",
+  "vault.purge": "Removing vault access",
+  "destroy.cleanup": "Removing rules, forwards and files",
+  "destroy": "Destroyed",
+  "destroy.error": "Could not destroy the project",
+};
+const dp = $("#destroy-progress");
+const dpTitle = $("#dp-title");
+const dpPhase = $("#dp-phase");
+const dpElapsed = $("#dp-elapsed");
+const dpLog = $("#dp-log");
+const dpError = $("#dp-error");
+const dpActions = $("#dp-actions");
+const dpClose = $("#dp-close");
+const dpBack = $("#dp-back");
+
+dpClose.onclick = () => dp.close();
+dpBack.onclick = () => dp.close();
+dp.addEventListener("cancel", (e) => { if (dp.dataset.busy === "1") e.preventDefault(); });
+
+/** Destroy with a visible, blocking progress dialog. The supervisor's events
+ *  drive the steps; the buttons are disabled so a second click cannot start
+ *  another destroy. */
+async function destroyWithProgress(id, name) {
+  if (destroying.has(id)) return;
+  destroying.add(id);
+  const buttons = [...document.querySelectorAll(`[data-destroy="${id}"]`)]
+    .map((b) => ({ b, html: b.innerHTML }));
+  for (const { b } of buttons) {
+    b.disabled = true;
+    b.innerHTML = `<span class="spinner"></span>Destroying…`;
+  }
+
+  dp.dataset.busy = "1";
+  dpTitle.textContent = `Destroying ${name}`;
+  dpPhase.textContent = "Starting…";
+  dpElapsed.textContent = "0:00";
+  dpLog.innerHTML = "";
+  dpError.hidden = true;
+  dpError.textContent = "";
+  dpActions.hidden = true;
+  dpClose.hidden = true;
+  if (!dp.open) dp.showModal();
+
+  const startedAt = Date.now();
+  const tick = setInterval(() => { dpElapsed.textContent = elapsedText(Date.now() - startedAt); }, 500);
+  let stopped = false, timer = null, lastId = 0;
+  const addEvent = (ev) => {
+    const label = DESTROY_PHASES[ev.type] || ev.type;
+    const li = document.createElement("li");
+    const t = document.createElement("span");
+    t.className = "t";
+    t.textContent = eventTime(ev.at);
+    const d = document.createElement("span");
+    d.className = "ev";
+    d.innerHTML = `<strong>${escapeHtml(label)}</strong>` + (ev.detail ? ` <span class="hint">${escapeHtml(ev.detail)}</span>` : "");
+    li.append(t, d);
+    dpLog.append(li);
+    dpLog.scrollTop = dpLog.scrollHeight;
+    dpPhase.textContent = label;
+  };
+  const poll = async () => {
+    if (stopped) return;
+    try {
+      const events = await api(`/api/projects/${encodeURIComponent(id)}/events?after=${lastId}`);
+      for (const ev of events) { lastId = ev.id; addEvent(ev); }
+    } catch {}
+    if (!stopped) timer = setTimeout(poll, 600);
+  };
+  // Start from the events already there; the destroy's own start is the next one.
+  try {
+    const tail = await api(`/api/projects/${encodeURIComponent(id)}/events?tail=1&limit=1`);
+    lastId = tail.length ? tail[tail.length - 1].id : 0;
+  } catch {}
+  poll();
+
+  try {
+    await api(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
+    stopped = true;
+    clearInterval(tick);
+    clearTimeout(timer);
+    try {
+      const events = await api(`/api/projects/${encodeURIComponent(id)}/events?after=${lastId}`);
+      for (const ev of events) { lastId = ev.id; addEvent(ev); }
+    } catch {}
+    dpPhase.textContent = "Destroyed";
+    dp.dataset.busy = "0";
+    destroying.delete(id);
+    setTimeout(() => { if (dp.open) dp.close(); }, 350);
+    if (location.hash === `#project/${id}`) location.hash = "projects";
+    refreshProjects();
+    refreshNavTree();
+  } catch (err) {
+    stopped = true;
+    clearInterval(tick);
+    clearTimeout(timer);
+    dpPhase.textContent = "Could not destroy the project";
+    dpError.textContent = err.message;
+    dpError.hidden = false;
+    dpActions.hidden = false;
+    dpClose.hidden = false;
+    dp.dataset.busy = "0";
+    destroying.delete(id);
+    for (const { b, html } of buttons) { b.disabled = false; b.innerHTML = html; }
+    refreshProjects();
+  }
+}
 // make a vault item without leaving the create form; it shows up (and can be
 // ticked) as soon as the dialog saves, whether or not any project is chosen
 $("#create-vault-new").onclick = () => openItemDialog(null, { after: refreshVault });

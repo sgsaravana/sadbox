@@ -58,6 +58,12 @@ describe("/api/projects/:id/events", () => {
     expect(after.body.map((e: any) => e.type)).toEqual(["vm.ready"]);
   });
 
+  test("tail returns the newest events, for a progress view that starts now", async () => {
+    const tail = await call(`/api/projects/${A}/events?tail=1&limit=1`);
+    expect(tail.status).toBe(200);
+    expect(tail.body.map((e: any) => e.detail)).toEqual(["y"]);
+  });
+
   test("an unknown project is a 404", async () => {
     const r = await call(`/api/projects/no-such-project/events`);
     expect(r.status).toBe(404);

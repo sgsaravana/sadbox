@@ -175,8 +175,14 @@ function lastAttemptFailedCreate(id: string): boolean {
  *  progress view: real phases, in order, as the supervisor reaches them. */
 export interface ProjectEvent { id: number; type: string; detail: string; at: string }
 
-/** Events after `after` (an event id), oldest first. */
-export function projectEvents(projectId: string, after = 0, limit = 100): ProjectEvent[] {
+/** Events after `after` (an event id), oldest first. With `tail`, the newest
+ *  `limit` events instead — the destroy progress uses it to start from "now". */
+export function projectEvents(projectId: string, after = 0, limit = 100, tail = false): ProjectEvent[] {
+  if (tail) {
+    return db.query<ProjectEvent, [string, number]>(
+      "SELECT id, type, detail, at FROM events WHERE project_id = ? ORDER BY id DESC LIMIT ?",
+    ).all(projectId, limit).reverse();
+  }
   return db.query<ProjectEvent, [string, number, number]>(
     "SELECT id, type, detail, at FROM events WHERE project_id = ? AND id > ? ORDER BY id LIMIT ?",
   ).all(projectId, after, limit);
@@ -817,25 +823,40 @@ async function rescueHistory(p: ProjectRow): Promise<void> {
   }
 }
 
+const destroying = new Set<string>(); // destroy under way: a second click cannot start another
+
 export async function destroyProject(id: string): Promise<void> {
   const p = getProject(id);
   if (!p) throw new Error("project not found");
-  // best effort here: a destroy must always be possible
-  await rescueHistory(p).catch(() => {});
-  await driver.destroy(refFor(p.name));
-  purgeProjectVault(id);   // its vault access and placeholders go; the items stay
-  purgeProjectLogins(id);  // …and its login placeholders; the logins stay
-  purgeProjectNet(id);     // per-project net rules die with the VM too
-  purgeProjectForwards(id); // …and so do its port forwards (frees the host ports)
-  purgeProjectNamedRoutes(id); // …and its named routes (frees their names)
-  purgeProjectLinks(id);    // …and its links, both ways
-  await rm(join(config.dataDir, "sync", `${id}.git`), { recursive: true, force: true });
-  closeProjectSocket(id);
-  clearProjectApprovals(id);
-  clearProjectFeed(id);
-  forgetVitals(refFor(getProject(id)?.name ?? ""));
-  db.query("UPDATE projects SET state = 'destroyed' WHERE id = ?").run(id);
-  logEvent(id, "destroy");
+  if (p.state === "destroyed") return; // already done: a repeated request is harmless
+  if (destroying.has(id)) throw new Error("this project is already being destroyed");
+  destroying.add(id);
+  logEvent(id, "destroy.start", `removing ${p.name}`);
+  try {
+    // best effort here: a destroy must always be possible
+    await rescueHistory(p).catch(() => {});
+    await driver.destroy(refFor(p.name));
+    logEvent(id, "destroy.vm", "VM removed");
+    purgeProjectVault(id);   // its vault access and placeholders go; the items stay
+    purgeProjectLogins(id);  // …and its login placeholders; the logins stay
+    purgeProjectNet(id);     // per-project net rules die with the VM too
+    purgeProjectForwards(id); // …and so do its port forwards (frees the host ports)
+    purgeProjectNamedRoutes(id); // …and its named routes (frees their names)
+    purgeProjectLinks(id);    // …and its links, both ways
+    await rm(join(config.dataDir, "sync", `${id}.git`), { recursive: true, force: true });
+    closeProjectSocket(id);
+    clearProjectApprovals(id);
+    clearProjectFeed(id);
+    forgetVitals(refFor(getProject(id)?.name ?? ""));
+    logEvent(id, "destroy.cleanup", "vault access, rules, forwards, routes and links removed");
+    db.query("UPDATE projects SET state = 'destroyed' WHERE id = ?").run(id);
+    logEvent(id, "destroy");
+  } catch (e) {
+    logEvent(id, "destroy.error", String(e));
+    throw e;
+  } finally {
+    destroying.delete(id);
+  }
 }
 
 /** Redeploy a project: destroy its VM and recreate it from the same source

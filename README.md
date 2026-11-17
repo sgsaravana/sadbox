@@ -1451,6 +1451,9 @@ Notes:
   no extra config. The terminal picks `wss://` on an HTTPS page, so it works
   through TLS. `flush_interval -1` is what keeps the live **network feed** (SSE)
   streaming instead of buffering.
+- **Its own favicon.** Every page links `/favicon.svg` and `/favicon.ico`
+  (plus an Apple touch icon), so a subdomain behind Caddy shows the sadbox mark
+  instead of falling back to the primary domain's icon. No Caddy rule is needed.
 - **Keep sadbox on loopback.** Since Caddy is on (or can reach) this host you
   don't need `SADBOX_HOST=0.0.0.0`; `127.0.0.1` means the only way in is through
   Caddy (and so over TLS — the sign-in password should never cross the network
