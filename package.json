@@ -1,6 +1,6 @@
 {
   "name": "sadbox",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "private": true,
   "description": "Supervisor for microVM AI-agent sandboxes",
   "bin": {
