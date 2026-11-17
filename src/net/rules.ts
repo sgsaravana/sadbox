@@ -202,6 +202,10 @@ export function purgeProjectNet(projectId: string): void {
 
 // ---- evaluation ----
 
+/** Hosts the agents need for their own work: Claude Code's API and its
+ *  installer/updater. No prompt for these; a block rule still wins. */
+const AGENT_HOSTS = new Set(["api.anthropic.com", "downloads.claude.ai"]);
+
 export function evaluate(
   projectId: string | null,
   req: { host: string; path: string; method: string },
@@ -217,6 +221,7 @@ export function evaluate(
   if (block) return { decision: "block", rule: block };
   const allow = matches.find((r) => r.action === "allow");
   if (allow) return { decision: "allow", rule: allow };
+  if (AGENT_HOSTS.has(req.host.toLowerCase())) return { decision: "allow" };
   if (projectId) {
     // a binding's path is matched without the query string, as the swap matches it
     const bare = { ...req, path: req.path.split("?")[0] };
