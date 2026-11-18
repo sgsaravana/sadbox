@@ -545,9 +545,9 @@ bun install -g @oh-my-pi/pi-coding-agent@latest
 bun install -g opencode-ai@latest
 ```
 
-`api.anthropic.com`, `downloads.claude.ai` and `registry.npmjs.org` are
-allowed by default (a block rule still stops them). A different npm registry
-needs its own rule.
+`api.anthropic.com`, `claude.ai`, `downloads.claude.ai` and
+`registry.npmjs.org` are allowed by default (a block rule still stops them).
+A different npm registry needs its own rule.
 
 To keep the image fresh between supervisor releases, schedule `sadbox setup`
 (for example weekly) with cron or a launchd job; Docker/colima must be running
@@ -830,16 +830,17 @@ over vsock instead.
   [opencode](https://opencode.ai) are installed in the base image (plus Bun +
   git + ripgrep + jq). Run `claude`, `omp`, or `opencode` in the terminal. The
   new-project form lists what a VM ships with and their versions (probed from
-  the base image via `/api/toolchain`); the detail view's **Installed tools**
-  panel probes the *running VM* itself, so an older VM correctly shows which
-  tools it's missing.
+  the base image via `/api/toolchain`); the detail view's **Tools & apps** card
+  probes the *running VM* itself, so an older VM correctly shows which tools
+  it's missing.
 
 ### Optional apps
 
 - **Blender** can be installed in a VM, on top of the base image, from the new
   project form or later from the project's detail view (start the VM first).
   The detail view probes the running VM, so it shows whether Blender is there
-  and which version. Removal is on the same panel.
+  and which version. It lives with the installed-tool list in the detail
+  view's **Tools & apps** card; removal is there too.
   - The VM has no desktop, so Blender is for headless work — render, bake or
     run Python from the terminal, for example `blender -b scene.blend -f 1`.
   - The choice is kept on the project: **Rebuild** installs it again in the
@@ -913,11 +914,17 @@ over vsock instead.
     copy stops working once another VM refreshes it): log in per VM.
   - **Apply to running VMs** copies the current logins in now.
 - **Updating the agents**: the base image carries the versions — `sadbox update`
-  (or `sadbox setup`) refreshes it for the next create or rebuild. To update
-  inside a running VM instead, run `claude update`,
-  `bun install -g @oh-my-pi/pi-coding-agent@latest` and
-  `bun install -g opencode-ai@latest`; `api.anthropic.com`,
-  `downloads.claude.ai` and `registry.npmjs.org` are allowed by default.
+  (or `sadbox setup`) refreshes it for the next create or rebuild. In a running
+  VM, the detail view's **Tools & apps** card checks the latest releases
+  (Claude Code, omp, opencode and Bun) every few minutes, compares them with
+  the installed versions, and offers an **Update** button. The update runs in
+  the VM; if it needs a host the proxy is not already letting through, the
+  approval appears in the same card (and in the Network panel). The same
+  commands are available in the terminal: `claude update`,
+  `bun install -g @oh-my-pi/pi-coding-agent@latest`,
+  `bun install -g opencode-ai@latest` and `bun upgrade`.
+  `api.anthropic.com`, `claude.ai`, `downloads.claude.ai` and
+  `registry.npmjs.org` are allowed by default.
 - **Agent history**: Claude's projects, file history and prompt history, omp's
   sessions and history, and opencode's database and snapshots live on this
   machine under `~/.sadbox/agents/history/<project name>/`, mounted into the
@@ -957,9 +964,21 @@ over vsock instead.
   counters and the guest agent on Linux — plus in-guest probes), workdir size, tmux session/window
   counts and attached-terminal count, the branch the VM has checked out now
   and its dirty state (the projects list shows the live branch too; for a
-  stopped VM it is the last one seen, kept in the database), folder/remote
-  info, and the installed-toolchain probe — plus the live **Network** panel
-  (below). The buttons along the top are **Terminal**, **Editor**, **Sync
+  stopped VM it is the last one seen, kept in the database), and folder/remote
+  info — plus the live **Network** panel (below). The summary row also has a
+  **Base image** card: the image name, the versions of the tools baked into it
+  (Node, npm, nvm, git, ripgrep, jq, tmux) and the project's extra apt packages;
+  these are display-only and refresh with the image (`sadbox update` / a
+  Rebuild). A **Resources** graph below the panels plots CPU, memory, disk and
+  network bandwidth (RX + TX throughput) over **3 minutes, 15 minutes, 1 hour
+  or 12 hours**. The 3-minute view samples about every 1.5 s while the page is
+  open; longer ranges use samples the supervisor keeps for about 12 hours
+  (taken every 30 s, plus the finer live points when the page is open) and are
+  downsampled for drawing. Hovering a chart shows the value and time at that
+  point. The **Tools & apps** card below it has two sections: the agent tools
+  (Claude Code, omp, opencode and Bun), checked against their latest releases
+  with an **Update** button; and the optional apps that can be added. The
+  buttons along the top are **Terminal**, **Editor**, **Sync
   back** / **Push to VM** (once a folder is connected), **Vault…**, **Stop** / **Start**,
   **Rebuild** and **Destroy**; the project cards on the list carry the same
   ones. **Stop** (solid red) shuts the VM down and keeps its disk — files,
@@ -982,9 +1001,10 @@ over vsock instead.
   create), so it sees full URLs, headers, and bodies. It is **block-by-default**:
   a request with no matching rule is *held* while the detail view prompts for
   approval — **Allow once / 1m / 5m / 30m / 60m / forever**, or **Block**.
-  The agents' own hosts — `api.anthropic.com`, `downloads.claude.ai` and the
-  npm registry (`registry.npmjs.org`, for omp and opencode) — are allowed
-  without a rule (a block rule still stops them). Timed
+  The agents' own hosts — `api.anthropic.com`, `claude.ai`,
+  `downloads.claude.ai` and the npm registry (`registry.npmjs.org`, for omp
+  and opencode) — are allowed without a rule (a block rule still stops them).
+  Timed
   and forever answers persist as rules so the host isn't re-prompted. Rules
   (allow/block by host `*.example.com`/`*`, optional path glob + method) and
   header rewrites (set/remove on request or response) are **global** (all VMs)
@@ -1038,6 +1058,9 @@ over vsock instead.
 
 ### Port forwards, named routes and project links
 
+On a project's detail view these are three tabs of one **Access** card:
+**Named routes**, **Port forwards** and **Links**.
+
 - **Named routes** (inbound HTTP): give a port in the VM a name and open it at
   `<name>.<SADBOX_ROUTE_DOMAIN>` — for example `sample.sadbox.internal.example.com`
   — with no extra host port. One listener (loopback `127.0.0.1:7072`) serves
@@ -1082,7 +1105,7 @@ over vsock instead.
 - **Project links** (VM to VM): VMs cannot reach each other or the host, so
   one project calling another — a UI's server-side code calling an API in
   another VM — needs a link. On the calling project's detail view, under
-  **Links to other projects**, pick the target project and **one port**. From
+  **Access → Links**, pick the target project and **one port**. From
   inside the calling VM the target is then
   `http://<target-name>.sadbox.internal:<port>/…`; for example, a UI project
   linked to `api` on 3000 uses `API_URL=http://api.sadbox.internal:3000`.
@@ -1127,6 +1150,8 @@ over vsock instead.
 |---|---|---|
 | GET/POST | `/api/projects` | list (with live VM state and each VM's current `branch`) / create (`{name, sourcePath?, apps?, optionalApps?, secretIds?: vault item ids, git?: {remote, token?}}` — omit `sourcePath` to clone `git.remote` in the VM) |
 | GET | `/api/projects/:id/details` | full detail: resources, tmux, git, folder, optional apps (installed + versions) |
+| GET | `/api/projects/:id/resources` | light, frequently-polled CPU/memory/disk snapshot for the detail view's live graph |
+| GET | `/api/projects/:id/resources/history?range=3m` | sampled history for the graph (`15m`, `1h`, `12h`; downsampled) |
 | GET | `/api/projects/:id/events?after=` | the project's event log, oldest first — the create form's progress; `log.*` entries are raw command output (credentials redacted) for the **Logs** tab |
 | DELETE | `/api/projects/:id` | destroy VM |
 | POST | `/api/projects/:id/start`, `…/stop` | boot a stopped VM / shut a running one down (its disk is kept) |
@@ -1157,6 +1182,8 @@ over vsock instead.
 | PATCH | `/api/projects/:id/net/rules/:rid` | `{scope: "global"\|"project"}` — move a rule between this project and all projects (a `source: "vault"` allow, id `vault-…`, is read-only: 409) |
 | GET/PUT | `/api/settings` | default VM resources (CPUs, memory, disk) for new projects |
 | GET | `/api/toolchain` | agents/tools + versions baked into the base image (`?refresh=1` to re-probe) |
+| GET | `/api/tools/latest` | latest releases of the updatable agent tools (cached; `?refresh=1` to re-check) |
+| POST | `/api/projects/:id/tools/:key/update` | update Claude Code, omp, opencode or Bun inside the VM |
 | GET | `/api/fs/dirs?path=` | folder picker (lists subdirs, flags git repos) |
 | WS | `/projects/:id/term?cols&rows` | terminal (binary = bytes, text = JSON control) |
 | GET | `/api/projects/:id/net/stream` | SSE live feed: snapshot + request/pending/resolved events |

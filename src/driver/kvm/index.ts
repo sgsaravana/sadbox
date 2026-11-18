@@ -320,14 +320,25 @@ export const kvmDriver: ProjectDriver = {
     const spec = readSpec(ref)!;
     const [counters, guest] = await Promise.all([
       api(ref, "GET", "vm.counters", timeoutMs).catch(() => null),
-      client(ref).exec(["sh", "-c", "grep -E '^(MemTotal|MemAvailable):' /proc/meminfo; ls -d /proc/[0-9]* | wc -l"], { user: "root", timeoutMs }),
+      client(ref).exec(["sh", "-c",
+        "grep -E '^(MemTotal|MemAvailable):' /proc/meminfo; " +
+        "awk -F'[: ]+' '/^[ ]*[^:]+:/{rx+=$3; tx+=$11} END{print \"net_rx=\"rx; print \"net_tx=\"tx}' /proc/net/dev; " +
+        "echo procs $(ls -d /proc/[0-9]* | wc -l)",
+      ], { user: "root", timeoutMs }),
     ]);
     const s: ProjectStats = { memoryLimitBytes: spec.memoryMB * 1024 * 1024 };
     if (guest.exitCode === 0) {
       const kb = (k: string) => Number(guest.stdout.match(new RegExp(`^${k}:\\s+(\\d+)`, "m"))?.[1] ?? NaN) * 1024;
       const used = kb("MemTotal") - kb("MemAvailable");
       if (Number.isFinite(used)) s.memoryUsageBytes = used;
-      const procs = Number(guest.stdout.trim().split("\n").pop());
+      for (const line of guest.stdout.split("\n")) {
+        const net = line.match(/^net_(rx|tx)=(\d+)/);
+        if (net) {
+          if (net[1] === "rx") s.networkRxBytes = Number(net[2]);
+          else s.networkTxBytes = Number(net[2]);
+        }
+      }
+      const procs = Number(guest.stdout.match(/^procs\s+(\d+)/m)?.[1] ?? NaN);
       if (Number.isFinite(procs)) s.numProcesses = procs;
     }
     // block devices' counters, summed ({"_disk0": {"read_bytes": …}, …})

@@ -59,6 +59,7 @@ describe("evaluate", () => {
 
   test("the agents' own hosts and update endpoints are allowed by default, but a block still wins", () => {
     expect(evaluate(A, req("api.anthropic.com", "/v1/messages", "POST")).decision).toBe("allow");
+    expect(evaluate(A, req("claude.ai", "/install.sh")).decision).toBe("allow");
     expect(evaluate(A, req("downloads.claude.ai")).decision).toBe("allow");
     expect(evaluate(A, req("registry.npmjs.org", "/opencode-ai")).decision).toBe("allow");
     createRule({ scope: "global", action: "block", host: "api.anthropic.com" });

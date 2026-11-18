@@ -318,6 +318,24 @@ db.run(`
 db.run("CREATE INDEX IF NOT EXISTS net_requests_project_ts ON net_requests(project_id, ts)");
 db.run("CREATE INDEX IF NOT EXISTS net_requests_ts ON net_requests(ts)");
 
+// Sampled CPU/memory/disk/network for the detail view's long-range graphs.
+// Written while a VM runs (the supervisor samples every 30 s, and a detail
+// page's live poll can add finer samples); pruned to a little over 12 hours.
+db.run(`
+  CREATE TABLE IF NOT EXISTS resource_samples (
+    project_id TEXT NOT NULL,
+    ts INTEGER NOT NULL,                       -- ms since epoch
+    cpu_percent REAL,
+    memory_used INTEGER,
+    memory_limit INTEGER,
+    disk_used INTEGER,
+    disk_total INTEGER,
+    net_rx INTEGER,                            -- cumulative counters
+    net_tx INTEGER,
+    PRIMARY KEY (project_id, ts)
+  )`);
+db.run("CREATE INDEX IF NOT EXISTS resource_samples_project_ts ON resource_samples(project_id, ts)");
+
 // Inbound port forwards: a listener on the supervisor host (host_port) piped to
 // a port inside one project's VM (guest_port). host_port is unique across all
 // projects — it is a real socket on this machine.

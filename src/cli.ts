@@ -19,6 +19,7 @@ import { startProxy } from "./net/proxy";
 import { startLoginLoop } from "./core/logins";
 import { startClaudeRefresher } from "./net/claudeoauth";
 import { migrateGitTokens } from "./core/gittoken";
+import { startResourceSampler } from "./core/projects";
 import { startForwards } from "./net/forwards";
 import { startRoutes } from "./net/routes";
 import { MIN_PASSWORD, authEnabled, ensurePassword, initialPasswordFile, setPassword } from "./core/auth";
@@ -262,6 +263,8 @@ export async function main(argv: string[]) {
       // agent logins: capture from running VMs, and Claude's refresh, owned by sadbox
       startLoginLoop();
       startClaudeRefresher();
+      // sample resources every 30 s for the detail view's long-range graphs
+      startResourceSampler();
       // git remote tokens stored the old way (real, in the VM) move to the vault
       migrateGitTokens().catch((e) => console.error(`⚠ git token migration: ${e instanceof Error ? e.message : e}`));
       break;

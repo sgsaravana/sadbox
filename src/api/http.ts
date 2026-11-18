@@ -6,13 +6,14 @@ import { staticRoutes, aceFiles } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
 import { addBinding, applyItem, createItem, deleteBinding, deleteItem, getItem, injectVault, listItems, projectVaultView, revealItem, revokeFetchGrant, setItemProjects, setProjectItems, updateItem } from "../core/vault";
-import { connectSyncFolder, listProjects, setGitRemote, createProject, destroyProject, getProject, projectDetails, projectEvents, refFor, projectsWithLiveState, rebuildProject, setProjectApp, setProjectMemory, startProject, stopProject } from "../core/projects";
+import { connectSyncFolder, listProjects, setGitRemote, createProject, destroyProject, getProject, projectDetails, projectEvents, projectResourceHistory, projectResources, refFor, projectsWithLiveState, rebuildProject, setProjectApp, setProjectMemory, startProject, stopProject } from "../core/projects";
 import { optionalAppCatalog } from "../core/apps";
 import { syncStatus, syncProject } from "../core/sync";
 import { pushProject } from "../core/push";
 import { terminalLinks } from "../core/links";
 import { getSettings, updateSettings } from "../core/settings";
 import { baseImageToolchain } from "../core/toolchain";
+import { latestToolVersions, updateTool } from "../core/toolupdates";
 import { deleteHistory, listHistory } from "../core/history";
 import { applyToRunning, forgetLogin, listLogins } from "../core/logins";
 import { claudeLogin, refreshClaude } from "../net/claudeoauth";
@@ -187,6 +188,13 @@ export function startServer() {
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/details$/);
         if (m && req.method === "GET") return json(await projectDetails(m[1]));
+        // the detail view's live usage graph: CPU, memory and disk only
+        m = p.match(/^\/api\/projects\/([\w-]+)\/resources$/);
+        if (m && req.method === "GET") return json(await projectResources(m[1]));
+        m = p.match(/^\/api\/projects\/([\w-]+)\/resources\/history$/);
+        if (m && req.method === "GET") {
+          return json(projectResourceHistory(m[1], String(url.searchParams.get("range") || "3m")));
+        }
         // the project's event log — the create form shows real progress from it
         m = p.match(/^\/api\/projects\/([\w-]+)\/events$/);
         if (m && req.method === "GET") {
@@ -204,6 +212,9 @@ export function startServer() {
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/apps\/([\w-]+)$/);
         if (m && req.method === "DELETE") return json(await setProjectApp(m[1], m[2], false));
+        // update an agent tool in this VM (Claude Code, omp, opencode, Bun)
+        m = p.match(/^\/api\/projects\/([\w-]+)\/tools\/([a-z0-9-]+)\/update$/);
+        if (m && req.method === "POST") return json(await updateTool(m[1], m[2]));
         // the vault items a project may use (and what its VM holds for each)
         m = p.match(/^\/api\/projects\/([\w-]+)\/vault$/);
         if (m && req.method === "GET") return json(projectVaultView(m[1]));
@@ -486,6 +497,10 @@ export function startServer() {
         // toolchain baked into the image new projects boot from (name + version)
         if (p === "/api/toolchain" && req.method === "GET") {
           return json(await baseImageToolchain(url.searchParams.get("refresh") === "1"));
+        }
+        // latest releases of the agent tools that can be updated in place
+        if (p === "/api/tools/latest" && req.method === "GET") {
+          return json(await latestToolVersions(url.searchParams.get("refresh") === "1"));
         }
 
         if (p === "/api/settings" && req.method === "GET") return json(getSettings());

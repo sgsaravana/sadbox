@@ -23,18 +23,38 @@ interface Vitals {
   tools: ToolInfo[] | null;
   toolsAt: number;
   toolsBusy: Promise<void> | null;
+  toolsGen: number;              // a probe finishing after an update is stale
 }
 
 const vitals = new Map<string, Vitals>();
 const of = (ref: string): Vitals => {
   let v = vitals.get(ref);
-  if (!v) vitals.set(ref, v = { samples: [], statsBusy: null, tools: null, toolsAt: 0, toolsBusy: null });
+  if (!v) vitals.set(ref, v = { samples: [], statsBusy: null, tools: null, toolsAt: 0, toolsBusy: null, toolsGen: 0 });
   return v;
 };
 
 /** Drop what is known about a VM (it was destroyed or rebuilt). */
 export function forgetVitals(ref: string): void {
   vitals.delete(ref);
+}
+
+/** Forget the cached tool versions after an in-VM update; the next detail
+ *  refresh probes the VM again. A probe already in flight is ignored. */
+export function forgetToolchain(ref: string): void {
+  const v = vitals.get(ref);
+  if (!v) return;
+  v.tools = null;
+  v.toolsAt = 0;
+  v.toolsGen++;
+}
+
+/** Store freshly probed versions (after an update) without waiting for the
+ *  detail view's next probe. */
+export function setToolchain(ref: string, tools: ToolInfo[]): void {
+  const v = of(ref);
+  v.tools = tools;
+  v.toolsAt = Date.now();
+  v.toolsGen++;
 }
 
 const briefly = (p: Promise<void>, ms: number) => Promise.race([p, Bun.sleep(ms)]);
@@ -80,9 +100,10 @@ export async function liveStats(ref: string, cpus: number | undefined, firstWait
 export async function liveToolchain(ref: string, firstWaitMs = FIRST_WAIT_MS): Promise<{ tools: ToolInfo[] | null; pending: boolean }> {
   const v = of(ref);
   if (!v.toolsBusy && Date.now() - v.toolsAt > TOOLCHAIN_TTL_MS) {
+    const gen = v.toolsGen;
     v.toolsBusy = vmToolchain(ref, QUERY_TIMEOUT_MS).catch(() => null).then((tools) => {
       v.toolsBusy = null;
-      if (tools) { v.tools = tools; v.toolsAt = Date.now(); }
+      if (tools && gen === v.toolsGen) { v.tools = tools; v.toolsAt = Date.now(); }
     });
   }
   if (!v.tools && v.toolsBusy) await briefly(v.toolsBusy, firstWaitMs);

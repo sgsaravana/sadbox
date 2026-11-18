@@ -738,6 +738,8 @@ document.addEventListener("click", async (e) => {
       if (confirm(`Remove ${b.dataset.label} from this VM? Its disk keeps any dependencies apt left for other packages; you can install it again here.`)) {
         await changeApp(b.dataset.removeApp, b.dataset.app, false, b.dataset.label || b.dataset.app);
       }
+    } else if (b.dataset.updateTool) {
+      await updateToolFromUi(b.dataset.updateTool, b.dataset.project);
     } else if (b.dataset.rebuild) {
       const what = b.dataset.empty === "1"
         ? `The VM is destroyed and an empty one takes its place: the repositories cloned in it go too — push what you want to keep first.`
@@ -1467,20 +1469,446 @@ function showDetailSkeleton() {
   $("#detail-body").innerHTML =
     `<div id="detail-stats">
        <div class="loading-bar"><span class="spinner"></span> Loading VM details…</div>
-       <div class="detail-grid">${skeletonPanel(6) + skeletonPanel(6) + skeletonPanel(5) + skeletonPanel(4)}</div>
+       <div class="detail-grid">${skeletonPanel(6) + skeletonPanel(5) + skeletonPanel(4)}</div>
      </div>
-     <div id="detail-routes"></div>
-     <div id="detail-ports"></div>
-     <div id="detail-links"></div>
+     <div id="detail-graph"></div>
+     <div class="detail-columns">
+       <div id="detail-tools"></div>
+       <div id="detail-conn"></div>
+     </div>
      <div id="detail-net">${skeletonNet()}</div>
      <div class="sync-result"></div>`;
 }
 
+// ---- live resource usage graph (CPU, memory, disk) ----
+// The detail page already refreshes every 4 s; this smaller endpoint is polled
+// faster and feeds a rolling 3-minute graph without running the guest probe.
+const RESOURCE_METRICS = [
+  { key: "cpu", label: "CPU", color: "#5b8cff" },
+  { key: "mem", label: "Memory", color: "#3ecf8e" },
+  { key: "disk", label: "Disk", color: "#f5b544" },
+  { key: "net", label: "Network", color: "#c084fc" },
+];
+const RESOURCE_SAMPLES = 120; // ~3 minutes at 1.5 s
+const RESOURCE_RANGES = {
+  "3m": { ms: 3 * 60_000, axis: ["-3m", "-2m", "-1m", "now"] },
+  "15m": { ms: 15 * 60_000, axis: ["-15m", "-10m", "-5m", "now"] },
+  "1h": { ms: 60 * 60_000, axis: ["-1h", "-40m", "-20m", "now"] },
+  "12h": { ms: 12 * 60 * 60_000, axis: ["-12h", "-8h", "-4h", "now"] },
+};
+let resourceRange = "3m";
+let resourceView = { cpu: [], mem: [], disk: [], net: [] }; // longer ranges
+let resourceViewLoading = false;
+let resourceViewDirty = false;
+let resourceTimer = null;
+let resourceBusy = false;
+let lastResource = null;
+let netLast = null; // the previous cumulative network counters, for a rate
+let resourceHistory = { id: null, cpu: [], mem: [], disk: [], net: [] };
+const resourceHover = new Map(); // key -> { x, clientX, clientY }
+
+const pctOf = (used, total) => {
+  if (used == null || total == null || !Number.isFinite(used) || !Number.isFinite(total) || total <= 0) return null;
+  return Math.max(0, Math.min(100, (used / total) * 100));
+};
+const fmtRate = (n) => (n == null ? "—" : `${fmtBytes(n)}/s`);
+const activeResourceSamples = (key) => (resourceRange === "3m" ? resourceHistory[key] : resourceView[key]);
+const activeResourceMs = () => RESOURCE_RANGES[resourceRange].ms;
+const niceRateMax = (samples, windowMs) => {
+  const from = Date.now() - windowMs;
+  let max = 0;
+  for (const s of samples) if (s.t >= from && s.v != null) max = Math.max(max, s.v);
+  if (!(max > 1)) return 1;
+  const base = 10 ** Math.floor(Math.log10(max));
+  const n = max / base;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * base;
+};
+
+const resourceWindow = (windowMs = activeResourceMs()) => {
+  const now = Date.now();
+  return { now, from: now - windowMs };
+};
+const sampleX = (t, from, w, windowMs) => ((t - from) / windowMs) * w;
+
+function nearestResourceSample(samples, x, w, windowMs = activeResourceMs()) {
+  const { from } = resourceWindow(windowMs);
+  const target = from + (Math.max(0, Math.min(w, x)) / w) * windowMs;
+  let best = null;
+  for (const s of samples) {
+    if (s.t < from) continue;
+    if (!best || Math.abs(s.t - target) < Math.abs(best.t - target)) best = s;
+  }
+  return best;
+}
+
+function stopResourceWatch() {
+  if (resourceTimer) clearInterval(resourceTimer);
+  resourceTimer = null;
+  resourceBusy = false;
+  resourceViewLoading = false;
+  resourceHover.clear();
+  for (const m of RESOURCE_METRICS) hideResourceTip(m.key);
+}
+
+function resourcePanelHtml() {
+  const axis = RESOURCE_RANGES[resourceRange].axis.map((l) => `<span>${l}</span>`).join("");
+  const ranges = Object.keys(RESOURCE_RANGES).map((key) =>
+    `<button type="button" class="rg-rbtn${resourceRange === key ? " on" : ""}" data-rg-range="${key}" title="last ${key}">${key}</button>`).join("");
+  return `<div class="panel resource-graph">
+    <div class="rg-head">
+      <h3>Resources</h3>
+      <div class="rg-range" role="group" aria-label="Time range">${ranges}</div>
+      <span id="rg-state" class="hint" style="margin-left:auto">connecting…</span>
+    </div>
+    <div class="rg-grid">${RESOURCE_METRICS.map((m) => `
+      <div class="rg-metric rg-${m.key}">
+        <div class="rg-top">
+          <span class="rg-label">${m.label}</span>
+          ${m.key === "mem"
+            ? `<span class="rg-value"><span id="rg-mem-now">—</span><span id="rg-mem-action"></span></span>`
+            : `<span id="rg-${m.key}-now" class="rg-value">—</span>`}
+        </div>
+        <canvas id="rg-${m.key}" class="rg-canvas" width="360" height="97"></canvas>
+        <div class="rg-axis">${axis}</div>
+        <div id="rg-${m.key}-tip" class="rg-tip" hidden></div>
+      </div>`).join("")}</div>
+  </div>`;
+}
+
+function pushResourceSample(key, value, t, extra = {}) {
+  const sample = { t, v: value == null ? null : Math.max(0, Math.min(100, value)), ...extra };
+  const a = resourceHistory[key];
+  a.push(sample);
+  if (a.length > RESOURCE_SAMPLES) a.shift();
+  if (resourceRange !== "3m") {
+    const view = resourceView[key];
+    if (!view.length || t - view[view.length - 1].t >= 5_000) {
+      view.push({ ...sample });
+      const from = Date.now() - activeResourceMs();
+      while (view.length && view[0].t < from) view.shift();
+      resourceViewDirty = true;
+    }
+  }
+}
+
+function drawSpark(canvas, samples, color, key, max = 100, maxLabel = "", windowMs = activeResourceMs()) {
+  if (!canvas) return;
+  const w = canvas.clientWidth || 0, h = canvas.clientHeight || 0;
+  if (!w || !h) return;
+  const dpr = window.devicePixelRatio || 1;
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  ctx.strokeStyle = "rgba(255,255,255,0.06)";
+  ctx.lineWidth = 1;
+  for (const p of [0.25, 0.5, 0.75]) {
+    const y = Math.round(h - p * h) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+  if (maxLabel) {
+    ctx.fillStyle = "rgba(160,160,185,0.65)";
+    ctx.font = "9px system-ui, -apple-system, sans-serif";
+    ctx.textBaseline = "top";
+    ctx.fillText(maxLabel, 2, 2);
+  }
+  const { from } = resourceWindow(windowMs);
+  const visible = samples.filter((s) => s.t >= from);
+  const segs = [];
+  let seg = [];
+  for (const s of visible) {
+    if (s.v == null) {
+      if (seg.length) { segs.push(seg); seg = []; }
+      continue;
+    }
+    seg.push({ x: sampleX(s.t, from, w, windowMs), y: h - (Math.min(max, Math.max(0, s.v)) / max) * h });
+  }
+  if (seg.length) segs.push(seg);
+  for (const s of segs) {
+    if (s.length === 1) {
+      ctx.beginPath();
+      ctx.arc(s[0].x, s[0].y, 2.5, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      continue;
+    }
+    ctx.beginPath();
+    ctx.moveTo(s[0].x, s[0].y);
+    for (let i = 1; i < s.length; i++) ctx.lineTo(s[i].x, s[i].y);
+    ctx.lineTo(s[s.length - 1].x, h);
+    ctx.lineTo(s[0].x, h);
+    ctx.closePath();
+    ctx.globalAlpha = 0.12;
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.moveTo(s[0].x, s[0].y);
+    for (let i = 1; i < s.length; i++) ctx.lineTo(s[i].x, s[i].y);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  const hover = key ? resourceHover.get(key) : null;
+  if (hover) {
+    const s = nearestResourceSample(samples, hover.x, w, windowMs);
+    if (s) {
+      const x = sampleX(s.t, from, w, windowMs);
+      ctx.strokeStyle = "rgba(255,255,255,0.35)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      if (s.v != null) {
+        ctx.beginPath();
+        ctx.arc(x, h - (Math.min(max, Math.max(0, s.v)) / max) * h, 3, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = "#0b0b11";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
+  }
+}
+
+function hideResourceTip(key) {
+  const tip = document.getElementById(`rg-${key}-tip`);
+  if (tip) tip.hidden = true;
+}
+
+function updateResourceTip(key) {
+  const hover = resourceHover.get(key);
+  const canvas = document.getElementById(`rg-${key}`);
+  const tip = document.getElementById(`rg-${key}-tip`);
+  if (!hover || !canvas || !tip) return;
+  const s = nearestResourceSample(activeResourceSamples(key), hover.x, canvas.clientWidth || 0, activeResourceMs());
+  if (!s) { tip.hidden = true; return; }
+  const time = new Date(s.t).toLocaleTimeString();
+  const text = s.v == null ? `${time} · ${s.running ? "collecting…" : "VM stopped"}`
+    : key === "cpu" ? `${time} · ${s.v.toFixed(1)}% of ${s.cpus ?? lastResource?.cpus ?? "?"} vCPU`
+    : key === "net" ? `${time} · ↓ ${fmtRate(s.rx)}/s · ↑ ${fmtRate(s.tx)}/s`
+    : `${time} · ${fmtBytes(s.used)} / ${fmtBytes(s.total)} (${s.v.toFixed(0)}%)`;
+  tip.textContent = text;
+  tip.hidden = false;
+  tip.style.left = `${Math.min(hover.clientX + 12, window.innerWidth - 220)}px`;
+  tip.style.top = `${Math.min(hover.clientY + 12, window.innerHeight - 48)}px`;
+}
+
+function paintResourceGraph(r, redraw = true) {
+  const stateEl = $("#rg-state");
+  const running = r?.running === true;
+  const windowMs = activeResourceMs();
+  const samples = (key) => activeResourceSamples(key);
+  if (stateEl) {
+    stateEl.textContent = r == null ? "connecting…"
+      : !running ? (r.state === "stopped" ? "VM stopped" : `VM ${r.state}`)
+      : resourceRange !== "3m" && resourceViewLoading ? "loading history…"
+      : resourceRange !== "3m" && !samples("cpu").length ? "collecting history…"
+      : r.pending ? "sampling…" : "live";
+  }
+  const d = lastDetail?.id === resourceHistory.id ? lastDetail : null;
+  const netSample = samples("net").at(-1);
+  const diskPct = running ? pctOf(r.diskUsedBytes, r.diskTotalBytes) : null;
+  const workdir = d?.resources.workdirBytes;
+  const now = {
+    cpu: running && r.cpuPercent != null
+      ? `${r.cpuPercent.toFixed(1)}% of ${r.cpus ?? "?"} vCPU${r.numProcesses != null ? ` · ${r.numProcesses} proc` : ""}`
+      : "—",
+    mem: running && r.memoryUsageBytes != null && r.memoryLimitBytes
+      ? `${fmtBytes(r.memoryUsageBytes)} / ${fmtBytes(r.memoryLimitBytes)}` : "—",
+    disk: running && r.diskUsedBytes != null && r.diskTotalBytes
+      ? `${fmtBytes(r.diskUsedBytes)} / ${fmtBytes(r.diskTotalBytes)}${diskPct != null ? ` (${diskPct.toFixed(0)}%)` : ""}${workdir != null ? ` · workdir ${fmtBytes(workdir)}` : ""}`
+      : "—",
+    net: running && netSample?.v != null
+      ? `↓ ${fmtRate(netSample.rx)}/s · ↑ ${fmtRate(netSample.tx)}/s` : "—",
+  };
+  const memAction = document.getElementById("rg-mem-action");
+  if (memAction) {
+    memAction.innerHTML = d && ["running", "stopped"].includes(d.state) && !powerBusy.has(d.id)
+      ? `<button class="mini" data-memory="${d.id}" data-name="${escapeHtml(d.name)}" data-mb="${d.resources.memoryMB ?? ""}" data-running="${d.state === "running" ? 1 : 0}" title="Give this VM more (or less) memory">Change…</button>`
+      : "";
+  }
+  const netMax = redraw ? niceRateMax(samples("net"), windowMs) : 0;
+  for (const m of RESOURCE_METRICS) {
+    const el = document.getElementById(`rg-${m.key}-now`);
+    if (el) el.textContent = now[m.key];
+    if (!redraw) continue;
+    const max = m.key === "net" ? netMax : 100;
+    drawSpark(document.getElementById(`rg-${m.key}`), samples(m.key), m.color, m.key, max,
+      m.key === "net" ? fmtRate(netMax) : "100%", windowMs);
+    if (resourceHover.has(m.key)) updateResourceTip(m.key);
+  }
+}
+
+async function pollResources(id) {
+  if (resourceBusy || location.hash !== `#project/${id}`) return;
+  resourceBusy = true;
+  try {
+    const r = await api(`/api/projects/${id}/resources`);
+    if (resourceHistory.id !== id) return;
+    lastResource = r;
+    const t = Date.now();
+    let netRate = null;
+    if (r.running && r.networkRxBytes != null && r.networkTxBytes != null) {
+      if (netLast && t > netLast.t) {
+        const dt = (t - netLast.t) / 1000;
+        const rx = Math.max(0, r.networkRxBytes - netLast.rx) / dt;
+        const tx = Math.max(0, r.networkTxBytes - netLast.tx) / dt;
+        netRate = { rx, tx, total: rx + tx };
+      }
+      netLast = { t, rx: r.networkRxBytes, tx: r.networkTxBytes };
+    } else {
+      netLast = null;
+    }
+    const runningExtra = { running: true };
+    if (r.running) {
+      pushResourceSample("cpu", r.cpuPercent, t, { ...runningExtra, cpus: r.cpus });
+      pushResourceSample("mem", pctOf(r.memoryUsageBytes, r.memoryLimitBytes), t,
+        { ...runningExtra, used: r.memoryUsageBytes, total: r.memoryLimitBytes });
+      pushResourceSample("disk", pctOf(r.diskUsedBytes, r.diskTotalBytes), t,
+        { ...runningExtra, used: r.diskUsedBytes, total: r.diskTotalBytes });
+      pushResourceSample("net", netRate?.total ?? null, t,
+        netRate ? { ...runningExtra, rx: netRate.rx, tx: netRate.tx } : runningExtra);
+    } else {
+      const stopped = { running: false };
+      pushResourceSample("cpu", null, t, stopped);
+      pushResourceSample("mem", null, t, stopped);
+      pushResourceSample("disk", null, t, stopped);
+      pushResourceSample("net", null, t, stopped);
+    }
+    paintResourceGraph(r, resourceRange === "3m" || resourceViewDirty);
+    resourceViewDirty = false;
+  } catch {}
+  resourceBusy = false;
+}
+
+function historyToView(samples) {
+  const view = { cpu: [], mem: [], disk: [], net: [] };
+  const cpus = lastResource?.cpus ?? null;
+  let prev = null;
+  for (const row of samples) {
+    const t = row.ts;
+    view.cpu.push({ t, v: row.cpu, running: true, cpus });
+    view.mem.push({ t, v: pctOf(row.memUsed, row.memLimit), running: true, used: row.memUsed, total: row.memLimit });
+    view.disk.push({ t, v: pctOf(row.diskUsed, row.diskTotal), running: true, used: row.diskUsed, total: row.diskTotal });
+    let rx = null, tx = null, netV = null;
+    if (prev && t > prev.ts && row.netRx != null && row.netTx != null && prev.netRx != null && prev.netTx != null) {
+      const dt = (t - prev.ts) / 1000;
+      rx = Math.max(0, row.netRx - prev.netRx) / dt;
+      tx = Math.max(0, row.netTx - prev.netTx) / dt;
+      netV = rx + tx;
+    }
+    view.net.push({ t, v: netV, running: true, rx, tx });
+    prev = row;
+  }
+  return view;
+}
+
+function mergeLiveIntoView(range) {
+  for (const key of ["cpu", "mem", "disk", "net"]) {
+    const view = resourceView[key];
+    const last = view.length ? view[view.length - 1].t : 0;
+    for (const s of resourceHistory[key]) if (s.t > last) view.push({ ...s });
+    const from = Date.now() - RESOURCE_RANGES[range].ms;
+    while (view.length && view[0].t < from) view.shift();
+  }
+}
+
+async function loadResourceHistory(range) {
+  const id = resourceHistory.id;
+  if (!id) return;
+  try {
+    const res = await api(`/api/projects/${id}/resources/history?range=${range}`);
+    if (resourceRange !== range || resourceHistory.id !== id) return;
+    resourceView = historyToView(res.samples || []);
+    mergeLiveIntoView(range);
+    resourceViewLoading = false;
+    paintResourceGraph(lastResource);
+  } catch {
+    if (resourceRange === range) {
+      resourceViewLoading = false;
+      paintResourceGraph(lastResource);
+    }
+  }
+}
+
+function setResourceRange(range) {
+  if (!RESOURCE_RANGES[range] || range === resourceRange) return;
+  resourceRange = range;
+  const host = $("#detail-graph");
+  if (host) {
+    host.querySelectorAll("[data-rg-range]").forEach((b) => b.classList.toggle("on", b.dataset.rgRange === range));
+    const axis = RESOURCE_RANGES[range].axis.map((l) => `<span>${l}</span>`).join("");
+    host.querySelectorAll(".rg-axis").forEach((el) => { el.innerHTML = axis; });
+  }
+  if (range === "3m") {
+    resourceViewLoading = false;
+    paintResourceGraph(lastResource);
+    return;
+  }
+  resourceView = { cpu: [], mem: [], disk: [], net: [] };
+  resourceViewLoading = true;
+  paintResourceGraph(lastResource);
+  void loadResourceHistory(range);
+}
+
+function startResourceWatch(id) {
+  stopResourceWatch();
+  resourceRange = "3m";
+  resourceView = { cpu: [], mem: [], disk: [], net: [] };
+  resourceViewLoading = false;
+  resourceHistory = { id, cpu: [], mem: [], disk: [], net: [] };
+  resourceHover.clear();
+  lastResource = null;
+  netLast = null;
+  const host = $("#detail-graph");
+  if (host) {
+    host.innerHTML = resourcePanelHtml();
+    host.querySelectorAll("[data-rg-range]").forEach((b) => { b.onclick = () => setResourceRange(b.dataset.rgRange); });
+    host.querySelectorAll("canvas.rg-canvas").forEach((canvas) => {
+      const key = canvas.id.slice("rg-".length);
+      canvas.addEventListener("pointermove", (e) => {
+        const rect = canvas.getBoundingClientRect();
+        resourceHover.set(key, { x: e.clientX - rect.left, clientX: e.clientX, clientY: e.clientY });
+        paintResourceGraph(lastResource);
+      });
+      canvas.addEventListener("pointerleave", () => {
+        resourceHover.delete(key);
+        hideResourceTip(key);
+        paintResourceGraph(lastResource);
+      });
+    });
+  }
+  paintResourceGraph(null);
+  const tick = async () => {
+    if (location.hash !== `#project/${id}`) { stopResourceWatch(); return; }
+    await pollResources(id);
+  };
+  resourceTimer = setInterval(tick, 1500);
+  tick();
+}
+
 async function openDetail(id) {
   showDetailSkeleton();
-  openRoutes(id);
-  openPorts(id);
-  openLinks(id);
+  startResourceWatch(id);
+  loadLatestTools();
+  clearInterval(latestTimer);
+  latestTimer = setInterval(() => {
+    if (location.hash === `#project/${id}`) loadLatestTools();
+    else clearInterval(latestTimer);
+  }, 5 * 60_000);
+  openConnections(id);
   openNet(id);
   await renderDetail(id);
   clearInterval(detailTimer);
@@ -1550,15 +1978,128 @@ async function setSyncFolder(id, path) {
 // detail repaints so a long apt install keeps its spinner and disabled button).
 const appBusy = new Map(); // project id -> app id
 
-function optionalAppsHtml(d) {
-  const apps = d.optional_apps || [];
-  if (!apps.length) return "";
+// ---- agent tool updates: latest releases + one-click update ----
+const UPDATABLE_TOOLS = new Set(["claude", "omp", "opencode", "bun"]);
+let latestTools = {}; // key -> { latest, error }
+let latestToolsAt = 0;
+const LATEST_TOOLS_TTL = 5 * 60_000;
+let latestTimer = null;
+const toolBusy = new Set(); // `${projectId}:${key}`
+
+function toolVersionCmp(a, b) {
+  const parts = (v) => String(v).replace(/^v/i, "").split(".").map((p) => {
+    const m = /^(\d+)(.*)$/.exec(p);
+    return m ? { n: Number(m[1]), s: m[2] } : { n: 0, s: p };
+  });
+  const pa = parts(a), pb = parts(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? { n: 0, s: "" }, y = pb[i] ?? { n: 0, s: "" };
+    if (x.n !== y.n) return x.n > y.n ? 1 : -1;
+    if (x.s !== y.s) {
+      if (!x.s) return 1;
+      if (!y.s) return -1;
+      return x.s > y.s ? 1 : -1;
+    }
+  }
+  return 0;
+}
+
+async function loadLatestTools(force = false) {
+  if (!force && Date.now() - latestToolsAt < LATEST_TOOLS_TTL) return;
+  try {
+    const list = await api(`/api/tools/latest${force ? "?refresh=1" : ""}`);
+    latestTools = Object.fromEntries(list.map((t) => [t.key, t]));
+    latestToolsAt = Date.now();
+  } catch {}
+  if (lastDetail) paintTools(lastDetail);
+}
+
+function toolStateHtml(d, t) {
+  if (toolBusy.has(`${d.id}:${t.key}`)) return `<span class="spinner"></span> <span class="hint">Updating…</span>`;
+  if ([...toolBusy].some((k) => k.startsWith(`${d.id}:`))) return `<span class="hint">an update is running…</span>`;
+  if (!UPDATABLE_TOOLS.has(t.key)) return `<span class="hint">from the image</span>`;
+  const btn = `<button class="mini" data-update-tool="${t.key}" data-project="${d.id}">${t.version ? "Update" : "Install"}</button>`;
+  const l = latestTools[t.key];
+  if (!t.version) return `<span class="dim">not installed</span> ${btn}`;
+  if (!l || !l.latest) return `<span class="hint" title="${escapeHtml(l?.error || "latest version not known yet")}">latest —</span> ${btn}`;
+  const cmp = toolVersionCmp(t.version, l.latest);
+  if (cmp >= 0) return `<span class="ok">${cmp > 0 ? "newer" : "up to date"}</span>`;
+  return `<span class="warn">latest ${escapeHtml(l.latest)}</span> ${btn}`;
+}
+
+function agentToolsHtml(d) {
+  const tools = (d.toolchain || []).filter((t) => UPDATABLE_TOOLS.has(t.key));
+  return `<div class="tool-grid">${tools.map((t) => `<div class="agent-tool">
+    <div class="agent-tool-name"><b>${escapeHtml(t.label)}</b> <span class="tv">${t.version ? escapeHtml(t.version) : "—"}</span></div>
+    <div class="agent-tool-state">${toolStateHtml(d, t)}</div>
+  </div>`).join("")}</div>`;
+}
+
+function baseToolsHtml(d) {
+  const tools = (d.toolchain || []).filter((t) => !UPDATABLE_TOOLS.has(t.key));
+  return `<div class="base-tools">${tools.map((t) => `<span class="base-tool">
+    <b>${escapeHtml(t.label)}</b> <span class="tv">${t.version ? escapeHtml(t.version) : "—"}</span>
+  </span>`).join("")}</div>`;
+}
+
+function baseImageHtml(d) {
   const running = d.state === "running";
-  return `<div class="panel" style="margin-top:16px">
-    <h3>Optional apps</h3>
-    <p class="hint">Installed inside this VM, on top of the base image. Chosen here or when the
-      project was created; a Rebuild installs them again.</p>
-    <div class="app-list">${apps.map((a) => {
+  return `<div class="panel stat base-image">
+    <h3>Base image</h3>
+    <dl><dt>Image</dt><dd class="mono">${escapeHtml(d.image)}</dd></dl>
+    <div class="net-section">
+      <div class="net-subhead">Tools from the image</div>
+      ${running
+        ? (d.toolchain ? baseToolsHtml(d) : `<span class="hint">${d.partial ? "checking…" : "could not probe"}</span>`)
+        : `<span class="hint">start the VM to detect versions</span>`}
+      <dl class="tools-extra"><dt>Extra apt</dt><dd>${d.apps.length ? d.apps.map(escapeHtml).join(", ") : "none"}</dd></dl>
+    </div>
+    <p class="hint">Display-only: these come from the VM image. <code>sadbox update</code> (or <code>sadbox setup</code>) and a Rebuild refresh them.</p>
+  </div>`;
+}
+
+function paintTools(d) {
+  const el = $("#detail-tools");
+  if (!el) return;
+  el.innerHTML = toolsAndAppsHtml(d);
+  renderToolsAsks();
+}
+
+function renderToolsAsks() {
+  const el = $("#tools-asks");
+  if (!el) return;
+  if (!netModel.pending.length) { el.innerHTML = ""; return; }
+  el.innerHTML = `<div class="tools-asks">
+    <div class="tools-asks-head">⚠ Network approval needed <span class="hint">a request from this VM is waiting</span></div>
+    ${pendingHtml()}
+  </div>`;
+}
+
+async function updateToolFromUi(key, projectId) {
+  const lock = `${projectId}:${key}`;
+  if ([...toolBusy].some((k) => k.startsWith(`${projectId}:`))) return;
+  toolBusy.add(lock);
+  if (lastDetail?.id === projectId) paintTools(lastDetail);
+  try {
+    const r = await api(`/api/projects/${projectId}/tools/${key}/update`, { method: "POST", body: {} });
+    if (lastDetail?.id === projectId && r.tools) lastDetail.toolchain = r.tools;
+    if (location.hash === `#project/${projectId}`) await renderDetail(projectId);
+    loadLatestTools(true);
+  } catch (err) {
+    alert(err.message);
+  } finally {
+    toolBusy.delete(lock);
+    if (lastDetail?.id === projectId) paintTools(lastDetail);
+  }
+}
+
+function optionalAppsSection(d) {
+  const apps = d.optional_apps || [];
+  const running = d.state === "running";
+  return `<section class="tools-section">
+    <h4 class="tools-h tools-h-apps">Optional apps</h4>
+    <p class="hint tools-note">Installed inside this VM on top of the base image; a Rebuild installs them again.</p>
+    <div class="app-list">${apps.length ? apps.map((a) => {
       const busy = appBusy.get(d.id) === a.id;
       const anyBusy = appBusy.has(d.id);
       const label = escapeHtml(a.label);
@@ -1575,7 +2116,24 @@ function optionalAppsHtml(d) {
                <button class="mini" data-install-app="${d.id}" data-app="${a.id}" data-label="${label}"
                  ${running && !anyBusy ? "" : `disabled title="${running ? "Another app change is in progress" : "Start the VM to install apps"}"`}>Install</button>`}</div>
       </div>`;
-    }).join("")}</div>
+    }).join("") : `<div class="empty">no optional apps in this build</div>`}</div>
+  </section>`;
+}
+
+function toolsAndAppsHtml(d) {
+  const running = d.state === "running";
+  const detected = running
+    ? (d.toolchain ? null : `<span class="hint">${d.partial ? "checking…" : "could not probe"}</span>`)
+    : `<span class="hint">start the VM to detect</span>`;
+  return `<div class="panel tools-panel">
+    <div class="net-head"><h3>Tools & apps</h3><span class="hint">the agent toolchain and optional software</span></div>
+    <div id="tools-asks"></div>
+    <section class="tools-section">
+      <h4 class="tools-h tools-h-agent">Agent tools</h4>
+      <p class="hint tools-note">Compared with their latest releases and updated in place here. If the update needs a host the proxy is not letting through, the approval appears above.</p>
+      ${detected ?? agentToolsHtml(d)}
+    </section>
+    ${optionalAppsSection(d)}
   </div>`;
 }
 
@@ -1613,23 +2171,8 @@ function paintDetail(d) {
               ? `<span style="color:var(--warn)">not isolated</span> <span class="hint">${escapeHtml(d.live.address || d.live.network)} · direct internet — Rebuild to isolate</span>`
               : "—"}</dd>
           <dt>Uptime</dt><dd>${fmtDur(r.uptimeSec)}</dd>
-          <dt>Image</dt><dd>${escapeHtml(d.image)}</dd>
           <dt>Active terminal</dt><dd>${term}</dd>
           <dt>tmux</dt><dd>${d.tmux.sessions ?? 0} session · ${d.tmux.windows ?? 0} window(s)</dd>
-        </dl>
-      </div>
-
-      <div class="panel stat">
-        <h3>Resources</h3>
-        <dl>
-          <dt>CPU</dt><dd>${r.cpuPercent != null ? r.cpuPercent.toFixed(1) + "%" : "—"} of ${r.cpus ?? "?"} vCPU</dd>
-          <dt>Memory</dt><dd class="metered">${fmtBytes(r.memoryUsageBytes)} / ${fmtBytes(r.memoryLimitBytes)} ${bar(r.memoryUsageBytes, r.memoryLimitBytes)}
-            ${["running", "stopped"].includes(state) && !powerBusy.has(d.id)
-              ? `<button class="mini" data-memory="${d.id}" data-name="${d.name}" data-mb="${r.memoryMB ?? ""}" data-running="${state === "running" ? 1 : 0}" title="Give this VM more (or less) memory">Change…</button>` : ""}</dd>
-          <dt>Disk</dt><dd class="metered">${fmtBytes(r.diskUsedBytes)} / ${fmtBytes(r.diskTotalBytes)} ${bar(r.diskUsedBytes, r.diskTotalBytes)}</dd>
-          <dt>Workdir size</dt><dd>${fmtBytes(r.workdirBytes)}</dd>
-          <dt>Processes</dt><dd>${r.numProcesses ?? "—"}</dd>
-          <dt>Network</dt><dd>↓ ${fmtBytes(r.networkRxBytes)} · ↑ ${fmtBytes(r.networkTxBytes)}</dd>
         </dl>
       </div>
 
@@ -1657,28 +2200,56 @@ function paintDetail(d) {
               ${state === "running" ? "" : `disabled title="Start the VM to change its git remote"`}>${d.git_remote ? "Change" : "Connect a remote…"}</button></dd>`}
         </dl>
       </div>
-
-      <div class="panel stat">
-        <h3>Installed tools</h3>
-        <div class="toolchain">${
-          state === "running"
-            ? (d.toolchain ? toolchainHtml(d.toolchain) : `<span class="hint">${d.partial ? "checking…" : "could not probe"}</span>`)
-            : `<span class="hint">start the VM to detect</span>`
-        }</div>
-        <dl><dt>Extra apt</dt><dd>${d.apps.length ? d.apps.map(escapeHtml).join(", ") : "none"}</dd></dl>
-      </div>
+      ${baseImageHtml(d)}
     </div>
-    ${optionalAppsHtml(d)}
     ${d.error ? `<div class="panel" style="color:var(--bad)">${escapeHtml(d.error)}</div>` : ""}`;
+  paintTools(d);
+  paintResourceGraph(lastResource);
+}
+
+// ---- access: named routes, port forwards and project links in one card ----
+let connTab = "routes";
+function showConnTab(key) {
+  connTab = key;
+  const el = $("#detail-conn");
+  if (!el) return;
+  el.querySelectorAll("[data-conn-tab]").forEach((b) => b.classList.toggle("on", b.dataset.connTab === key));
+  el.querySelectorAll("[data-conn-pane]").forEach((p) => { p.hidden = p.dataset.connPane !== key; });
+}
+function setConnCount(key, n) {
+  const el = $(`#conn-count-${key}`);
+  if (el) el.textContent = n ? String(n) : "";
+}
+async function openConnections(id) {
+  const el = $("#detail-conn");
+  if (!el) return;
+  const tab = (key, label) => `<button type="button" class="net-tab seg-tab${connTab === key ? " on" : ""}" data-conn-tab="${key}">${label}<span class="net-count" id="conn-count-${key}"></span></button>`;
+  el.innerHTML = `
+    <div class="panel net-panel">
+      <div class="net-head"><h3>Access</h3><span class="hint">into this VM, or out to another project</span></div>
+      <div class="net-tabs seg-tabs" role="tablist">
+        ${tab("routes", "Named routes")}${tab("ports", "Port forwards")}${tab("links", "Links")}
+      </div>
+      <div class="conn-pane" data-conn-pane="routes"${connTab === "routes" ? "" : " hidden"}>
+        <div id="conn-routes"></div>
+      </div>
+      <div class="conn-pane" data-conn-pane="ports"${connTab === "ports" ? "" : " hidden"}>
+        <div id="conn-ports"></div>
+      </div>
+      <div class="conn-pane" data-conn-pane="links"${connTab === "links" ? "" : " hidden"}>
+        <div id="conn-links"></div>
+      </div>
+    </div>`;
+  el.querySelectorAll("[data-conn-tab]").forEach((b) => { b.onclick = () => showConnTab(b.dataset.connTab); });
+  openRoutes(id, $("#conn-routes"));
+  openPorts(id, $("#conn-ports"));
+  openLinks(id, $("#conn-links"));
 }
 
 // ---- named routes panel (<name>.<domain> → VM port) ----
-async function openRoutes(id) {
-  const el = $("#detail-routes");
+async function openRoutes(id, el = $("#conn-routes")) {
   if (!el) return;
   el.innerHTML = `
-  <div class="panel net-panel">
-    <div class="net-head"><h3>Named routes</h3></div>
     <div class="net-section">
       <div class="net-subhead">Open an app at its own hostname <span class="hint">a name on the wildcard domain, through Caddy — the app runs at /</span></div>
       <div id="route-list"></div>
@@ -1689,8 +2260,7 @@ async function openRoutes(id) {
         <label class="hint" title="HTTP without a sadbox sign-in pass: anyone who can reach the hostname. For an API called from another app, not for a UI you want protected."><input name="open" type="checkbox"> open to anyone</label>
         <button type="submit">Add route</button>
       </form>
-    </div>
-  </div>`;
+    </div>`;
   el.addEventListener("click", async (e) => {
     const acc = e.target.closest("[data-route-access]");
     if (acc) {
@@ -1726,6 +2296,7 @@ async function renderRoutes(id) {
   let data;
   try { data = await api(`/api/projects/${id}/routes`); }
   catch (e) { el.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  setConnCount("routes", data.routes.length);
   if (!data.domain) {
     el.innerHTML = `<div class="empty">named routes are off — set <span class="mono">SADBOX_ROUTE_DOMAIN</span> and point <span class="mono">*.&lt;domain&gt;</span> at the routes port</div>`;
     return;
@@ -1749,12 +2320,9 @@ async function renderRoutes(id) {
 }
 
 // ---- port forwards panel (host port → VM port) ----
-async function openPorts(id) {
-  const el = $("#detail-ports");
+async function openPorts(id, el = $("#conn-ports")) {
   if (!el) return;
   el.innerHTML = `
-  <div class="panel net-panel">
-    <div class="net-head"><h3>Port forwards</h3></div>
     <div class="net-section">
       <div class="net-subhead">Open an app running in the VM <span class="hint">any app listening on that port in the VM, on localhost or 0.0.0.0</span></div>
       <div id="port-list"></div>
@@ -1765,8 +2333,7 @@ async function openPorts(id) {
         <label class="hint" title="Raw TCP that anyone who reaches this machine can use: for databases and other non-HTTP servers, or an API called from another forward's browser code. Otherwise the port is HTTP for a browser signed in to sadbox only."><input name="open" type="checkbox"> open to anyone</label>
         <button type="submit">Forward</button>
       </form>
-    </div>
-  </div>`;
+    </div>`;
   el.addEventListener("click", async (e) => {
     const acc = e.target.closest("[data-port-access]");
     if (acc) {
@@ -1802,6 +2369,7 @@ async function renderPorts(id) {
   let data;
   try { data = await api(`/api/projects/${id}/forwards`); }
   catch (e) { el.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  setConnCount("ports", data.forwards.length);
   if (!data.forwards.length) { el.innerHTML = `<div class="empty">no ports forwarded</div>`; return; }
   el.innerHTML = data.forwards.map((f) => {
     // a sign-in forward is opened through the UI, which hands the browser its pass
@@ -1820,12 +2388,9 @@ async function renderPorts(id) {
 }
 
 // ---- links panel (this VM may reach one port of another project's VM) ----
-async function openLinks(id) {
-  const el = $("#detail-links");
+async function openLinks(id, el = $("#conn-links")) {
   if (!el) return;
   el.innerHTML = `
-  <div class="panel net-panel">
-    <div class="net-head"><h3>Links to other projects</h3></div>
     <div class="net-section">
       <div class="net-subhead">This project can reach <span class="hint">from inside this VM, at the address shown — over HTTP(S), one port each; every other port and project stays closed</span></div>
       <div id="link-out"></div>
@@ -1838,8 +2403,7 @@ async function openLinks(id) {
     <div class="net-section">
       <div class="net-subhead">Can be reached from <span class="hint">links other projects have to this one; this VM gets no access back</span></div>
       <div id="link-in"></div>
-    </div>
-  </div>`;
+    </div>`;
   el.addEventListener("click", async (e) => {
     const del = e.target.closest("[data-del-link]");
     if (!del) return;
@@ -1869,6 +2433,7 @@ async function renderLinks(id) {
   let data;
   try { data = await api(`/api/projects/${id}/links`); }
   catch (e) { out.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  setConnCount("links", data.outgoing.length + data.incoming.length);
   out.innerHTML = data.outgoing.length ? data.outgoing.map((l) => `<div class="rule">
       <span class="ract allow">reach</span>
       <span class="rspec"><code class="link-addr">http://${escapeHtml(l.host)}</code> → <a href="#project/${l.project}">${escapeHtml(l.name)}</a> port ${l.port}</span>
@@ -1984,7 +2549,7 @@ try { Object.assign(netUi, JSON.parse(localStorage.getItem(NET_UI_KEY) || "{}"),
 const saveNetUi = () => { try { localStorage.setItem(NET_UI_KEY, JSON.stringify({ ...netUi, filter: undefined })); } catch {} };
 
 function netShellHtml() {
-  const tab = (id, label) => `<button type="button" class="net-tab${netUi.tab === id ? " on" : ""}" data-net-tab="${id}">${label} <span class="net-count" id="net-count-${id}"></span></button>`;
+  const tab = (id, label) => `<button type="button" class="net-tab seg-tab${netUi.tab === id ? " on" : ""}" data-net-tab="${id}">${label}<span class="net-count" id="net-count-${id}"></span></button>`;
   return `
   <div class="panel net-panel net-main">
     <div class="net-head">
@@ -2006,7 +2571,7 @@ function netShellHtml() {
       traffic. <b>Rebuild</b> it to put it behind the proxy.
     </div>
     <div id="net-pending"></div>
-    <div class="net-tabs" role="tablist">
+    <div class="net-tabs seg-tabs" role="tablist">
       ${tab("activity", "Activity")}${tab("rules", "Rules")}${tab("headers", "Header rules")}
     </div>
 
@@ -2109,11 +2674,8 @@ function renderNetCounts() {
   if (note) note.title = `${hosts.size} hosts · ${blocked.size} with blocked requests`;
 }
 
-function renderPending() {
-  const el = $("#net-pending");
-  if (!el) return;
-  if (!netModel.pending.length) { el.innerHTML = ""; return; }
-  el.innerHTML = netModel.pending.map((p) => {
+function pendingHtml() {
+  return netModel.pending.map((p) => {
     // clicking a duration is the answer itself; "forever" would bind a
     // credential to the host for good, so it is not offered for one
     const opts = DUR_OPTS.filter(([v]) => !(p.credential && v === "forever"))
@@ -2136,6 +2698,13 @@ function renderPending() {
       </div>
     </div>`;
   }).join("");
+}
+
+function renderPending() {
+  const el = $("#net-pending");
+  if (!el) return;
+  el.innerHTML = netModel.pending.length ? pendingHtml() : "";
+  renderToolsAsks();
 }
 
 // ---- rule coverage, client side (same matching as the proxy: exact, *.suffix, *) ----
@@ -2495,6 +3064,19 @@ async function sendApproval(aid, action, duration) {
     renderPending();
   } catch (err) { alert(err.message); }
 }
+
+// approvals shown in the Tools card use the same pending model (and the same
+// endpoint) as the Network panel
+document.addEventListener("click", (e) => {
+  const appr = e.target.closest("#tools-asks .approval");
+  if (!appr) return;
+  const allow = e.target.closest("[data-approve-duration]");
+  if (allow) return sendApproval(appr.dataset.aid, "allow", allow.dataset.approveDuration);
+  if (e.target.closest("[data-block]")) {
+    const cred = appr.classList.contains("cred");
+    return sendApproval(appr.dataset.aid, "block", cred ? "once" : "forever");
+  }
+});
 
 const fmtClock = (ts) => new Date(ts).toTimeString().slice(0, 8);
 
