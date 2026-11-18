@@ -626,8 +626,9 @@ function powerButton(p) {
 async function power(id, action) {
   powerBusy.set(id, action === "start" ? "Starting…" : "Stopping…");
   const repaint = () => {
+    refreshNavTree();
     if (location.hash === `#project/${id}`) { if (lastDetail?.id === id) paintDetail(lastDetail); return renderDetail(id); }
-    refreshNavTree(); return refreshProjects();
+    return refreshProjects();
   };
   if (lastDetail?.id === id && location.hash === `#project/${id}`) paintDetail(lastDetail); else refreshProjects();
   try {
@@ -748,8 +749,9 @@ document.addEventListener("click", async (e) => {
         b.disabled = true; b.textContent = "Rebuilding…";
         try {
           await api(`/api/projects/${b.dataset.rebuild}/rebuild`, { method: "POST", body: {} });
+          refreshNavTree();
           if (location.hash.startsWith("#project/")) renderDetail(b.dataset.rebuild);
-          else { refreshProjects(); refreshNavTree(); }
+          else refreshProjects();
         } finally { b.disabled = false; b.textContent = "Rebuild"; }
       }
     } else if (b.dataset.destroy) {
@@ -3090,5 +3092,8 @@ $("#nav-signout").onclick = async (e) => {
 
 // boot: secrets cache first (for create-form checkboxes), then route
 refreshVault().catch(() => {}).then(() => { if (!location.hash) location.hash = "home"; else route(); });
-setInterval(() => { if (!$("#view-projects").hidden) { refreshProjects(); refreshNavTree(); } }, 5000);
+setInterval(() => {
+  if (!$("#view-projects").hidden) refreshProjects();
+  refreshNavTree(); // the sidebar is always visible — keep its state dots current
+}, 5000);
 setInterval(() => { if (!$("#view-home").hidden) refreshServiceStatus(); }, 5000);
