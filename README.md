@@ -86,7 +86,7 @@ KVM, and on **Windows 11 x64 through WSL 2** (beta; see
 ## Releases
 
 <!-- LATEST_RELEASE:START -->
-**Latest release: [v0.6.5](https://github.com/sgsaravana/sadbox/releases/tag/v0.6.5)** · published 2026-11-17 · [release notes →](https://github.com/sgsaravana/sadbox/releases/tag/v0.6.5)
+**Latest release: [v0.6.6](https://github.com/sgsaravana/sadbox/releases/tag/v0.6.6)** · published 2026-11-17 · [release notes →](https://github.com/sgsaravana/sadbox/releases/tag/v0.6.6)
 <!-- LATEST_RELEASE:END -->
 
 Every release ships prebuilt binaries for macOS/Linux (arm64/x64), the Windows
@@ -257,7 +257,7 @@ add it as shown. To pin a version or change the location:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/sgsaravana/sadbox/main/install.sh \
-  | SADBOX_VERSION=v0.6.5 SADBOX_BIN_DIR=/usr/local/bin sh
+  | SADBOX_VERSION=v0.6.6 SADBOX_BIN_DIR=/usr/local/bin sh
 ```
 
 For a pre-release, see
