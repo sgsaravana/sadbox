@@ -6,7 +6,7 @@ import { staticRoutes, aceFiles } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
 import { addBinding, applyItem, createItem, deleteBinding, deleteItem, getItem, injectVault, listItems, projectVaultView, revealItem, revokeFetchGrant, setItemProjects, setProjectItems, updateItem } from "../core/vault";
-import { connectSyncFolder, listProjects, setGitRemote, createProject, destroyProject, getProject, projectDetails, projectEvents, refFor, projectsWithLiveState, rebuildProject, setProjectApp, setProjectMemory, startProject, stopProject } from "../core/projects";
+import { connectSyncFolder, listProjects, setGitRemote, createProject, destroyProject, getProject, projectDetails, projectEvents, projectResourceHistory, projectResources, refFor, projectsWithLiveState, rebuildProject, setProjectApp, setProjectMemory, startProject, stopProject } from "../core/projects";
 import { optionalAppCatalog } from "../core/apps";
 import { syncStatus, syncProject } from "../core/sync";
 import { pushProject } from "../core/push";
@@ -187,6 +187,13 @@ export function startServer() {
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/details$/);
         if (m && req.method === "GET") return json(await projectDetails(m[1]));
+        // the detail view's live usage graph: CPU, memory and disk only
+        m = p.match(/^\/api\/projects\/([\w-]+)\/resources$/);
+        if (m && req.method === "GET") return json(await projectResources(m[1]));
+        m = p.match(/^\/api\/projects\/([\w-]+)\/resources\/history$/);
+        if (m && req.method === "GET") {
+          return json(projectResourceHistory(m[1], String(url.searchParams.get("range") || "3m")));
+        }
         // the project's event log — the create form shows real progress from it
         m = p.match(/^\/api\/projects\/([\w-]+)\/events$/);
         if (m && req.method === "GET") {

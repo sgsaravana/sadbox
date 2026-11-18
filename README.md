@@ -1127,6 +1127,8 @@ over vsock instead.
 |---|---|---|
 | GET/POST | `/api/projects` | list (with live VM state and each VM's current `branch`) / create (`{name, sourcePath?, apps?, optionalApps?, secretIds?: vault item ids, git?: {remote, token?}}` — omit `sourcePath` to clone `git.remote` in the VM) |
 | GET | `/api/projects/:id/details` | full detail: resources, tmux, git, folder, optional apps (installed + versions) |
+| GET | `/api/projects/:id/resources` | light, frequently-polled CPU/memory/disk snapshot for the detail view's live graph |
+| GET | `/api/projects/:id/resources/history?range=3m` | sampled history for the graph (`15m`, `1h`, `12h`; downsampled) |
 | GET | `/api/projects/:id/events?after=` | the project's event log, oldest first — the create form's progress; `log.*` entries are raw command output (credentials redacted) for the **Logs** tab |
 | DELETE | `/api/projects/:id` | destroy VM |
 | POST | `/api/projects/:id/start`, `…/stop` | boot a stopped VM / shut a running one down (its disk is kept) |

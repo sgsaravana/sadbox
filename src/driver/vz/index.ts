@@ -301,6 +301,7 @@ export const vzDriver: ProjectDriver = {
     const guest = await client(ref).exec(["sh", "-c",
       "grep -E '^(MemTotal|MemAvailable):' /proc/meminfo; " +
       "awk '$3==\"vda\"{print \"disk\", $6, $10}' /proc/diskstats 2>/dev/null; " +
+      "awk -F'[: ]+' '/^[ ]*[^:]+:/{rx+=$3; tx+=$11} END{print \"net_rx=\"rx; print \"net_tx=\"tx}' /proc/net/dev; " +
       "echo procs $(ls -d /proc/[0-9]* | wc -l)",
     ], { user: "root", timeoutMs });
     const s: ProjectStats = { memoryLimitBytes: spec.memoryMB * 1024 * 1024 };
@@ -315,6 +316,11 @@ export const vzDriver: ProjectDriver = {
         }
         const disk = line.match(/^disk\s+(\d+)\s+(\d+)/);
         if (disk) { s.blockReadBytes = Number(disk[1]) * 512; s.blockWriteBytes = Number(disk[2]) * 512; }
+        const net = line.match(/^net_(rx|tx)=(\d+)/);
+        if (net) {
+          if (net[1] === "rx") s.networkRxBytes = Number(net[2]);
+          else s.networkTxBytes = Number(net[2]);
+        }
         const procs = line.match(/^procs\s+(\d+)/);
         if (procs) s.numProcesses = Number(procs[1]);
       }

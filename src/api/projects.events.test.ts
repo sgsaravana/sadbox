@@ -64,6 +64,22 @@ describe("/api/projects/:id/events", () => {
     expect(tail.body.map((e: any) => e.detail)).toEqual(["y"]);
   });
 
+  test("resources answers for the live graph", async () => {
+    const r = await call(`/api/projects/${A}/resources`);
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ running: true });
+    expect(r.body).toHaveProperty("cpuPercent");
+    expect(r.body).toHaveProperty("memoryUsageBytes");
+    expect(r.body).toHaveProperty("diskTotalBytes");
+  });
+
+  test("resources history answers for a range", async () => {
+    const r = await call(`/api/projects/${A}/resources/history?range=15m`);
+    expect(r.status).toBe(200);
+    expect(r.body.range).toBe("15m");
+    expect(Array.isArray(r.body.samples)).toBe(true);
+  });
+
   test("an unknown project is a 404", async () => {
     const r = await call(`/api/projects/no-such-project/events`);
     expect(r.status).toBe(404);

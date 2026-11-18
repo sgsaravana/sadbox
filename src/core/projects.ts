@@ -7,6 +7,7 @@ import { getDriver } from "../driver";
 import { LONG_TASK_MS, type ProjectInfo, type ProjectStats } from "../driver/types";
 import { injectVault, setProjectItems, purgeProjectVault } from "./vault";
 import { repeatableGuestExec } from "./guestops";
+import { recordResourceSample, resourceSamples, RESOURCE_RANGE_MS } from "./resources";
 import { getSettings, validMemoryMB } from "./settings";
 import { installGuestProxy, openProjectSocket, closeProjectSocket, redialProjectSocket } from "../net/proxy";
 import { forgetGuestTools, startGuestRelay } from "../net/guest";
@@ -616,6 +617,81 @@ export function guestUnreachable(r: { exitCode: number; stderr?: string } | null
   // the container CLI answers nonzero when its service is down; that is not a
   // shell command failing inside a healthy VM
   return /XPC connection error|container system start|apiserver is not running/i.test(r.stderr ?? "");
+}
+
+/** A small, frequently polled snapshot for the detail page's live usage
+ *  graph: CPU, memory and disk, without the heavier guest probe. */
+export async function projectResources(id: string) {
+  const p = getProject(id);
+  if (!p) throw new Error("project not found");
+  const ref = refFor(p.name);
+  const info = await driver.inspect(ref).catch(() => null);
+  const running = info?.state === "running";
+  const state = settle(p, info);
+  const memoryLimitBytes = p.memory_mb ? p.memory_mb * 1024 * 1024 : info?.memoryLimitBytes ?? null;
+  if (!running) {
+    return {
+      running: false, state, cpus: info?.cpus ?? null, cpuPercent: null, numProcesses: null,
+      memoryUsageBytes: null, memoryLimitBytes, diskUsedBytes: null, diskTotalBytes: null, pending: false,
+    };
+  }
+  const live = await liveStats(ref, info?.cpus, 0);
+  let diskUsedBytes: number | null = null, diskTotalBytes: number | null = null;
+  const df = await driver.exec(ref, ["sh", "-c",
+    `df -B1 ${config.guestWorkdir} 2>/dev/null | tail -1 | awk '{print $2" "$3}'`,
+  ], { timeoutMs: 2_500 }).catch(() => null);
+  if (df?.exitCode === 0) {
+    const [total, used] = df.stdout.trim().split(/\s+/).map(Number);
+    if (Number.isFinite(total) && Number.isFinite(used)) { diskTotalBytes = total; diskUsedBytes = used; }
+  }
+  const memoryUsed = live.stats?.memoryUsageBytes ?? null;
+  const memoryLimit = live.stats?.memoryLimitBytes ?? memoryLimitBytes;
+  const netRx = live.stats?.networkRxBytes ?? null;
+  const netTx = live.stats?.networkTxBytes ?? null;
+  recordResourceSample(p.id, {
+    ts: Date.now(), cpu: live.cpuPercent, memUsed: memoryUsed, memLimit: memoryLimit,
+    diskUsed: diskUsedBytes, diskTotal: diskTotalBytes, netRx, netTx,
+  });
+  return {
+    running: true, state, cpus: info?.cpus ?? null,
+    cpuPercent: live.cpuPercent,
+    numProcesses: live.stats?.numProcesses ?? null,
+    memoryUsageBytes: memoryUsed,
+    memoryLimitBytes: memoryLimit,
+    diskUsedBytes, diskTotalBytes,
+    networkRxBytes: netRx,
+    networkTxBytes: netTx,
+    pending: live.pending,
+  };
+}
+
+/** Historical samples for one of the graph's ranges (3m/15m/1h/12h). */
+export function projectResourceHistory(id: string, range: string) {
+  const p = getProject(id);
+  if (!p) throw new Error("project not found");
+  const key = range in RESOURCE_RANGE_MS ? range : "3m";
+  return { range: key, samples: resourceSamples(id, RESOURCE_RANGE_MS[key]) };
+}
+
+let resourceSamplerStarted = false;
+/** Sample every running VM every 30 s so the 15m/1h/12h graphs have history
+ *  even when no detail page is open. */
+export function startResourceSampler(): void {
+  if (resourceSamplerStarted) return;
+  resourceSamplerStarted = true;
+  let busy = false;
+  const tick = async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      const running = listProjects().filter((p) => p.state === "running");
+      await Promise.allSettled(running.map((p) => projectResources(p.id)));
+    } finally {
+      busy = false;
+    }
+  };
+  void tick();
+  setInterval(tick, 30_000);
 }
 
 async function loadDetails(id: string) {
