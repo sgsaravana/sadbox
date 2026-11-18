@@ -738,6 +738,8 @@ document.addEventListener("click", async (e) => {
       if (confirm(`Remove ${b.dataset.label} from this VM? Its disk keeps any dependencies apt left for other packages; you can install it again here.`)) {
         await changeApp(b.dataset.removeApp, b.dataset.app, false, b.dataset.label || b.dataset.app);
       }
+    } else if (b.dataset.updateTool) {
+      await updateToolFromUi(b.dataset.updateTool, b.dataset.project);
     } else if (b.dataset.rebuild) {
       const what = b.dataset.empty === "1"
         ? `The VM is destroyed and an empty one takes its place: the repositories cloned in it go too — push what you want to keep first.`
@@ -1550,15 +1552,128 @@ async function setSyncFolder(id, path) {
 // detail repaints so a long apt install keeps its spinner and disabled button).
 const appBusy = new Map(); // project id -> app id
 
-function optionalAppsHtml(d) {
-  const apps = d.optional_apps || [];
-  if (!apps.length) return "";
+// ---- agent tool updates: latest releases + one-click update ----
+const UPDATABLE_TOOLS = new Set(["claude", "omp", "opencode", "bun"]);
+let latestTools = {}; // key -> { latest, error }
+let latestToolsAt = 0;
+const LATEST_TOOLS_TTL = 5 * 60_000;
+let latestTimer = null;
+const toolBusy = new Set(); // `${projectId}:${key}`
+
+function toolVersionCmp(a, b) {
+  const parts = (v) => String(v).replace(/^v/i, "").split(".").map((p) => {
+    const m = /^(\d+)(.*)$/.exec(p);
+    return m ? { n: Number(m[1]), s: m[2] } : { n: 0, s: p };
+  });
+  const pa = parts(a), pb = parts(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? { n: 0, s: "" }, y = pb[i] ?? { n: 0, s: "" };
+    if (x.n !== y.n) return x.n > y.n ? 1 : -1;
+    if (x.s !== y.s) {
+      if (!x.s) return 1;
+      if (!y.s) return -1;
+      return x.s > y.s ? 1 : -1;
+    }
+  }
+  return 0;
+}
+
+async function loadLatestTools(force = false) {
+  if (!force && Date.now() - latestToolsAt < LATEST_TOOLS_TTL) return;
+  try {
+    const list = await api(`/api/tools/latest${force ? "?refresh=1" : ""}`);
+    latestTools = Object.fromEntries(list.map((t) => [t.key, t]));
+    latestToolsAt = Date.now();
+  } catch {}
+  if (lastDetail) paintTools(lastDetail);
+}
+
+function toolStateHtml(d, t) {
+  if (toolBusy.has(`${d.id}:${t.key}`)) return `<span class="spinner"></span> <span class="hint">Updating…</span>`;
+  if ([...toolBusy].some((k) => k.startsWith(`${d.id}:`))) return `<span class="hint">an update is running…</span>`;
+  if (!UPDATABLE_TOOLS.has(t.key)) return `<span class="hint">from the image</span>`;
+  const btn = `<button class="mini" data-update-tool="${t.key}" data-project="${d.id}">${t.version ? "Update" : "Install"}</button>`;
+  const l = latestTools[t.key];
+  if (!t.version) return `<span class="dim">not installed</span> ${btn}`;
+  if (!l || !l.latest) return `<span class="hint" title="${escapeHtml(l?.error || "latest version not known yet")}">latest —</span> ${btn}`;
+  const cmp = toolVersionCmp(t.version, l.latest);
+  if (cmp >= 0) return `<span class="ok">${cmp > 0 ? "newer" : "up to date"}</span>`;
+  return `<span class="warn">latest ${escapeHtml(l.latest)}</span> ${btn}`;
+}
+
+function agentToolsHtml(d) {
+  const tools = (d.toolchain || []).filter((t) => UPDATABLE_TOOLS.has(t.key));
+  return `<div class="tool-grid">${tools.map((t) => `<div class="agent-tool">
+    <div class="agent-tool-name"><b>${escapeHtml(t.label)}</b> <span class="tv">${t.version ? escapeHtml(t.version) : "—"}</span></div>
+    <div class="agent-tool-state">${toolStateHtml(d, t)}</div>
+  </div>`).join("")}</div>`;
+}
+
+function baseToolsHtml(d) {
+  const tools = (d.toolchain || []).filter((t) => !UPDATABLE_TOOLS.has(t.key));
+  return `<div class="base-tools">${tools.map((t) => `<span class="base-tool">
+    <b>${escapeHtml(t.label)}</b> <span class="tv">${t.version ? escapeHtml(t.version) : "—"}</span>
+  </span>`).join("")}</div>`;
+}
+
+function baseImageHtml(d) {
   const running = d.state === "running";
-  return `<div class="panel" style="margin-top:16px">
-    <h3>Optional apps</h3>
-    <p class="hint">Installed inside this VM, on top of the base image. Chosen here or when the
-      project was created; a Rebuild installs them again.</p>
-    <div class="app-list">${apps.map((a) => {
+  return `<div class="panel stat base-image">
+    <h3>Base image</h3>
+    <dl><dt>Image</dt><dd class="mono">${escapeHtml(d.image)}</dd></dl>
+    <div class="net-section">
+      <div class="net-subhead">Tools from the image</div>
+      ${running
+        ? (d.toolchain ? baseToolsHtml(d) : `<span class="hint">${d.partial ? "checking…" : "could not probe"}</span>`)
+        : `<span class="hint">start the VM to detect versions</span>`}
+      <dl class="tools-extra"><dt>Extra apt</dt><dd>${d.apps.length ? d.apps.map(escapeHtml).join(", ") : "none"}</dd></dl>
+    </div>
+    <p class="hint">Display-only: these come from the VM image. <code>sadbox update</code> (or <code>sadbox setup</code>) and a Rebuild refresh them.</p>
+  </div>`;
+}
+
+function paintTools(d) {
+  const el = $("#detail-tools");
+  if (!el) return;
+  el.innerHTML = toolsAndAppsHtml(d);
+  renderToolsAsks();
+}
+
+function renderToolsAsks() {
+  const el = $("#tools-asks");
+  if (!el) return;
+  if (!netModel.pending.length) { el.innerHTML = ""; return; }
+  el.innerHTML = `<div class="tools-asks">
+    <div class="tools-asks-head">⚠ Network approval needed <span class="hint">a request from this VM is waiting</span></div>
+    ${pendingHtml()}
+  </div>`;
+}
+
+async function updateToolFromUi(key, projectId) {
+  const lock = `${projectId}:${key}`;
+  if ([...toolBusy].some((k) => k.startsWith(`${projectId}:`))) return;
+  toolBusy.add(lock);
+  if (lastDetail?.id === projectId) paintTools(lastDetail);
+  try {
+    const r = await api(`/api/projects/${projectId}/tools/${key}/update`, { method: "POST", body: {} });
+    if (lastDetail?.id === projectId && r.tools) lastDetail.toolchain = r.tools;
+    if (location.hash === `#project/${projectId}`) await renderDetail(projectId);
+    loadLatestTools(true);
+  } catch (err) {
+    alert(err.message);
+  } finally {
+    toolBusy.delete(lock);
+    if (lastDetail?.id === projectId) paintTools(lastDetail);
+  }
+}
+
+function optionalAppsSection(d) {
+  const apps = d.optional_apps || [];
+  const running = d.state === "running";
+  return `<section class="tools-section">
+    <h4 class="tools-h tools-h-apps">Optional apps</h4>
+    <p class="hint tools-note">Installed inside this VM on top of the base image; a Rebuild installs them again.</p>
+    <div class="app-list">${apps.length ? apps.map((a) => {
       const busy = appBusy.get(d.id) === a.id;
       const anyBusy = appBusy.has(d.id);
       const label = escapeHtml(a.label);
@@ -1575,7 +1690,24 @@ function optionalAppsHtml(d) {
                <button class="mini" data-install-app="${d.id}" data-app="${a.id}" data-label="${label}"
                  ${running && !anyBusy ? "" : `disabled title="${running ? "Another app change is in progress" : "Start the VM to install apps"}"`}>Install</button>`}</div>
       </div>`;
-    }).join("")}</div>
+    }).join("") : `<div class="empty">no optional apps in this build</div>`}</div>
+  </section>`;
+}
+
+function toolsAndAppsHtml(d) {
+  const running = d.state === "running";
+  const detected = running
+    ? (d.toolchain ? null : `<span class="hint">${d.partial ? "checking…" : "could not probe"}</span>`)
+    : `<span class="hint">start the VM to detect</span>`;
+  return `<div class="panel tools-panel">
+    <div class="net-head"><h3>Tools & apps</h3><span class="hint">the agent toolchain and optional software</span></div>
+    <div id="tools-asks"></div>
+    <section class="tools-section">
+      <h4 class="tools-h tools-h-agent">Agent tools</h4>
+      <p class="hint tools-note">Compared with their latest releases and updated in place here. If the update needs a host the proxy is not letting through, the approval appears above.</p>
+      ${detected ?? agentToolsHtml(d)}
+    </section>
+    ${optionalAppsSection(d)}
   </div>`;
 }
 
@@ -2109,11 +2241,8 @@ function renderNetCounts() {
   if (note) note.title = `${hosts.size} hosts · ${blocked.size} with blocked requests`;
 }
 
-function renderPending() {
-  const el = $("#net-pending");
-  if (!el) return;
-  if (!netModel.pending.length) { el.innerHTML = ""; return; }
-  el.innerHTML = netModel.pending.map((p) => {
+function pendingHtml() {
+  return netModel.pending.map((p) => {
     // clicking a duration is the answer itself; "forever" would bind a
     // credential to the host for good, so it is not offered for one
     const opts = DUR_OPTS.filter(([v]) => !(p.credential && v === "forever"))
@@ -2136,6 +2265,13 @@ function renderPending() {
       </div>
     </div>`;
   }).join("");
+}
+
+function renderPending() {
+  const el = $("#net-pending");
+  if (!el) return;
+  el.innerHTML = netModel.pending.length ? pendingHtml() : "";
+  renderToolsAsks();
 }
 
 // ---- rule coverage, client side (same matching as the proxy: exact, *.suffix, *) ----
@@ -2495,6 +2631,19 @@ async function sendApproval(aid, action, duration) {
     renderPending();
   } catch (err) { alert(err.message); }
 }
+
+// approvals shown in the Tools card use the same pending model (and the same
+// endpoint) as the Network panel
+document.addEventListener("click", (e) => {
+  const appr = e.target.closest("#tools-asks .approval");
+  if (!appr) return;
+  const allow = e.target.closest("[data-approve-duration]");
+  if (allow) return sendApproval(appr.dataset.aid, "allow", allow.dataset.approveDuration);
+  if (e.target.closest("[data-block]")) {
+    const cred = appr.classList.contains("cred");
+    return sendApproval(appr.dataset.aid, "block", cred ? "once" : "forever");
+  }
+});
 
 const fmtClock = (ts) => new Date(ts).toTimeString().slice(0, 8);
 
