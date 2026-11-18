@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en">
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>sadbox terminal</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/favicon.ico" sizes="any">
@@ -44,6 +45,12 @@
   .link button.go { background: #5b8cff; border-color: #5b8cff; color: #fff; font-weight: 600; }
   .link button:hover { filter: brightness(1.15); }
 
+  @media (max-width: 760px) {
+    #toolbar { flex-wrap: wrap; }
+    #toolbar .tbtn { padding: 6px 9px; }
+    #hint { display: none; }
+    #links { top: 8px; max-height: calc(100vh - 16px); }
+  }
 </style>
 <body>
   <div id="toolbar">

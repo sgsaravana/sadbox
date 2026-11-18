@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en">
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>sadbox editor</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/favicon.ico" sizes="any">
@@ -173,6 +174,33 @@
   .ace-one-dark, .ace-one-dark .ace_gutter { background: var(--bg) !important; }
   .ace-one-dark .ace_gutter { color: #4e5a6a !important; }
   .ace-one-dark .ace_marker-layer .ace_active-line, .ace-one-dark .ace_gutter-active-line { background: #2f343e !important; }
+
+  /* ---- mobile: file tree becomes a drawer ---- */
+  #mobile-tools, #side-scrim, #side-close { display: none; }
+  @media (max-width: 700px) {
+    #mobile-tools {
+      display: flex; align-items: center; gap: 10px; padding: 6px 10px; flex: 0 0 auto;
+      background: var(--panel); border-bottom: 1px solid var(--border);
+    }
+    #side-toggle { border: 1px solid var(--border); border-radius: 5px; padding: 5px 10px; color: var(--text); }
+    #side { position: fixed; top: 0; bottom: 0; left: 0; width: min(84vw, 320px); max-width: 84vw; z-index: 30;
+            transform: translateX(-100%); transition: transform 0.2s ease; box-shadow: 18px 0 50px #000a; }
+    #side.open { transform: translateX(0); }
+    #side-scrim.show { display: block; position: fixed; inset: 0; z-index: 20; background: rgba(0, 0, 0, 0.55); }
+    #grip { display: none; }
+    #side-head { padding: 10px 8px 10px 12px; }
+    #side-head .title { font-size: 14px; }
+    #side .icon-btn { padding: 6px 8px; font-size: 15px; }
+    #side-close { display: inline-block; }
+    #status { overflow-x: auto; gap: 10px; }
+    #status > * { flex-shrink: 0; }
+    #commit .bar { flex-wrap: wrap; }
+    #commit .box { max-height: calc(100vh - 20px); overflow-y: auto; }
+  }
+  @media (max-width: 520px) {
+    #st-lang, #st-pos { display: none; }
+    #st-branch { max-width: 12ch; }
+  }
 </style>
 <body>
   <div id="main">
@@ -184,11 +212,16 @@
         <button class="icon-btn" id="btn-newdir" title="New folder">▣</button>
         <button class="icon-btn" id="btn-commit" title="Commit… — stage files and commit them in the VM">✓</button>
         <button class="icon-btn" id="btn-refresh" title="Refresh the tree">⟳</button>
+        <button class="icon-btn" id="side-close" aria-label="Close file tree">✕</button>
       </div>
       <div id="tree"></div>
     </aside>
+    <div id="side-scrim"></div>
     <div id="grip"></div>
     <section id="work">
+      <div id="mobile-tools">
+        <button type="button" id="side-toggle" aria-label="Open file tree" aria-controls="side" aria-expanded="false">☰ Files</button>
+      </div>
       <div id="tabs"></div>
       <div id="banner">
         <span class="grow" id="banner-text"></span>
@@ -249,6 +282,19 @@
     $("#proj-name").textContent = projName;
     const API = `/api/projects/${encodeURIComponent(projectId)}`;
     const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+    // mobile: the file tree is a drawer; close it after opening a file
+    const side = $("#side"), sideScrim = $("#side-scrim"), sideToggle = $("#side-toggle");
+    const setSide = (open) => {
+      side.classList.toggle("open", open);
+      sideScrim.classList.toggle("show", open);
+      sideToggle.setAttribute("aria-expanded", String(open));
+    };
+    sideToggle.onclick = () => setSide(!side.classList.contains("open"));
+    sideScrim.onclick = () => setSide(false);
+    $("#side-close").onclick = () => setSide(false);
+    $("#tree").addEventListener("click", (e) => { if (e.target.closest(".row")) setSide(false); });
+    addEventListener("keydown", (e) => { if (e.key === "Escape") setSide(false); });
 
     // fetch wrapper that keeps the status + parsed body on failure (409 conflicts need both)
     async function api(path, opts = {}) {
