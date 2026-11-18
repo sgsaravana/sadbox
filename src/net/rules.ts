@@ -207,6 +207,7 @@ export function purgeProjectNet(projectId: string): void {
  *  No prompt for these; a block rule still wins. */
 const AGENT_HOSTS = new Set([
   "api.anthropic.com",
+  "claude.ai",
   "downloads.claude.ai",
   "registry.npmjs.org",
 ]);
