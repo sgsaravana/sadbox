@@ -28,9 +28,14 @@
         <a href="#agents" class="nav-item" data-view="agents">
           <span class="nav-ico">✦</span> Agents
         </a>
-        <a href="#settings" class="nav-item nav-bottom" data-view="settings">
-          <span class="nav-ico">⚙</span> Settings
-        </a>
+        <div class="nav-pinned">
+          <a href="#help" class="nav-item" data-view="help">
+            <span class="nav-ico">?</span> Help
+          </a>
+          <a href="#settings" class="nav-item" data-view="settings">
+            <span class="nav-ico">⚙</span> Settings
+          </a>
+        </div>
         <a href="#" class="nav-item" id="nav-signout" hidden>
           <span class="nav-ico">⏻</span> Sign out
         </a>
@@ -254,6 +259,215 @@
           <div class="row" id="detail-actions"></div>
         </div>
         <div id="detail-body"></div>
+      </section>
+
+      <!-- HELP VIEW -->
+      <section id="view-help" class="view help" hidden>
+        <div class="section-head" id="help-top">
+          <h1>Help &amp; setup</h1>
+          <a class="btn-link" href="#settings">Settings →</a>
+        </div>
+        <p class="lead help-lead">Keep the supervisor running, then put it behind Caddy when the UI should
+          be reachable from other machines. Commands assume <code>sadbox</code> is on your <code>PATH</code>.</p>
+
+        <nav class="help-toc" aria-label="Help sections">
+          <span class="help-toc-label">On this page</span>
+          <button type="button" data-help-jump="help-basics">Basics</button>
+          <button type="button" data-help-jump="help-launchd">launchd</button>
+          <button type="button" data-help-jump="help-caddy">Caddy</button>
+          <button type="button" data-help-jump="help-routes">Named routes</button>
+          <button type="button" data-help-jump="help-checks">Troubleshooting</button>
+          <button type="button" class="help-top" data-help-jump="help-top">↑ Top</button>
+        </nav>
+
+        <div class="panel help-card" id="help-basics">
+          <h2><span class="help-step">1</span> Check the basics</h2>
+          <p>Run these once on the machine that will host the VMs. <code>sadbox setup</code> checks the
+            dependencies, starts the VM backend and builds the base image (on Linux it also fetches Cloud
+            Hypervisor and the guest kernel); it takes a few minutes the first time.</p>
+          <pre class="help-code">sadbox setup          # build the base image, guest kernel and VM disk
+sadbox doctor         # every check should be ✓, including "VM disk built"
+command -v sadbox     # absolute path to use in a launchd job</pre>
+          <p class="help-note">If a check fails, fix that first — starting, stopping and rebuilding
+            projects all depend on the container service and the VM image.</p>
+        </div>
+
+        <div class="panel help-card" id="help-launchd">
+          <h2><span class="help-step">2</span> Run sadbox at login on macOS (launchd)</h2>
+          <p><code>sadbox serve</code> runs in the foreground. A LaunchAgent keeps it in the background:
+            it starts at login, restarts it if it exits, and writes its output to a log.</p>
+          <p>Write <code>~/Library/LaunchAgents/dev.sadbox.supervisor.plist</code>. Replace
+            <code>/Users/YOU</code> with your home directory (launchd does not expand <code>~</code>) and
+            the binary path with the one <code>command -v sadbox</code> printed.</p>
+          <pre class="help-code">&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"&gt;
+&lt;plist version="1.0"&gt;
+&lt;dict&gt;
+  &lt;key&gt;Label&lt;/key&gt;&lt;string&gt;dev.sadbox.supervisor&lt;/string&gt;
+  &lt;key&gt;ProgramArguments&lt;/key&gt;
+  &lt;array&gt;
+    &lt;string&gt;/Users/YOU/.local/bin/sadbox&lt;/string&gt;
+    &lt;string&gt;serve&lt;/string&gt;
+  &lt;/array&gt;
+  &lt;key&gt;EnvironmentVariables&lt;/key&gt;
+  &lt;dict&gt;
+    &lt;key&gt;PATH&lt;/key&gt;
+    &lt;string&gt;/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin&lt;/string&gt;
+    &lt;key&gt;SADBOX_HOST&lt;/key&gt;
+    &lt;string&gt;127.0.0.1&lt;/string&gt;
+    &lt;!-- named routes: also set SADBOX_ROUTE_DOMAIN (see section 4) --&gt;
+  &lt;/dict&gt;
+  &lt;key&gt;RunAtLoad&lt;/key&gt;&lt;true/&gt;
+  &lt;key&gt;KeepAlive&lt;/key&gt;&lt;true/&gt;
+  &lt;key&gt;StandardOutPath&lt;/key&gt;&lt;string&gt;/Users/YOU/Library/Logs/sadbox.log&lt;/string&gt;
+  &lt;key&gt;StandardErrorPath&lt;/key&gt;&lt;string&gt;/Users/YOU/Library/Logs/sadbox.log&lt;/string&gt;
+&lt;/dict&gt;
+&lt;/plist&gt;</pre>
+          <p>Load it and watch the log:</p>
+          <pre class="help-code">launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.sadbox.supervisor.plist
+launchctl kickstart -k gui/$(id -u)/dev.sadbox.supervisor   # start (or restart) now
+tail -f ~/Library/Logs/sadbox.log</pre>
+          <p>Open <code class="link-addr">http://localhost:7070</code>. The generated sign-in password is in
+            that log and in <code>~/.sadbox/initial-password</code>; change it with
+            <code>sadbox passwd</code>.</p>
+          <p>Checking, restarting after an update, stopping, or removing the job:</p>
+          <pre class="help-code">launchctl print gui/$(id -u)/dev.sadbox.supervisor | head -20   # status
+launchctl kickstart -k gui/$(id -u)/dev.sadbox.supervisor        # restart
+launchctl bootout gui/$(id -u)/dev.sadbox.supervisor             # stop (VMs keep running)
+rm ~/Library/LaunchAgents/dev.sadbox.supervisor.plist            # remove for good</pre>
+          <ul class="help-list">
+            <li><b>Keep the <code>PATH</code> line.</b> launchd does not inherit your shell's environment,
+              and <code>container</code>, <code>docker</code>, <code>colima</code> and <code>openssl</code>
+              are looked up on it.</li>
+            <li><b>Keep <code>SADBOX_HOST=127.0.0.1</code></b> when Caddy or another IPv4 reverse proxy
+              dials this machine. On macOS Bun's <code>localhost</code> binds <code>::1</code> only, so a
+              proxy connecting to <code>127.0.0.1:7070</code> would get “connection refused”.</li>
+            <li><b>Never put <code>SADBOX_PASSWORD</code> in the plist</b> — it is readable by anything
+              running as you. The job uses the stored password from <code>sadbox passwd</code>.</li>
+            <li><b>After changing any environment variable</b>, reload the job with
+              <code>launchctl bootout</code> + <code>launchctl bootstrap</code>. <code>kickstart -k</code>
+              restarts the process but keeps the old environment. Verify with
+              <code>launchctl print gui/$(id -u)/dev.sadbox.supervisor | grep SADBOX</code>.</li>
+            <li><b>Apple silicon on macOS 15:</b> add <code>&lt;key&gt;SADBOX_DRIVER&lt;/key&gt;&lt;string&gt;vz&lt;/string&gt;</code>
+              to <code>EnvironmentVariables</code>. Intel Macs do not need it.</li>
+            <li><b>Using colima?</b> Run <code>brew services start colima</code> so Docker is up after a
+              reboot; the first create or rebuild needs it.</li>
+            <li><b>Linux / WSL 2:</b> use <code>sadbox service install</code> instead (a systemd user unit),
+              then <code>sudo loginctl enable-linger $USER</code> if it should start before you log in.
+              Logs: <code>journalctl --user -u sadbox -f</code>.</li>
+          </ul>
+          <p class="help-note">Restarting or stopping the supervisor leaves running VMs alone — only the
+            UI, egress proxy, approvals and port forwards go down.</p>
+        </div>
+
+        <div class="panel help-card" id="help-caddy">
+          <h2><span class="help-step">3</span> Put the UI behind Caddy</h2>
+          <p>sadbox speaks plain HTTP on <code>127.0.0.1:7070</code>. The recommended shape is: run sadbox
+            natively on the host, keep it on loopback, and let Caddy terminate TLS and reverse-proxy to it.
+            sadbox has its own password sign-in; Caddy's <code>basic_auth</code> is an optional second layer.</p>
+          <p>A standalone block on a hostname you control:</p>
+          <pre class="help-code">sadbox.example.com {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+
+    # optional second layer — sadbox has its own sign-in
+    # basic_auth {
+    #     admin $2a$14$REPLACE_WITH_BCRYPT_HASH   # caddy hash-password
+    # }
+
+    reverse_proxy 127.0.0.1:7070 {
+        flush_interval -1        # stream the network feed (SSE) unbuffered
+    }
+}</pre>
+          <p>Or slot it into an existing wildcard block so the UI reuses a browser-trusted certificate:</p>
+          <pre class="help-code">*.internal.example.com {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+
+    @sadbox host sadbox.internal.example.com
+    handle @sadbox {
+        reverse_proxy 127.0.0.1:7070 {
+            flush_interval -1
+        }
+    }
+
+    # …your other per-host handle blocks…
+}</pre>
+          <ul class="help-list">
+            <li><b>Use a dedicated hostname or the root, not a subpath.</b> sadbox serves its assets and
+              API from <code>/</code>; named routes are the supported way to put apps on the same domain
+              (each on its own hostname).</li>
+            <li><b>Caddy in Docker or colima:</b> <code>127.0.0.1</code> in <code>reverse_proxy</code> is
+              Caddy's own container. Use <code>host.docker.internal:7070</code> (and
+              <code>host.docker.internal:7072</code> for named routes). With colima that usually resolves
+              to <code>192.168.5.2</code>; if it does not, add
+              <code>extra_hosts: ["host.docker.internal:192.168.5.2"]</code> to the Caddy service.</li>
+            <li><b>WebSockets</b> (the browser terminal) are upgraded automatically by Caddy v2 — no extra
+              config. <code>flush_interval -1</code> is what keeps SSE streaming instead of buffering.</li>
+            <li><b>Only proxy 7070</b> and, for named routes, <b>7072</b>. Port <b>7071</b> is the egress
+              proxy for older VMs; it refuses anything that is not a project VM and must never be exposed.</li>
+          </ul>
+        </div>
+
+        <div class="panel help-card" id="help-routes">
+          <h2><span class="help-step">4</span> Named routes (apps at their own hostnames)</h2>
+          <p>A named route maps <code>&lt;name&gt;.&lt;domain&gt;</code> to one port in a VM, through the
+            same Caddy instance. It needs a domain plus a wildcard DNS record and certificate; the routes
+            listener is loopback-only on <code>127.0.0.1:7072</code>.</p>
+          <p>Set the domain in the launchd job (or export it when running in the foreground):</p>
+          <pre class="help-code">&lt;key&gt;SADBOX_ROUTE_DOMAIN&lt;/key&gt;
+&lt;string&gt;sadbox.example.com&lt;/string&gt;</pre>
+          <p>Then give that domain a wildcard block. With <code>SADBOX_ROUTE_DOMAIN=sadbox.example.com</code>,
+            <code>sample.sadbox.example.com</code> is one level below the UI, so it needs its own certificate:</p>
+          <pre class="help-code">*.sadbox.example.com {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+
+    reverse_proxy 127.0.0.1:7072 {   # Docker/colima: host.docker.internal:7072
+        flush_interval -1
+    }
+}</pre>
+          <p>If your existing one-level wildcard (say <code>*.internal.example.com</code>) is dedicated to
+            sadbox, you may instead set <code>SADBOX_ROUTE_DOMAIN=internal.example.com</code>: routes become
+            <code>sample.internal.example.com</code> and reuse that certificate. Do not do that on a wildcard
+            shared with other services — the routes listener would receive their hostnames too.</p>
+          <p>Add a route from the project's detail page: <b>Access → Named routes</b>. Choose a name and the
+            VM's port, then whether it needs a sadbox sign-in (default) or is open to anyone who can reach
+            the hostname. Names are first-label DNS names; <code>sadbox</code> is reserved so a route can
+            never shadow the UI. Named routes are HTTP/WebSockets only and do not support subpaths.</p>
+        </div>
+
+        <div class="panel help-card" id="help-checks">
+          <h2><span class="help-step">5</span> Checks and troubleshooting</h2>
+          <ul class="help-list">
+            <li><b>Caddy returns 502:</b> it reached the Mac but sadbox is not listening where it dialled.
+              <code>lsof -nP -iTCP:7070 -sTCP:LISTEN</code> should show <code>127.0.0.1:7070</code>
+              (not <code>[::1]</code>), and
+              <code>curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7070/</code>
+              should print <code>200</code>.</li>
+            <li><b>Caddy exits instead of starting:</b> run
+              <code>caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile</code>. An empty
+              <code>CLOUDFLARE_API_TOKEN</code> fails at load with
+              <code>API token '' appears invalid</code>.</li>
+            <li><b>The <code>dns cloudflare</code> challenge</b> needs a Caddy built with
+              <code>github.com/caddy-dns/cloudflare</code>: the official Docker image and Homebrew's
+              <code>caddy</code> do not include it. Build one with
+              <code>xcaddy build --with github.com/caddy-dns/cloudflare</code>. The <code>zone_id</code>
+              option some examples show is not supported; scope the API token to the zone instead.</li>
+            <li><b><code>tls internal</code></b> works on a bare LAN name, but every client must trust
+              Caddy's root CA (<code>caddy trust</code>) or the terminal's <code>wss://</code> is rejected.
+              A real wildcard certificate avoids this.</li>
+            <li><b>Named routes show as off</b> when <code>SADBOX_ROUTE_DOMAIN</code> is unset. If the
+              routes listener could not bind, the supervisor log has the error and route URLs return
+              <code>502</code>. Check that log after changing the environment and reloading the job.</li>
+          </ul>
+        </div>
+
+        <p class="hint">The full reference — install options, updates, port forwards, Linux, Windows/WSL and
+          platform notes — is in <code>README.md</code> under <b>Deploying</b>.</p>
       </section>
 
       <!-- SETTINGS VIEW -->

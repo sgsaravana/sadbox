@@ -33,16 +33,18 @@ function route() {
   const isVaults = head === "vaults";
   const isSettings = head === "settings";
   const isAgents = head === "agents";
-  const isHome = !detail && !isProjects && !isVaults && !isSettings && !isAgents; // default / #home / unknown
+  const isHelp = head === "help";
+  const isHome = !detail && !isProjects && !isVaults && !isSettings && !isAgents && !isHelp; // default / #home / unknown
 
   $("#view-home").hidden = !isHome;
   $("#view-projects").hidden = !isProjects;
   $("#view-vaults").hidden = !isVaults;
   $("#view-settings").hidden = !isSettings;
   $("#view-agents").hidden = !isAgents;
+  $("#view-help").hidden = !isHelp;
   $("#view-detail").hidden = !detail;
 
-  const activeNav = isVaults ? "vaults" : isSettings ? "settings" : isAgents ? "agents"
+  const activeNav = isVaults ? "vaults" : isSettings ? "settings" : isAgents ? "agents" : isHelp ? "help"
     : (isProjects || detail) ? "projects" : "home";
   document.querySelectorAll(".nav-item").forEach((a) =>
     a.classList.toggle("active", a.dataset.view === activeNav));
@@ -56,10 +58,32 @@ function route() {
     if (openCreateNext) { openCreateNext = false; openCreateForm(); } else closeCreateForm();
   }
   else if (isHome) refreshServiceStatus();
+  else if (isHelp) { window.scrollTo({ top: 0, left: 0 }); syncHelpToc(); }
   refreshNavTree();
 }
 addEventListener("hashchange", route);
 const showView = (v) => { location.hash = v; };
+
+// ---- help: jump to a section and keep the page nav in step while scrolling ----
+const helpSections = () => [...document.querySelectorAll(".help-card[id]")];
+const helpJump = (id) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+function syncHelpToc() {
+  const view = $("#view-help");
+  if (!view || view.hidden) return;
+  let current = null;
+  // the sticky nav covers the top of the viewport; a section is current once
+  // its heading has passed just below it
+  for (const s of helpSections()) if (s.getBoundingClientRect().top <= 90) current = s.id;
+  document.querySelectorAll(".help-toc [data-help-jump]").forEach((b) =>
+    b.classList.toggle("on", b.dataset.helpJump === current));
+}
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-help-jump]");
+  if (!b) return;
+  e.preventDefault();
+  helpJump(b.dataset.helpJump);
+});
+addEventListener("scroll", syncHelpToc, { passive: true });
 
 // ---- agents: logins sadbox keeps, history per project name ----
 const TOOL_NAMES = { claude: "Claude Code", omp: "omp", opencode: "opencode" };
