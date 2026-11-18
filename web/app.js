@@ -2200,28 +2200,56 @@ function paintDetail(d) {
               ${state === "running" ? "" : `disabled title="Start the VM to change its git remote"`}>${d.git_remote ? "Change" : "Connect a remote…"}</button></dd>`}
         </dl>
       </div>
-
-      <div class="panel stat">
-        <h3>Installed tools</h3>
-        <div class="toolchain">${
-          state === "running"
-            ? (d.toolchain ? toolchainHtml(d.toolchain) : `<span class="hint">${d.partial ? "checking…" : "could not probe"}</span>`)
-            : `<span class="hint">start the VM to detect</span>`
-        }</div>
-        <dl><dt>Extra apt</dt><dd>${d.apps.length ? d.apps.map(escapeHtml).join(", ") : "none"}</dd></dl>
-      </div>
+      ${baseImageHtml(d)}
     </div>
-    ${optionalAppsHtml(d)}
     ${d.error ? `<div class="panel" style="color:var(--bad)">${escapeHtml(d.error)}</div>` : ""}`;
+  paintTools(d);
+  paintResourceGraph(lastResource);
+}
+
+// ---- access: named routes, port forwards and project links in one card ----
+let connTab = "routes";
+function showConnTab(key) {
+  connTab = key;
+  const el = $("#detail-conn");
+  if (!el) return;
+  el.querySelectorAll("[data-conn-tab]").forEach((b) => b.classList.toggle("on", b.dataset.connTab === key));
+  el.querySelectorAll("[data-conn-pane]").forEach((p) => { p.hidden = p.dataset.connPane !== key; });
+}
+function setConnCount(key, n) {
+  const el = $(`#conn-count-${key}`);
+  if (el) el.textContent = n ? String(n) : "";
+}
+async function openConnections(id) {
+  const el = $("#detail-conn");
+  if (!el) return;
+  const tab = (key, label) => `<button type="button" class="net-tab seg-tab${connTab === key ? " on" : ""}" data-conn-tab="${key}">${label}<span class="net-count" id="conn-count-${key}"></span></button>`;
+  el.innerHTML = `
+    <div class="panel net-panel">
+      <div class="net-head"><h3>Access</h3><span class="hint">into this VM, or out to another project</span></div>
+      <div class="net-tabs seg-tabs" role="tablist">
+        ${tab("routes", "Named routes")}${tab("ports", "Port forwards")}${tab("links", "Links")}
+      </div>
+      <div class="conn-pane" data-conn-pane="routes"${connTab === "routes" ? "" : " hidden"}>
+        <div id="conn-routes"></div>
+      </div>
+      <div class="conn-pane" data-conn-pane="ports"${connTab === "ports" ? "" : " hidden"}>
+        <div id="conn-ports"></div>
+      </div>
+      <div class="conn-pane" data-conn-pane="links"${connTab === "links" ? "" : " hidden"}>
+        <div id="conn-links"></div>
+      </div>
+    </div>`;
+  el.querySelectorAll("[data-conn-tab]").forEach((b) => { b.onclick = () => showConnTab(b.dataset.connTab); });
+  openRoutes(id, $("#conn-routes"));
+  openPorts(id, $("#conn-ports"));
+  openLinks(id, $("#conn-links"));
 }
 
 // ---- named routes panel (<name>.<domain> → VM port) ----
-async function openRoutes(id) {
-  const el = $("#detail-routes");
+async function openRoutes(id, el = $("#conn-routes")) {
   if (!el) return;
   el.innerHTML = `
-  <div class="panel net-panel">
-    <div class="net-head"><h3>Named routes</h3></div>
     <div class="net-section">
       <div class="net-subhead">Open an app at its own hostname <span class="hint">a name on the wildcard domain, through Caddy — the app runs at /</span></div>
       <div id="route-list"></div>
@@ -2232,8 +2260,7 @@ async function openRoutes(id) {
         <label class="hint" title="HTTP without a sadbox sign-in pass: anyone who can reach the hostname. For an API called from another app, not for a UI you want protected."><input name="open" type="checkbox"> open to anyone</label>
         <button type="submit">Add route</button>
       </form>
-    </div>
-  </div>`;
+    </div>`;
   el.addEventListener("click", async (e) => {
     const acc = e.target.closest("[data-route-access]");
     if (acc) {
@@ -2269,6 +2296,7 @@ async function renderRoutes(id) {
   let data;
   try { data = await api(`/api/projects/${id}/routes`); }
   catch (e) { el.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  setConnCount("routes", data.routes.length);
   if (!data.domain) {
     el.innerHTML = `<div class="empty">named routes are off — set <span class="mono">SADBOX_ROUTE_DOMAIN</span> and point <span class="mono">*.&lt;domain&gt;</span> at the routes port</div>`;
     return;
@@ -2292,12 +2320,9 @@ async function renderRoutes(id) {
 }
 
 // ---- port forwards panel (host port → VM port) ----
-async function openPorts(id) {
-  const el = $("#detail-ports");
+async function openPorts(id, el = $("#conn-ports")) {
   if (!el) return;
   el.innerHTML = `
-  <div class="panel net-panel">
-    <div class="net-head"><h3>Port forwards</h3></div>
     <div class="net-section">
       <div class="net-subhead">Open an app running in the VM <span class="hint">any app listening on that port in the VM, on localhost or 0.0.0.0</span></div>
       <div id="port-list"></div>
@@ -2308,8 +2333,7 @@ async function openPorts(id) {
         <label class="hint" title="Raw TCP that anyone who reaches this machine can use: for databases and other non-HTTP servers, or an API called from another forward's browser code. Otherwise the port is HTTP for a browser signed in to sadbox only."><input name="open" type="checkbox"> open to anyone</label>
         <button type="submit">Forward</button>
       </form>
-    </div>
-  </div>`;
+    </div>`;
   el.addEventListener("click", async (e) => {
     const acc = e.target.closest("[data-port-access]");
     if (acc) {
@@ -2345,6 +2369,7 @@ async function renderPorts(id) {
   let data;
   try { data = await api(`/api/projects/${id}/forwards`); }
   catch (e) { el.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  setConnCount("ports", data.forwards.length);
   if (!data.forwards.length) { el.innerHTML = `<div class="empty">no ports forwarded</div>`; return; }
   el.innerHTML = data.forwards.map((f) => {
     // a sign-in forward is opened through the UI, which hands the browser its pass
@@ -2363,12 +2388,9 @@ async function renderPorts(id) {
 }
 
 // ---- links panel (this VM may reach one port of another project's VM) ----
-async function openLinks(id) {
-  const el = $("#detail-links");
+async function openLinks(id, el = $("#conn-links")) {
   if (!el) return;
   el.innerHTML = `
-  <div class="panel net-panel">
-    <div class="net-head"><h3>Links to other projects</h3></div>
     <div class="net-section">
       <div class="net-subhead">This project can reach <span class="hint">from inside this VM, at the address shown — over HTTP(S), one port each; every other port and project stays closed</span></div>
       <div id="link-out"></div>
@@ -2381,8 +2403,7 @@ async function openLinks(id) {
     <div class="net-section">
       <div class="net-subhead">Can be reached from <span class="hint">links other projects have to this one; this VM gets no access back</span></div>
       <div id="link-in"></div>
-    </div>
-  </div>`;
+    </div>`;
   el.addEventListener("click", async (e) => {
     const del = e.target.closest("[data-del-link]");
     if (!del) return;
@@ -2412,6 +2433,7 @@ async function renderLinks(id) {
   let data;
   try { data = await api(`/api/projects/${id}/links`); }
   catch (e) { out.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  setConnCount("links", data.outgoing.length + data.incoming.length);
   out.innerHTML = data.outgoing.length ? data.outgoing.map((l) => `<div class="rule">
       <span class="ract allow">reach</span>
       <span class="rspec"><code class="link-addr">http://${escapeHtml(l.host)}</code> → <a href="#project/${l.project}">${escapeHtml(l.name)}</a> port ${l.port}</span>
@@ -2527,7 +2549,7 @@ try { Object.assign(netUi, JSON.parse(localStorage.getItem(NET_UI_KEY) || "{}"),
 const saveNetUi = () => { try { localStorage.setItem(NET_UI_KEY, JSON.stringify({ ...netUi, filter: undefined })); } catch {} };
 
 function netShellHtml() {
-  const tab = (id, label) => `<button type="button" class="net-tab${netUi.tab === id ? " on" : ""}" data-net-tab="${id}">${label} <span class="net-count" id="net-count-${id}"></span></button>`;
+  const tab = (id, label) => `<button type="button" class="net-tab seg-tab${netUi.tab === id ? " on" : ""}" data-net-tab="${id}">${label}<span class="net-count" id="net-count-${id}"></span></button>`;
   return `
   <div class="panel net-panel net-main">
     <div class="net-head">
@@ -2549,7 +2571,7 @@ function netShellHtml() {
       traffic. <b>Rebuild</b> it to put it behind the proxy.
     </div>
     <div id="net-pending"></div>
-    <div class="net-tabs" role="tablist">
+    <div class="net-tabs seg-tabs" role="tablist">
       ${tab("activity", "Activity")}${tab("rules", "Rules")}${tab("headers", "Header rules")}
     </div>
 

@@ -1058,6 +1058,9 @@ over vsock instead.
 
 ### Port forwards, named routes and project links
 
+On a project's detail view these are three tabs of one **Access** card:
+**Named routes**, **Port forwards** and **Links**.
+
 - **Named routes** (inbound HTTP): give a port in the VM a name and open it at
   `<name>.<SADBOX_ROUTE_DOMAIN>` — for example `sample.sadbox.internal.example.com`
   — with no extra host port. One listener (loopback `127.0.0.1:7072`) serves
@@ -1102,7 +1105,7 @@ over vsock instead.
 - **Project links** (VM to VM): VMs cannot reach each other or the host, so
   one project calling another — a UI's server-side code calling an API in
   another VM — needs a link. On the calling project's detail view, under
-  **Links to other projects**, pick the target project and **one port**. From
+  **Access → Links**, pick the target project and **one port**. From
   inside the calling VM the target is then
   `http://<target-name>.sadbox.internal:<port>/…`; for example, a UI project
   linked to `api` on 3000 uses `API_URL=http://api.sadbox.internal:3000`.

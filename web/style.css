@@ -561,6 +561,15 @@ table.net-log tr:hover .rowallow, .rowallow:focus { opacity: 1; }
 .net-count:empty { display: none; }
 .net-count.alert { background: #3a1414; color: var(--bad); }
 
+/* tab strips: a segmented control, not a faint underline (Access, Network) */
+.seg-tabs { display: inline-flex; flex-wrap: wrap; gap: 4px; width: auto; padding: 4px; margin: 10px 0 12px;
+  border: 1px solid var(--border); border-radius: 10px; background: #0e0e15; box-shadow: inset 0 1px 0 #ffffff08; }
+.seg-tab { border: 0; border-bottom: 0; border-radius: 7px; padding: 7px 14px; margin: 0; color: var(--dim); font-weight: 500; }
+.seg-tab:hover { background: #171721; color: var(--text); }
+.seg-tab.on { background: #1d2f57; color: #dbe4ff; border-bottom: 0; font-weight: 600; }
+.seg-tab.on .net-count { background: #2a4a8a; color: #dbe4ff; }
+.seg-tab .net-count { margin-left: 6px; }
+
 .net-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
 .net-tools .grow { flex: 1; }
 .net-tools input[type=search] { width: 220px; margin: 0; padding: 5px 9px; font-size: 12px; }
