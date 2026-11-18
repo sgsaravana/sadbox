@@ -386,18 +386,15 @@ button.mini.eye { margin-left: 0; }
 .tools-asks .approval { margin-bottom: 0; }
 .tools-asks .approval + .approval { margin-top: 8px; }
 
-/* Settings pinned near the bottom of the sidebar */
+/* Help + Settings pinned together at the bottom of the sidebar */
 .sidenav nav { height: calc(100vh - 90px); }
-.nav-bottom { margin-top: auto; }
-
-/* Settings nav item: separated + distinct from the primary links */
-.nav-bottom {
+.nav-pinned {
   margin-top: auto; border-top: 1px solid var(--border);
-  padding-top: 12px; margin-top: auto; background: #101018;
-  border-radius: 0; color: var(--text);
+  padding-top: 8px; display: flex; flex-direction: column; gap: 4px;
 }
-.nav-bottom:hover { background: #14141c; }
-.nav-bottom.active { background: #1d2f57; border-top-color: transparent; border-radius: 8px; }
+.nav-pinned .nav-item { background: #101018; border-radius: 0; color: var(--text); }
+.nav-pinned .nav-item:hover { background: #14141c; }
+.nav-pinned .nav-item.active { background: #1d2f57; border-radius: 8px; }
 
 /* settings: fields on one line */
 .field-row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
@@ -600,6 +597,62 @@ table.net-log td.rowact .mini { opacity: .55; }
 table.net-log tr:hover td.rowact .mini, table.net-log td.rowact .mini:focus-visible { opacity: 1; }
 .net-tools select { margin: 0; padding: 5px 8px; font-size: 12px; background: #0e0e15; color: var(--text); border: 1px solid var(--border); border-radius: 7px; }
 #net-older { margin-top: 6px; }
+
+/* ---- help & setup page ---- */
+.help { max-width: 980px; }
+.help-lead { margin-bottom: 16px; }
+.help-toc {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  margin: 0 0 16px; padding: 8px 10px;
+  background: linear-gradient(180deg, #1b2335, #141a27);
+  border: 1px solid #35507e; border-top: 2px solid var(--accent); border-radius: 10px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(8px);
+}
+.help-toc-label {
+  margin: 0 8px 0 4px; color: #a9bbdd; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .8px;
+}
+.help-toc button {
+  padding: 5px 10px; background: #1d2434; border-color: #2b3a58;
+  color: #c6cee2; font-size: 12px; line-height: 1.4;
+}
+.help-toc button:hover { color: #fff; background: #26324a; border-color: #4a689c; }
+.help-toc button.on { color: #fff; background: var(--accent); border-color: var(--accent); }
+.help-toc .help-top { margin-left: auto; }
+.help-card { scroll-margin-top: 64px; }
+.help-card + .help-card { margin-top: 16px; }
+.help-card h2 {
+  display: flex; align-items: center; gap: 9px;
+  margin: 0 0 12px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+  color: var(--text); font-size: 16px; font-weight: 600;
+  text-transform: none; letter-spacing: .2px;
+}
+.help-step {
+  flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: #1d2f57; color: #dbe4ff; font-size: 12px; font-weight: 700;
+}
+.help-card p { margin: 0 0 10px; color: var(--dim); font-size: 13px; line-height: 1.6; }
+.help-card b { color: var(--text); font-weight: 600; }
+.help-note { padding-left: 10px; border-left: 2px solid var(--border); }
+.help-code {
+  margin: 0 0 12px; padding: 10px 12px; overflow-x: auto;
+  background: #0b0b11; border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre;
+}
+.help code {
+  background: #0e0e15; border: 1px solid var(--border); border-radius: 4px;
+  padding: 0 5px; font-family: ui-monospace, monospace; font-size: 12px;
+}
+.help-list { margin: 0 0 10px; padding-left: 18px; }
+.help-list li { margin-bottom: 8px; color: var(--dim); font-size: 13px; line-height: 1.6; }
+@media (max-width: 620px) {
+  .help-toc-label { display: none; }
+  .help-toc .help-top { margin-left: 0; }
+}
 
 /* ---- new project: the form becomes a live create-progress view ---- */
 #create-form.busy { max-width: none; }
