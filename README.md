@@ -964,9 +964,21 @@ over vsock instead.
   counters and the guest agent on Linux — plus in-guest probes), workdir size, tmux session/window
   counts and attached-terminal count, the branch the VM has checked out now
   and its dirty state (the projects list shows the live branch too; for a
-  stopped VM it is the last one seen, kept in the database), folder/remote
-  info, and the installed-toolchain probe — plus the live **Network** panel
-  (below). The buttons along the top are **Terminal**, **Editor**, **Sync
+  stopped VM it is the last one seen, kept in the database), and folder/remote
+  info — plus the live **Network** panel (below). The summary row also has a
+  **Base image** card: the image name, the versions of the tools baked into it
+  (Node, npm, nvm, git, ripgrep, jq, tmux) and the project's extra apt packages;
+  these are display-only and refresh with the image (`sadbox update` / a
+  Rebuild). A **Resources** graph below the panels plots CPU, memory, disk and
+  network bandwidth (RX + TX throughput) over **3 minutes, 15 minutes, 1 hour
+  or 12 hours**. The 3-minute view samples about every 1.5 s while the page is
+  open; longer ranges use samples the supervisor keeps for about 12 hours
+  (taken every 30 s, plus the finer live points when the page is open) and are
+  downsampled for drawing. Hovering a chart shows the value and time at that
+  point. The **Tools & apps** card below it has two sections: the agent tools
+  (Claude Code, omp, opencode and Bun), checked against their latest releases
+  with an **Update** button; and the optional apps that can be added. The
+  buttons along the top are **Terminal**, **Editor**, **Sync
   back** / **Push to VM** (once a folder is connected), **Vault…**, **Stop** / **Start**,
   **Rebuild** and **Destroy**; the project cards on the list carry the same
   ones. **Stop** (solid red) shuts the VM down and keeps its disk — files,

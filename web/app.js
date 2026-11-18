@@ -1469,20 +1469,446 @@ function showDetailSkeleton() {
   $("#detail-body").innerHTML =
     `<div id="detail-stats">
        <div class="loading-bar"><span class="spinner"></span> Loading VM details…</div>
-       <div class="detail-grid">${skeletonPanel(6) + skeletonPanel(6) + skeletonPanel(5) + skeletonPanel(4)}</div>
+       <div class="detail-grid">${skeletonPanel(6) + skeletonPanel(5) + skeletonPanel(4)}</div>
      </div>
-     <div id="detail-routes"></div>
-     <div id="detail-ports"></div>
-     <div id="detail-links"></div>
+     <div id="detail-graph"></div>
+     <div class="detail-columns">
+       <div id="detail-tools"></div>
+       <div id="detail-conn"></div>
+     </div>
      <div id="detail-net">${skeletonNet()}</div>
      <div class="sync-result"></div>`;
 }
 
+// ---- live resource usage graph (CPU, memory, disk) ----
+// The detail page already refreshes every 4 s; this smaller endpoint is polled
+// faster and feeds a rolling 3-minute graph without running the guest probe.
+const RESOURCE_METRICS = [
+  { key: "cpu", label: "CPU", color: "#5b8cff" },
+  { key: "mem", label: "Memory", color: "#3ecf8e" },
+  { key: "disk", label: "Disk", color: "#f5b544" },
+  { key: "net", label: "Network", color: "#c084fc" },
+];
+const RESOURCE_SAMPLES = 120; // ~3 minutes at 1.5 s
+const RESOURCE_RANGES = {
+  "3m": { ms: 3 * 60_000, axis: ["-3m", "-2m", "-1m", "now"] },
+  "15m": { ms: 15 * 60_000, axis: ["-15m", "-10m", "-5m", "now"] },
+  "1h": { ms: 60 * 60_000, axis: ["-1h", "-40m", "-20m", "now"] },
+  "12h": { ms: 12 * 60 * 60_000, axis: ["-12h", "-8h", "-4h", "now"] },
+};
+let resourceRange = "3m";
+let resourceView = { cpu: [], mem: [], disk: [], net: [] }; // longer ranges
+let resourceViewLoading = false;
+let resourceViewDirty = false;
+let resourceTimer = null;
+let resourceBusy = false;
+let lastResource = null;
+let netLast = null; // the previous cumulative network counters, for a rate
+let resourceHistory = { id: null, cpu: [], mem: [], disk: [], net: [] };
+const resourceHover = new Map(); // key -> { x, clientX, clientY }
+
+const pctOf = (used, total) => {
+  if (used == null || total == null || !Number.isFinite(used) || !Number.isFinite(total) || total <= 0) return null;
+  return Math.max(0, Math.min(100, (used / total) * 100));
+};
+const fmtRate = (n) => (n == null ? "—" : `${fmtBytes(n)}/s`);
+const activeResourceSamples = (key) => (resourceRange === "3m" ? resourceHistory[key] : resourceView[key]);
+const activeResourceMs = () => RESOURCE_RANGES[resourceRange].ms;
+const niceRateMax = (samples, windowMs) => {
+  const from = Date.now() - windowMs;
+  let max = 0;
+  for (const s of samples) if (s.t >= from && s.v != null) max = Math.max(max, s.v);
+  if (!(max > 1)) return 1;
+  const base = 10 ** Math.floor(Math.log10(max));
+  const n = max / base;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * base;
+};
+
+const resourceWindow = (windowMs = activeResourceMs()) => {
+  const now = Date.now();
+  return { now, from: now - windowMs };
+};
+const sampleX = (t, from, w, windowMs) => ((t - from) / windowMs) * w;
+
+function nearestResourceSample(samples, x, w, windowMs = activeResourceMs()) {
+  const { from } = resourceWindow(windowMs);
+  const target = from + (Math.max(0, Math.min(w, x)) / w) * windowMs;
+  let best = null;
+  for (const s of samples) {
+    if (s.t < from) continue;
+    if (!best || Math.abs(s.t - target) < Math.abs(best.t - target)) best = s;
+  }
+  return best;
+}
+
+function stopResourceWatch() {
+  if (resourceTimer) clearInterval(resourceTimer);
+  resourceTimer = null;
+  resourceBusy = false;
+  resourceViewLoading = false;
+  resourceHover.clear();
+  for (const m of RESOURCE_METRICS) hideResourceTip(m.key);
+}
+
+function resourcePanelHtml() {
+  const axis = RESOURCE_RANGES[resourceRange].axis.map((l) => `<span>${l}</span>`).join("");
+  const ranges = Object.keys(RESOURCE_RANGES).map((key) =>
+    `<button type="button" class="rg-rbtn${resourceRange === key ? " on" : ""}" data-rg-range="${key}" title="last ${key}">${key}</button>`).join("");
+  return `<div class="panel resource-graph">
+    <div class="rg-head">
+      <h3>Resources</h3>
+      <div class="rg-range" role="group" aria-label="Time range">${ranges}</div>
+      <span id="rg-state" class="hint" style="margin-left:auto">connecting…</span>
+    </div>
+    <div class="rg-grid">${RESOURCE_METRICS.map((m) => `
+      <div class="rg-metric rg-${m.key}">
+        <div class="rg-top">
+          <span class="rg-label">${m.label}</span>
+          ${m.key === "mem"
+            ? `<span class="rg-value"><span id="rg-mem-now">—</span><span id="rg-mem-action"></span></span>`
+            : `<span id="rg-${m.key}-now" class="rg-value">—</span>`}
+        </div>
+        <canvas id="rg-${m.key}" class="rg-canvas" width="360" height="97"></canvas>
+        <div class="rg-axis">${axis}</div>
+        <div id="rg-${m.key}-tip" class="rg-tip" hidden></div>
+      </div>`).join("")}</div>
+  </div>`;
+}
+
+function pushResourceSample(key, value, t, extra = {}) {
+  const sample = { t, v: value == null ? null : Math.max(0, Math.min(100, value)), ...extra };
+  const a = resourceHistory[key];
+  a.push(sample);
+  if (a.length > RESOURCE_SAMPLES) a.shift();
+  if (resourceRange !== "3m") {
+    const view = resourceView[key];
+    if (!view.length || t - view[view.length - 1].t >= 5_000) {
+      view.push({ ...sample });
+      const from = Date.now() - activeResourceMs();
+      while (view.length && view[0].t < from) view.shift();
+      resourceViewDirty = true;
+    }
+  }
+}
+
+function drawSpark(canvas, samples, color, key, max = 100, maxLabel = "", windowMs = activeResourceMs()) {
+  if (!canvas) return;
+  const w = canvas.clientWidth || 0, h = canvas.clientHeight || 0;
+  if (!w || !h) return;
+  const dpr = window.devicePixelRatio || 1;
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  ctx.strokeStyle = "rgba(255,255,255,0.06)";
+  ctx.lineWidth = 1;
+  for (const p of [0.25, 0.5, 0.75]) {
+    const y = Math.round(h - p * h) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+  if (maxLabel) {
+    ctx.fillStyle = "rgba(160,160,185,0.65)";
+    ctx.font = "9px system-ui, -apple-system, sans-serif";
+    ctx.textBaseline = "top";
+    ctx.fillText(maxLabel, 2, 2);
+  }
+  const { from } = resourceWindow(windowMs);
+  const visible = samples.filter((s) => s.t >= from);
+  const segs = [];
+  let seg = [];
+  for (const s of visible) {
+    if (s.v == null) {
+      if (seg.length) { segs.push(seg); seg = []; }
+      continue;
+    }
+    seg.push({ x: sampleX(s.t, from, w, windowMs), y: h - (Math.min(max, Math.max(0, s.v)) / max) * h });
+  }
+  if (seg.length) segs.push(seg);
+  for (const s of segs) {
+    if (s.length === 1) {
+      ctx.beginPath();
+      ctx.arc(s[0].x, s[0].y, 2.5, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      continue;
+    }
+    ctx.beginPath();
+    ctx.moveTo(s[0].x, s[0].y);
+    for (let i = 1; i < s.length; i++) ctx.lineTo(s[i].x, s[i].y);
+    ctx.lineTo(s[s.length - 1].x, h);
+    ctx.lineTo(s[0].x, h);
+    ctx.closePath();
+    ctx.globalAlpha = 0.12;
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.moveTo(s[0].x, s[0].y);
+    for (let i = 1; i < s.length; i++) ctx.lineTo(s[i].x, s[i].y);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  const hover = key ? resourceHover.get(key) : null;
+  if (hover) {
+    const s = nearestResourceSample(samples, hover.x, w, windowMs);
+    if (s) {
+      const x = sampleX(s.t, from, w, windowMs);
+      ctx.strokeStyle = "rgba(255,255,255,0.35)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      if (s.v != null) {
+        ctx.beginPath();
+        ctx.arc(x, h - (Math.min(max, Math.max(0, s.v)) / max) * h, 3, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = "#0b0b11";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
+  }
+}
+
+function hideResourceTip(key) {
+  const tip = document.getElementById(`rg-${key}-tip`);
+  if (tip) tip.hidden = true;
+}
+
+function updateResourceTip(key) {
+  const hover = resourceHover.get(key);
+  const canvas = document.getElementById(`rg-${key}`);
+  const tip = document.getElementById(`rg-${key}-tip`);
+  if (!hover || !canvas || !tip) return;
+  const s = nearestResourceSample(activeResourceSamples(key), hover.x, canvas.clientWidth || 0, activeResourceMs());
+  if (!s) { tip.hidden = true; return; }
+  const time = new Date(s.t).toLocaleTimeString();
+  const text = s.v == null ? `${time} · ${s.running ? "collecting…" : "VM stopped"}`
+    : key === "cpu" ? `${time} · ${s.v.toFixed(1)}% of ${s.cpus ?? lastResource?.cpus ?? "?"} vCPU`
+    : key === "net" ? `${time} · ↓ ${fmtRate(s.rx)}/s · ↑ ${fmtRate(s.tx)}/s`
+    : `${time} · ${fmtBytes(s.used)} / ${fmtBytes(s.total)} (${s.v.toFixed(0)}%)`;
+  tip.textContent = text;
+  tip.hidden = false;
+  tip.style.left = `${Math.min(hover.clientX + 12, window.innerWidth - 220)}px`;
+  tip.style.top = `${Math.min(hover.clientY + 12, window.innerHeight - 48)}px`;
+}
+
+function paintResourceGraph(r, redraw = true) {
+  const stateEl = $("#rg-state");
+  const running = r?.running === true;
+  const windowMs = activeResourceMs();
+  const samples = (key) => activeResourceSamples(key);
+  if (stateEl) {
+    stateEl.textContent = r == null ? "connecting…"
+      : !running ? (r.state === "stopped" ? "VM stopped" : `VM ${r.state}`)
+      : resourceRange !== "3m" && resourceViewLoading ? "loading history…"
+      : resourceRange !== "3m" && !samples("cpu").length ? "collecting history…"
+      : r.pending ? "sampling…" : "live";
+  }
+  const d = lastDetail?.id === resourceHistory.id ? lastDetail : null;
+  const netSample = samples("net").at(-1);
+  const diskPct = running ? pctOf(r.diskUsedBytes, r.diskTotalBytes) : null;
+  const workdir = d?.resources.workdirBytes;
+  const now = {
+    cpu: running && r.cpuPercent != null
+      ? `${r.cpuPercent.toFixed(1)}% of ${r.cpus ?? "?"} vCPU${r.numProcesses != null ? ` · ${r.numProcesses} proc` : ""}`
+      : "—",
+    mem: running && r.memoryUsageBytes != null && r.memoryLimitBytes
+      ? `${fmtBytes(r.memoryUsageBytes)} / ${fmtBytes(r.memoryLimitBytes)}` : "—",
+    disk: running && r.diskUsedBytes != null && r.diskTotalBytes
+      ? `${fmtBytes(r.diskUsedBytes)} / ${fmtBytes(r.diskTotalBytes)}${diskPct != null ? ` (${diskPct.toFixed(0)}%)` : ""}${workdir != null ? ` · workdir ${fmtBytes(workdir)}` : ""}`
+      : "—",
+    net: running && netSample?.v != null
+      ? `↓ ${fmtRate(netSample.rx)}/s · ↑ ${fmtRate(netSample.tx)}/s` : "—",
+  };
+  const memAction = document.getElementById("rg-mem-action");
+  if (memAction) {
+    memAction.innerHTML = d && ["running", "stopped"].includes(d.state) && !powerBusy.has(d.id)
+      ? `<button class="mini" data-memory="${d.id}" data-name="${escapeHtml(d.name)}" data-mb="${d.resources.memoryMB ?? ""}" data-running="${d.state === "running" ? 1 : 0}" title="Give this VM more (or less) memory">Change…</button>`
+      : "";
+  }
+  const netMax = redraw ? niceRateMax(samples("net"), windowMs) : 0;
+  for (const m of RESOURCE_METRICS) {
+    const el = document.getElementById(`rg-${m.key}-now`);
+    if (el) el.textContent = now[m.key];
+    if (!redraw) continue;
+    const max = m.key === "net" ? netMax : 100;
+    drawSpark(document.getElementById(`rg-${m.key}`), samples(m.key), m.color, m.key, max,
+      m.key === "net" ? fmtRate(netMax) : "100%", windowMs);
+    if (resourceHover.has(m.key)) updateResourceTip(m.key);
+  }
+}
+
+async function pollResources(id) {
+  if (resourceBusy || location.hash !== `#project/${id}`) return;
+  resourceBusy = true;
+  try {
+    const r = await api(`/api/projects/${id}/resources`);
+    if (resourceHistory.id !== id) return;
+    lastResource = r;
+    const t = Date.now();
+    let netRate = null;
+    if (r.running && r.networkRxBytes != null && r.networkTxBytes != null) {
+      if (netLast && t > netLast.t) {
+        const dt = (t - netLast.t) / 1000;
+        const rx = Math.max(0, r.networkRxBytes - netLast.rx) / dt;
+        const tx = Math.max(0, r.networkTxBytes - netLast.tx) / dt;
+        netRate = { rx, tx, total: rx + tx };
+      }
+      netLast = { t, rx: r.networkRxBytes, tx: r.networkTxBytes };
+    } else {
+      netLast = null;
+    }
+    const runningExtra = { running: true };
+    if (r.running) {
+      pushResourceSample("cpu", r.cpuPercent, t, { ...runningExtra, cpus: r.cpus });
+      pushResourceSample("mem", pctOf(r.memoryUsageBytes, r.memoryLimitBytes), t,
+        { ...runningExtra, used: r.memoryUsageBytes, total: r.memoryLimitBytes });
+      pushResourceSample("disk", pctOf(r.diskUsedBytes, r.diskTotalBytes), t,
+        { ...runningExtra, used: r.diskUsedBytes, total: r.diskTotalBytes });
+      pushResourceSample("net", netRate?.total ?? null, t,
+        netRate ? { ...runningExtra, rx: netRate.rx, tx: netRate.tx } : runningExtra);
+    } else {
+      const stopped = { running: false };
+      pushResourceSample("cpu", null, t, stopped);
+      pushResourceSample("mem", null, t, stopped);
+      pushResourceSample("disk", null, t, stopped);
+      pushResourceSample("net", null, t, stopped);
+    }
+    paintResourceGraph(r, resourceRange === "3m" || resourceViewDirty);
+    resourceViewDirty = false;
+  } catch {}
+  resourceBusy = false;
+}
+
+function historyToView(samples) {
+  const view = { cpu: [], mem: [], disk: [], net: [] };
+  const cpus = lastResource?.cpus ?? null;
+  let prev = null;
+  for (const row of samples) {
+    const t = row.ts;
+    view.cpu.push({ t, v: row.cpu, running: true, cpus });
+    view.mem.push({ t, v: pctOf(row.memUsed, row.memLimit), running: true, used: row.memUsed, total: row.memLimit });
+    view.disk.push({ t, v: pctOf(row.diskUsed, row.diskTotal), running: true, used: row.diskUsed, total: row.diskTotal });
+    let rx = null, tx = null, netV = null;
+    if (prev && t > prev.ts && row.netRx != null && row.netTx != null && prev.netRx != null && prev.netTx != null) {
+      const dt = (t - prev.ts) / 1000;
+      rx = Math.max(0, row.netRx - prev.netRx) / dt;
+      tx = Math.max(0, row.netTx - prev.netTx) / dt;
+      netV = rx + tx;
+    }
+    view.net.push({ t, v: netV, running: true, rx, tx });
+    prev = row;
+  }
+  return view;
+}
+
+function mergeLiveIntoView(range) {
+  for (const key of ["cpu", "mem", "disk", "net"]) {
+    const view = resourceView[key];
+    const last = view.length ? view[view.length - 1].t : 0;
+    for (const s of resourceHistory[key]) if (s.t > last) view.push({ ...s });
+    const from = Date.now() - RESOURCE_RANGES[range].ms;
+    while (view.length && view[0].t < from) view.shift();
+  }
+}
+
+async function loadResourceHistory(range) {
+  const id = resourceHistory.id;
+  if (!id) return;
+  try {
+    const res = await api(`/api/projects/${id}/resources/history?range=${range}`);
+    if (resourceRange !== range || resourceHistory.id !== id) return;
+    resourceView = historyToView(res.samples || []);
+    mergeLiveIntoView(range);
+    resourceViewLoading = false;
+    paintResourceGraph(lastResource);
+  } catch {
+    if (resourceRange === range) {
+      resourceViewLoading = false;
+      paintResourceGraph(lastResource);
+    }
+  }
+}
+
+function setResourceRange(range) {
+  if (!RESOURCE_RANGES[range] || range === resourceRange) return;
+  resourceRange = range;
+  const host = $("#detail-graph");
+  if (host) {
+    host.querySelectorAll("[data-rg-range]").forEach((b) => b.classList.toggle("on", b.dataset.rgRange === range));
+    const axis = RESOURCE_RANGES[range].axis.map((l) => `<span>${l}</span>`).join("");
+    host.querySelectorAll(".rg-axis").forEach((el) => { el.innerHTML = axis; });
+  }
+  if (range === "3m") {
+    resourceViewLoading = false;
+    paintResourceGraph(lastResource);
+    return;
+  }
+  resourceView = { cpu: [], mem: [], disk: [], net: [] };
+  resourceViewLoading = true;
+  paintResourceGraph(lastResource);
+  void loadResourceHistory(range);
+}
+
+function startResourceWatch(id) {
+  stopResourceWatch();
+  resourceRange = "3m";
+  resourceView = { cpu: [], mem: [], disk: [], net: [] };
+  resourceViewLoading = false;
+  resourceHistory = { id, cpu: [], mem: [], disk: [], net: [] };
+  resourceHover.clear();
+  lastResource = null;
+  netLast = null;
+  const host = $("#detail-graph");
+  if (host) {
+    host.innerHTML = resourcePanelHtml();
+    host.querySelectorAll("[data-rg-range]").forEach((b) => { b.onclick = () => setResourceRange(b.dataset.rgRange); });
+    host.querySelectorAll("canvas.rg-canvas").forEach((canvas) => {
+      const key = canvas.id.slice("rg-".length);
+      canvas.addEventListener("pointermove", (e) => {
+        const rect = canvas.getBoundingClientRect();
+        resourceHover.set(key, { x: e.clientX - rect.left, clientX: e.clientX, clientY: e.clientY });
+        paintResourceGraph(lastResource);
+      });
+      canvas.addEventListener("pointerleave", () => {
+        resourceHover.delete(key);
+        hideResourceTip(key);
+        paintResourceGraph(lastResource);
+      });
+    });
+  }
+  paintResourceGraph(null);
+  const tick = async () => {
+    if (location.hash !== `#project/${id}`) { stopResourceWatch(); return; }
+    await pollResources(id);
+  };
+  resourceTimer = setInterval(tick, 1500);
+  tick();
+}
+
 async function openDetail(id) {
   showDetailSkeleton();
-  openRoutes(id);
-  openPorts(id);
-  openLinks(id);
+  startResourceWatch(id);
+  loadLatestTools();
+  clearInterval(latestTimer);
+  latestTimer = setInterval(() => {
+    if (location.hash === `#project/${id}`) loadLatestTools();
+    else clearInterval(latestTimer);
+  }, 5 * 60_000);
+  openConnections(id);
   openNet(id);
   await renderDetail(id);
   clearInterval(detailTimer);
@@ -1745,23 +2171,8 @@ function paintDetail(d) {
               ? `<span style="color:var(--warn)">not isolated</span> <span class="hint">${escapeHtml(d.live.address || d.live.network)} · direct internet — Rebuild to isolate</span>`
               : "—"}</dd>
           <dt>Uptime</dt><dd>${fmtDur(r.uptimeSec)}</dd>
-          <dt>Image</dt><dd>${escapeHtml(d.image)}</dd>
           <dt>Active terminal</dt><dd>${term}</dd>
           <dt>tmux</dt><dd>${d.tmux.sessions ?? 0} session · ${d.tmux.windows ?? 0} window(s)</dd>
-        </dl>
-      </div>
-
-      <div class="panel stat">
-        <h3>Resources</h3>
-        <dl>
-          <dt>CPU</dt><dd>${r.cpuPercent != null ? r.cpuPercent.toFixed(1) + "%" : "—"} of ${r.cpus ?? "?"} vCPU</dd>
-          <dt>Memory</dt><dd class="metered">${fmtBytes(r.memoryUsageBytes)} / ${fmtBytes(r.memoryLimitBytes)} ${bar(r.memoryUsageBytes, r.memoryLimitBytes)}
-            ${["running", "stopped"].includes(state) && !powerBusy.has(d.id)
-              ? `<button class="mini" data-memory="${d.id}" data-name="${d.name}" data-mb="${r.memoryMB ?? ""}" data-running="${state === "running" ? 1 : 0}" title="Give this VM more (or less) memory">Change…</button>` : ""}</dd>
-          <dt>Disk</dt><dd class="metered">${fmtBytes(r.diskUsedBytes)} / ${fmtBytes(r.diskTotalBytes)} ${bar(r.diskUsedBytes, r.diskTotalBytes)}</dd>
-          <dt>Workdir size</dt><dd>${fmtBytes(r.workdirBytes)}</dd>
-          <dt>Processes</dt><dd>${r.numProcesses ?? "—"}</dd>
-          <dt>Network</dt><dd>↓ ${fmtBytes(r.networkRxBytes)} · ↑ ${fmtBytes(r.networkTxBytes)}</dd>
         </dl>
       </div>
 
