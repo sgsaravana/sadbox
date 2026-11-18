@@ -7,7 +7,7 @@
 class Sadbox < Formula
   desc "Supervisor for microVM AI-agent sandboxes"
   homepage "https://github.com/sgsaravana/sadbox"
-  version "0.6.6"
+  version "0.6.7"
   license "MIT"
 
   depends_on "container" if Hardware::CPU.arm?
@@ -15,12 +15,12 @@ class Sadbox < Formula
   depends_on :macos
 
   on_arm do
-    url "https://github.com/sgsaravana/sadbox/releases/download/v0.6.6/sadbox-darwin-arm64"
-    sha256 "40179d0fdabf7f2f98d3aef055adf11bec70d557dcfbf6d12e95f0fb32682844"
+    url "https://github.com/sgsaravana/sadbox/releases/download/v0.6.7/sadbox-darwin-arm64"
+    sha256 "989bd2e1c1d9eff59ababbb29516170637d216fcf3dc8b32b7eea1530bbe5d9d"
   end
   on_intel do
-    url "https://github.com/sgsaravana/sadbox/releases/download/v0.6.6/sadbox-darwin-x64"
-    sha256 "4b8b022850724ba0cf58339435a13c9fa1c6cf30e06eed67dbb2a23e212e79e2"
+    url "https://github.com/sgsaravana/sadbox/releases/download/v0.6.7/sadbox-darwin-x64"
+    sha256 "b79c646a87db42204c2f91f796cdcffd5ff2febe6de1d336eed7c5fdb51b000c"
   end
 
   def install
