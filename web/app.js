@@ -21,8 +21,21 @@ let projectNames = {};  // id → name, for showing which projects use an item
 // hashes: #projects (list) · #vaults · #project/<id> (detail)
 let detailTimer = null;
 let openCreateNext = false; // set by the Home CTA so #projects opens the create form
+
+// ---- mobile navigation drawer ----
+function setNav(open) {
+  document.body.classList.toggle("nav-open", open);
+  $("#nav-toggle")?.setAttribute("aria-expanded", String(open));
+}
+$("#nav-toggle").onclick = () => setNav(!document.body.classList.contains("nav-open"));
+$("#nav-close").onclick = () => setNav(false);
+$("#nav-scrim").onclick = () => setNav(false);
+$("#sidenav").addEventListener("click", (e) => { if (e.target.closest("a")) setNav(false); });
+addEventListener("keydown", (e) => { if (e.key === "Escape") setNav(false); });
+
 function route() {
   if (location.hash === "#secrets") { location.replace("#vaults"); return; } // the page's old name
+  setNav(false);
   const hash = location.hash.slice(1);
   const [head, arg] = hash.split("/");
   clearInterval(detailTimer); detailTimer = null;

@@ -8,11 +8,18 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="stylesheet" href="/style.css">
 <body>
+  <header class="mobile-bar">
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-label="Open navigation"
+      aria-controls="sidenav" aria-expanded="false"><span></span><span></span><span></span></button>
+    <a class="mobile-brand" href="#home"><span class="logo">▪</span> SadBox</a>
+  </header>
+  <div class="nav-scrim" id="nav-scrim"></div>
   <div class="shell">
-    <aside class="sidenav">
+    <aside class="sidenav" id="sidenav">
       <div class="brand">
         <span class="logo">▪</span>
         <div><strong>SadBox</strong><span class="tag">Micro VM Agents</span></div>
+        <button type="button" class="nav-close" id="nav-close" aria-label="Close navigation">✕</button>
       </div>
       <nav>
         <a href="#home" class="nav-item" data-view="home">
