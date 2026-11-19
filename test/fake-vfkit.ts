@@ -53,6 +53,10 @@ function quit(code = 0) {
   try { const rest = value("--restful-uri").replace(/^unix:\/\//, ""); if (rest) rmSync(rest, { force: true }); } catch {}
   process.exit(code);
 }
+// a supervisor that has lost the REST socket asks vfkit to stop: leave cleanly,
+// taking the stand-in guest agent with it
+process.on("SIGTERM", () => quit());
+process.on("SIGINT", () => quit());
 const proxy = net.createServer((c) => {
   c.on("error", () => {});
   const up = net.connect(agentSock, () => { c.pipe(up).pipe(c); });

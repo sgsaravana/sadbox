@@ -58,6 +58,60 @@ const readSpec = (ref: string) => readSpecAt(file(ref, "vm.json"));
 const writeSpec = (ref: string, spec: VmSpec) => writeSpecAt(file(ref, "vm.json"), spec);
 const pidOf = (ref: string) => pidOfAt(file(ref, "vfkit.pid"));
 
+/** The vfkit processes that still carry this VM on their command line. The pid
+ *  file alone is not enough: a failed boot overwrites it with the pid that just
+ *  exited, while an older vfkit may still hold the disk. Exported for tests. */
+export function vmmPids(ref: string): number[] {
+  const r = Bun.spawnSync(["ps", "-axww", "-o", "pid=,command="], { stdout: "pipe", stderr: "ignore" });
+  if (r.exitCode !== 0) return [];
+  const marker = `sadbox.hostname=${ref}`;
+  const bin = vfkitBin();
+  const out: number[] = [];
+  for (const line of new TextDecoder().decode(r.stdout).split("\n")) {
+    const m = line.trimStart().match(/^(\d+)\s+(.*)$/);
+    if (!m) continue;
+    const at = m[2].indexOf(marker);
+    if (at < 0) continue;
+    // a whole ref, not a prefix of a longer one (sadbox-a vs sadbox-ab)
+    const after = m[2].charAt(at + marker.length);
+    if (after && after !== " ") continue;
+    // only the VMM, never a shell running `grep sadbox.hostname=…` at the time
+    if (!m[2].includes("vfkit") && !m[2].includes(bin)) continue;
+    const pid = Number(m[1]);
+    if (pid && pid !== process.pid) out.push(pid);
+  }
+  return out;
+}
+
+/** Every pid that may still be this VM's VMM: the recorded one and any that
+ *  lost their pid file. */
+function vmPids(ref: string): number[] {
+  return [...new Set([pidOf(ref), ...vmmPids(ref)])].filter((p): p is number => !!p);
+}
+
+async function allGone(pids: number[], ms: number): Promise<boolean> {
+  for (const until = Date.now() + ms; pids.some((p) => pidAlive(p)) && Date.now() < until;) await Bun.sleep(50);
+  return !pids.some((p) => pidAlive(p));
+}
+
+/** Stop a VMM process: politely, then not. True when it is gone. */
+async function terminate(pid: number, graceMs = 5_000): Promise<boolean> {
+  if (!pidAlive(pid)) return true;
+  try { process.kill(pid, "SIGTERM"); } catch {}
+  if (await exitedWithin(pid, graceMs)) return true;
+  try { process.kill(pid, "SIGKILL"); } catch {}
+  return exitedWithin(pid, 3_000);
+}
+
+/** No VM may boot while an older vfkit still holds its disk: Virtualization
+ *  refuses the second attachment ("storage device attachment is invalid"), or
+ *  — worse — runs a second guest against the same filesystem. */
+async function clearStaleVmm(ref: string): Promise<void> {
+  for (const pid of vmPids(ref)) {
+    if (!(await terminate(pid))) throw new Error(`the old vfkit for ${ref} (pid ${pid}) would not stop`);
+  }
+}
+
 const clients = new Map<string, AgentClient>();
 const client = (ref: string) => {
   let c = clients.get(ref);
@@ -77,9 +131,9 @@ async function api(ref: string, method: string, path: string, timeoutMs = 2000, 
 }
 
 /** Up: vfkit answers, and says the VM is running. */
-async function isRunning(ref: string): Promise<boolean> {
+async function isRunning(ref: string, timeoutMs = 1500): Promise<boolean> {
   if (!existsSync(sock(ref, "api.sock"))) return false;
-  try { return (await api(ref, "GET", "vm/state", 1500))?.state === "VirtualMachineStateRunning"; } catch { return false; }
+  try { return (await api(ref, "GET", "vm/state", timeoutMs))?.state === "VirtualMachineStateRunning"; } catch { return false; }
 }
 
 // ---- boot ----
@@ -112,6 +166,8 @@ async function boot(ref: string): Promise<void> {
   if (!spec) throw new Error(`no VM ${ref}`);
   const problems = vmmProblems();
   if (problems.length) throw new Error(problems.map((p) => p.fix ? `${p.error} — ${p.fix}` : p.error).join("; "));
+  // never a second VMM on the same disk
+  await clearStaleVmm(ref);
   rmSync(sockDir(ref), { recursive: true, force: true });
   mkdirSync(sockDir(ref), { recursive: true, mode: 0o700 });
 
@@ -119,6 +175,7 @@ async function boot(ref: string): Promise<void> {
 
   const announced = awaitAnnouncement(sock(ref, "announce.sock"));
   rmSync(file(ref, "console.log"), { force: true });
+  rmSync(file(ref, "vfkit.log"), { force: true });
   const pid = detached(vfkitBin(), vfkitArgs(ref, spec, plan.shares), file(ref, "vfkit.log"));
   writeFileSync(file(ref, "vfkit.pid"), `${pid}\n`);
   let done = false;
@@ -229,8 +286,7 @@ export const vzDriver: ProjectDriver = {
       await boot(ref);
     } catch (e) {
       closeBridge(ref);
-      const pid = pidOf(ref);
-      if (pid) try { process.kill(pid, "SIGKILL"); } catch {}
+      for (const pid of vmPids(ref)) if (pidAlive(pid)) try { process.kill(pid, "SIGKILL"); } catch {}
       rmSync(vmDir(ref), { recursive: true, force: true });
       throw e;
     }
@@ -238,8 +294,11 @@ export const vzDriver: ProjectDriver = {
 
   async destroy(ref) {
     restore();
-    if (!existsSync(vmDir(ref))) return;
+    if (!existsSync(vmDir(ref)) && !vmPids(ref).length) return;
     await this.stop(ref).catch(() => {});
+    // a stop the agent refused (or a pid file that named the wrong process)
+    // must not leave a VMM behind once its disk is gone
+    for (const pid of vmPids(ref)) await terminate(pid, 2_000).catch(() => {});
     closeBridge(ref);
     clients.delete(ref);
     rmSync(vmDir(ref), { recursive: true, force: true });
@@ -249,7 +308,9 @@ export const vzDriver: ProjectDriver = {
   async start(ref) {
     restore();
     if (!readSpec(ref)) throw new Error(`no VM ${ref}`);
-    if (await isRunning(ref)) return;
+    // vfkit's REST socket can be gone or wedged while its process still holds
+    // the disk: give it a slower second chance, then let boot() clear it
+    if (await isRunning(ref, 5_000)) return;
     const spec = readSpec(ref)!;
     if (spec.socket && !bridges.has(ref)) openBridge(ref, spec.socket);
     await boot(ref);
@@ -257,16 +318,21 @@ export const vzDriver: ProjectDriver = {
 
   async stop(ref) {
     restore();
-    const pid = pidOf(ref);
-    if (!(await isRunning(ref)) && !pidAlive(pid)) return;
-    // politely: the agent shuts everything down and syncs the disk
-    await client(ref).poweroff(5_000).catch(() => {});
-    if (await exitedWithin(pid, 15_000)) return;
+    // the pid file can name a process that already exited while an older
+    // vfkit is still running — stop them all
+    const pids = vmPids(ref);
+    if (!pids.length) return;
+    // politely: the agent shuts everything down and syncs the disk. Ask it even
+    // when the REST API is unreachable — only the VMM's socket may be wedged.
+    const asked = await client(ref).poweroff(5_000).then(() => true).catch(() => false);
+    if (asked && await allGone(pids, 15_000)) return;
     // the guest did not: ask the VMM, then make it
-    await api(ref, "POST", "vm/state", 5_000, { state: "HardStop" }).catch(() => {});
-    if (await exitedWithin(pid, 5_000)) return;
-    try { if (pid) process.kill(pid, "SIGKILL"); } catch {}
-    if (await exitedWithin(pid, 3_000)) return;
+    if (await isRunning(ref)) {
+      await api(ref, "POST", "vm/state", 5_000, { state: "HardStop" }).catch(() => {});
+      if (await allGone(pids, 5_000)) return;
+    }
+    for (const pid of pids) { try { process.kill(pid, "SIGKILL"); } catch {} }
+    if (await allGone(pids, 3_000)) return;
     throw new Error("could not stop the VM (it is not responding)");
   },
 
