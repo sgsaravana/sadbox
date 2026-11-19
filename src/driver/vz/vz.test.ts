@@ -5,10 +5,12 @@
 // Skipped where Go is not installed.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import net from "node:net";
 import { join, resolve } from "node:path";
 import { config } from "../../config";
-import { vzDriver as driver, parseClock, planMounts, vfkitArgs, type VmSpec } from "./index";
+import { vzDriver as driver, parseClock, planMounts, vfkitArgs, vmmPids, type VmSpec } from "./index";
+import { pidAlive } from "../vm";
 import { diskPath, imageDir } from "./images";
 import { kernelImageFiles } from "../../assets";
 
@@ -89,6 +91,23 @@ describe("planning a VM", () => {
     expect(parseClock("1-00:00:01")).toBe(86_401_000_000);
     expect(parseClock("nonsense")).toBeNull();
   });
+
+  test("a VMM that lost its pid file is found by its command line", async () => {
+    const orphan = "sadbox-orphancheck";
+    // a stand-in VMM: its command line carries the marker vfkit gets from vfkitArgs
+    const p = Bun.spawn(["/bin/sh", "-c", "sleep 2 & wait", "vfkit", `sadbox.hostname=${orphan}`], {
+      stdout: "ignore", stderr: "ignore",
+    });
+    try {
+      await Bun.sleep(50);
+      expect(vmmPids(orphan)).toContain(p.pid);
+      // one ref must not match a longer one that starts the same way
+      expect(vmmPids("sadbox-orphan")).not.toContain(p.pid);
+    } finally {
+      p.kill("SIGKILL");
+      await p.exited;
+    }
+  });
 });
 
 describe.skipIf(!go)("the vz driver, with a stand-in VMM", () => {
@@ -114,6 +133,26 @@ describe.skipIf(!go)("the vz driver, with a stand-in VMM", () => {
     const b = await driver.execCaptureBytes(ref, "printf ab");
     expect(Buffer.from(b.stdout).toString()).toBe("ab");
   });
+
+  test("a VMM that lost its REST socket is replaced, not duplicated", async () => {
+    const pidFile = join(config.dataDir, "vz", "vms", ref, "vfkit.pid");
+    const oldPid = Number(readFileSync(pidFile, "utf8").trim());
+    expect(pidAlive(oldPid)).toBe(true);
+    // what a wedged vfkit looks like: the process still holds the disk, its API socket is gone
+    const sockDir = createHash("sha256").update(ref).digest("hex").slice(0, 12);
+    rmSync(join(tmp, "run", sockDir, "api.sock"), { force: true });
+
+    await driver.start(ref);
+
+    const newPid = Number(readFileSync(pidFile, "utf8").trim());
+    expect(newPid).not.toBe(oldPid);
+    expect(pidAlive(oldPid)).toBe(false);
+    // exactly the new one is left; a second vfkit on the same disk is the bug
+    const pids = vmmPids(ref);
+    expect(pids).toContain(newPid);
+    expect(pids).not.toContain(oldPid);
+    expect((await driver.exec(ref, ["echo", "back again"])).stdout).toBe("back again\n");
+  }, 30_000);
 
   test("the host-dials-in socket reaches a socket in the guest", async () => {
     const echo = net.createServer((c) => c.pipe(c)).listen(guestSock());
