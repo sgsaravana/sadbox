@@ -174,8 +174,9 @@ describe.skipIf(!go)("the vz driver, with a stand-in VMM", () => {
     expect(s?.cpuUsageUsec).toBeGreaterThanOrEqual(0);
   });
 
-  test("memory can change only while stopped", async () => {
+  test("memory and CPUs can change only while stopped", async () => {
     await expect(driver.setMemory(ref, 3072)).rejects.toThrow(/must be stopped/);
+    await expect(driver.setCpus(ref, 3)).rejects.toThrow(/must be stopped/);
   });
 
   test("stop powers it off through the agent; commands then say it cannot be reached", async () => {
@@ -195,12 +196,14 @@ describe.skipIf(!go)("the vz driver, with a stand-in VMM", () => {
     await driver.stop(ref); // already off: nothing to do
   }, 30_000);
 
-  test("setMemory while stopped; start boots it again with it", async () => {
+  test("setMemory/setCpus while stopped; start boots it again with them", async () => {
     await driver.setMemory(ref, 3072);
+    await driver.setCpus(ref, 3);
     await driver.start(ref);
-    expect(await driver.inspect(ref)).toMatchObject({ state: "running", memoryLimitBytes: 3072 * 1024 * 1024 });
+    expect(await driver.inspect(ref)).toMatchObject({ state: "running", cpus: 3, memoryLimitBytes: 3072 * 1024 * 1024 });
     const args = readFileSync(join(config.dataDir, "vz", "vms", ref, "console.log"), "utf8");
     expect(args).toContain("--memory 3072");
+    expect(args).toContain("--cpus 3");
     expect((await driver.exec(ref, ["echo", "back"])).stdout).toBe("back\n");
     await driver.start(ref); // already up: nothing to do
   }, 30_000);

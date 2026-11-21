@@ -6,7 +6,7 @@ import { staticRoutes, aceFiles } from "../assets";
 import { getDriver } from "../driver";
 import type { TerminalHandle } from "../driver/types";
 import { addBinding, applyItem, createItem, deleteBinding, deleteItem, getItem, injectVault, listItems, projectVaultView, revealItem, revokeFetchGrant, setItemProjects, setProjectItems, updateItem } from "../core/vault";
-import { connectSyncFolder, listProjects, setGitRemote, createProject, destroyProject, getProject, projectDetails, projectEvents, projectResourceHistory, projectResources, refFor, projectsWithLiveState, rebuildProject, setProjectApp, setProjectMemory, startProject, stopProject } from "../core/projects";
+import { connectSyncFolder, listProjects, setGitRemote, createProject, destroyProject, getProject, projectDetails, projectEvents, projectResourceHistory, projectResources, refFor, projectsWithLiveState, rebuildProject, setProjectApp, setProjectCpus, setProjectMemory, startProject, stopProject } from "../core/projects";
 import { optionalAppCatalog } from "../core/apps";
 import { syncStatus, syncProject } from "../core/sync";
 import { pushProject } from "../core/push";
@@ -244,6 +244,11 @@ export function startServer() {
         if (m && req.method === "PUT") {            // restarts the VM if it is running
           const b = await req.json();
           return json(await setProjectMemory(m[1], b.memoryMB));
+        }
+        m = p.match(/^\/api\/projects\/([\w-]+)\/cpus$/);
+        if (m && req.method === "PUT") {            // restarts the VM if it is running
+          const b = await req.json();
+          return json(await setProjectCpus(m[1], b.cpus));
         }
         m = p.match(/^\/api\/projects\/([\w-]+)\/sync-folder$/);
         if (m && req.method === "PUT") {            // connect a local folder to a cloned project

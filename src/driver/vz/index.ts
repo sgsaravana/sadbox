@@ -343,6 +343,13 @@ export const vzDriver: ProjectDriver = {
     writeSpec(ref, { ...spec, memoryMB });
   },
 
+  async setCpus(ref, cpus) {
+    const spec = readSpec(ref);
+    if (!spec) throw new Error(`no VM ${ref}`);
+    if (await isRunning(ref)) throw new Error("the VM must be stopped to change its CPUs");
+    writeSpec(ref, { ...spec, cpus });
+  },
+
   async inspect(ref): Promise<ProjectInfo> {
     restore();
     const spec = readSpec(ref);

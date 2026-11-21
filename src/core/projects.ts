@@ -8,7 +8,7 @@ import { LONG_TASK_MS, type ProjectInfo, type ProjectStats } from "../driver/typ
 import { injectVault, setProjectItems, purgeProjectVault } from "./vault";
 import { repeatableGuestExec } from "./guestops";
 import { recordResourceSample, resourceSamples, RESOURCE_RANGE_MS } from "./resources";
-import { getSettings, validMemoryMB } from "./settings";
+import { getSettings, validCpus, validMemoryMB } from "./settings";
 import { installGuestProxy, openProjectSocket, closeProjectSocket, redialProjectSocket } from "../net/proxy";
 import { forgetGuestTools, startGuestRelay } from "../net/guest";
 import { purgeProjectNet } from "../net/rules";
@@ -49,6 +49,7 @@ export interface ProjectRow {
   sync_path: string | null;   // local folder connected to a cloned project (sync target only)
   branch: string | null;      // checked out in the VM when last seen (null: never asked)
   memory_mb: number | null;   // the VM's memory (null: created before this was recorded)
+  cpus: number | null;        // the VM's vCPUs (null: created before this was recorded)
   net_cutoff: number;         // 1 = all egress refused by the proxy (see net/cutoff.ts)
   history_mounted: number;    // 1 = agent history is mounted from the store (core/history.ts)
   empty: number;              // 1 = no folder, no remote: an empty workdir to clone into
@@ -298,7 +299,8 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   const isolated = config.network === "none";
   forgetGuestTools(ref); // a new VM under this name has a fresh filesystem
   const memoryMB = p.memory_mb ?? s.defaultMemoryMB; // the project's own, once it has one
-  db.query("UPDATE projects SET memory_mb = ? WHERE id = ?").run(memoryMB, p.id);
+  const cpus = p.cpus ?? s.defaultCpus;              // …and its own vCPUs
+  db.query("UPDATE projects SET memory_mb = ?, cpus = ? WHERE id = ?").run(memoryMB, cpus, p.id);
   // a new VM starts on its own branch (an empty one on none: its workdir is no repository)
   if (empty) db.query("UPDATE projects SET branch = NULL WHERE id = ?").run(p.id);
   else noteBranch(p.id, branchFor(p.name));
@@ -310,7 +312,7 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
   const mounts = shared ? prepareHistory(p.name) : [];
   try {
     await driver.create(ref, p.image, {
-      cpus: s.defaultCpus, memoryMB, diskGB: s.defaultDiskGB, network: config.network,
+      cpus, memoryMB, diskGB: s.defaultDiskGB, network: config.network,
       socket: isolated ? { host: openProjectSocket(p.id), guest: config.guestCarrierSocket } : undefined,
       mounts,
     });
@@ -522,7 +524,7 @@ export async function createProject(opts: {
     db.query(
       `UPDATE projects SET image = ?, state = 'creating', source_path = ?, source_branch = NULL,
          base_sha = NULL, last_synced_sha = NULL, apps = ?, optional_apps = ?, git_remote = ?,
-         git_token_enc = NULL, sync_path = NULL, branch = NULL, memory_mb = NULL,
+         git_token_enc = NULL, sync_path = NULL, branch = NULL, memory_mb = NULL, cpus = NULL,
          net_cutoff = 0, history_mounted = 0, empty = ?, error = NULL,
          created_at = datetime('now')
        WHERE id = ?`,
@@ -631,7 +633,7 @@ export async function projectResources(id: string) {
   const memoryLimitBytes = p.memory_mb ? p.memory_mb * 1024 * 1024 : info?.memoryLimitBytes ?? null;
   if (!running) {
     return {
-      running: false, state, cpus: info?.cpus ?? null, cpuPercent: null, numProcesses: null,
+      running: false, state, cpus: info?.cpus ?? p.cpus ?? null, cpuPercent: null, numProcesses: null,
       memoryUsageBytes: null, memoryLimitBytes, diskUsedBytes: null, diskTotalBytes: null, pending: false,
     };
   }
@@ -653,7 +655,7 @@ export async function projectResources(id: string) {
     diskUsed: diskUsedBytes, diskTotal: diskTotalBytes, netRx, netTx,
   });
   return {
-    running: true, state, cpus: info?.cpus ?? null,
+    running: true, state, cpus: info?.cpus ?? p.cpus ?? null,
     cpuPercent: live.cpuPercent,
     numProcesses: live.stats?.numProcesses ?? null,
     memoryUsageBytes: memoryUsed,
@@ -754,13 +756,14 @@ async function loadDetails(id: string) {
     git_remote: p.git_remote,
     has_git_token: hasGitToken(p),
     net_cutoff: p.net_cutoff === 1,
+    cpus: p.cpus,                       // what the project is set to (the running VM may still report the old count)
     error: p.error,
     created_at: p.created_at,
     partial,
     unresponsive,
     live: info,
     resources: {
-      cpus: info?.cpus ?? null,
+      cpus: info?.cpus ?? p.cpus ?? null,
       cpuPercent,
       memoryUsageBytes: stats?.memoryUsageBytes ?? null,
       // the runtime's own record (info) lags behind a memory change made here
@@ -1133,6 +1136,39 @@ export async function setProjectMemory(id: string, memory: unknown) {
   }
   logEvent(id, "vm.memory", `${memoryMB} MB` + (wasRunning ? " · restarted" : "") + (applied === false ? " · the VM still reports its old size" : ""));
   return { id, state: getProject(id)!.state, memoryMB, restarted: wasRunning, applied };
+}
+
+/** Give a project's VM a different number of vCPUs. A VM takes its count when
+ *  it boots, so a running one is shut down and started again — exactly as for
+ *  memory: what was running ends, everything on its disk stays. */
+export async function setProjectCpus(id: string, cpus: unknown) {
+  const count = validCpus(cpus);
+  const p = getProject(id);
+  if (!p || p.state === "destroyed") throw new Error("project not found");
+  if (changing.has(id) || !["running", "stopped"].includes(p.state)) throw new Error("this project is busy — try again in a moment");
+  const ref = refFor(p.name);
+  const before = await driver.inspect(ref);
+  if (before.state === "unknown") throw new Error("this project's VM no longer exists — use Rebuild to recreate it from its source");
+
+  const wasRunning = before.state === "running";
+  if (wasRunning) await stopProject(id);
+  try {
+    await driver.setCpus(ref, count);
+    db.query("UPDATE projects SET cpus = ? WHERE id = ?").run(count, id);
+  } finally {
+    // back up either way — with the new count, or as it was
+    if (wasRunning) await startProject(id);
+  }
+
+  // ask the guest itself: the runtime's own record can lag behind the edit
+  let applied: boolean | null = null;
+  if (wasRunning) {
+    const r = await driver.exec(ref, ["nproc"], { timeoutMs: QUERY_TIMEOUT_MS }).catch(() => null);
+    const n = r?.exitCode === 0 ? Number(r.stdout.trim()) : NaN;
+    if (Number.isInteger(n) && n > 0) applied = n === count;
+  }
+  logEvent(id, "vm.cpus", `${count} vCPU` + (wasRunning ? " · restarted" : "") + (applied === false ? " · the VM still reports its old count" : ""));
+  return { id, state: getProject(id)!.state, cpus: count, restarted: wasRunning, applied };
 }
 
 // The branch each VM has checked out, for the projects list. Asking a VM costs

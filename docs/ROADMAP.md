@@ -17,7 +17,7 @@ All on Apple silicon + macOS 26, through the Apple `container` driver
 | De-risk spikes | A (terminal), B (image/workdir), C (sync): all passed 2026-09-15 (`spikes/`) |
 | Supervisor | Bun + TypeScript single binary, SQLite, REST + WS API, `ProjectDriver` boundary |
 | Guest image | One Dockerfile (Debian trixie), toolchain baked in (Bun, node + npm via nvm, Claude Code, omp, opencode, tmux), toolchain shown on the detail page; rebuilt automatically when its recipe changes |
-| Projects | Create from a local git folder or a git URL; rebuild; stop/start; idle timeouts; per-VM memory change; default CPU/memory/disk in Settings |
+| Projects | Create from a local git folder or a git URL; rebuild; stop/start; idle timeouts; per-VM CPU and memory change; default CPU/memory/disk in Settings |
 | Terminal | xterm.js ⇄ WS ⇄ PTY ⇄ `container exec` ⇄ tmux, one browser tab per project |
 | Secrets | Encrypted at rest (AES-256-GCM, data-dir keyfile), assigned per project, delivered as env files |
 | Sync-back | git-bundle sync to the source folder, including uncommitted work; GitHub-sourced projects can connect to a local folder |

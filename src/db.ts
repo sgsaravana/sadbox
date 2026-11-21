@@ -55,6 +55,9 @@ for (const [col, ddl] of [["git_remote", "git_remote TEXT"], ["git_token_enc", "
   // memory_mb: the VM's memory, per project (NULL on rows from before it was
   // recorded — those VMs were created with whatever the default was then)
   ["memory_mb", "memory_mb INTEGER"],
+  // cpus: the VM's vCPUs, per project (NULL on older rows; the driver's own
+  // configuration is used then, or the default at the next create/rebuild)
+  ["cpus", "cpus INTEGER"],
   // branch: the branch the VM had checked out when last seen (NULL: never asked)
   ["branch", "branch TEXT"],
   // net_cutoff: 1 = the proxy refuses every request from this VM (one-click "internet off")
