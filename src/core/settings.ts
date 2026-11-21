@@ -21,6 +21,15 @@ export function validMemoryMB(v: unknown): number {
   return n;
 }
 
+/** A vCPU count someone asked for, checked. Overcommitting the host is allowed
+ *  (the hypervisor time-slices them), as the default settings already do. */
+export function validCpus(v: unknown): number {
+  const n = Number(v);
+  const [lo, hi] = LIMITS.cpus;
+  if (!Number.isInteger(n) || n < lo || n > hi) throw new Error(`CPUs must be a whole number between ${lo} and ${hi}`);
+  return n;
+}
+
 export function getSettings(): Settings {
   const rows = db.query<{ key: string; value: string }, []>("SELECT key, value FROM settings").all();
   const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));

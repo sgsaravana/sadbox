@@ -55,6 +55,10 @@ case "$1" in
   # run against wherever the test happened to be started from.
   exec) case " $* " in *" sadbox-stuck "*) exec sleep 30;; esac # a VM that never answers
         for last; do :; done
+        if [ "$last" = nproc ]; then
+          sed -n 's/.*"cpus":\\([0-9]*\\).*/\\1/p' "${containerData}/containers/$2/runtime-configuration.json" 2>/dev/null | head -1
+          exit 0
+        fi
         case "$last" in *"/home/agent/workdir"*|*"/usr/local/lib/sadbox"*) ;; *) echo "stub: script does not target the workdir or the guest tools" >&2; exit 97;; esac
         cd "${workdir}" || exit 98
         # tmux is stubbed out: the snippets must never reach a tmux on this machine

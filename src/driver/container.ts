@@ -262,6 +262,24 @@ export const containerDriver: ProjectDriver = {
     }
   },
 
+  async setCpus(ref, cpus) {
+    if ((await this.inspect(ref)).state === "running") throw new Error("the VM must be stopped to change its CPUs");
+    const dir = join(config.containerDataDir, "containers", ref);
+    const field = /("cpus"\s*:\s*)\d+/g;
+    const edits: { path: string; text: string }[] = [];
+    for (const name of ["config.json", "runtime-configuration.json"]) {
+      const path = join(dir, name);
+      const text = await readFile(path, "utf8").catch(() => null);
+      // a textual edit, so nothing else in the file is reformatted
+      if (text == null || !text.match(field)) throw new Error(`cannot change this VM's CPUs in place (${name} is not as expected) — Rebuild applies it instead`);
+      edits.push({ path, text: text.replace(field, `$1${cpus}`) });
+    }
+    for (const { path, text } of edits) {
+      await writeFile(`${path}.sadbox-tmp`, text);
+      await rename(`${path}.sadbox-tmp`, path);
+    }
+  },
+
   async inspect(ref) {
     const r = await run(["inspect", ref]);
     if (r.exitCode !== 0) return { ref, state: "unknown" };

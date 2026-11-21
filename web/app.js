@@ -648,6 +648,7 @@ const ICON = {
   rebuild: svg(`<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>`),
   stop: svg(`<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/>`),
   start: svg(`<polygon points="7 5 19 12 7 19" fill="currentColor"/>`),
+  edit: svg(`<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>`),
   destroy: svg(`<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>`),
 };
 
@@ -698,6 +699,31 @@ async function changeMemory(id, name, currentMB, running) {
   try {
     const r = await api(`/api/projects/${id}/memory`, { method: "PUT", body: { memoryMB } });
     if (r.applied === false) alert("The setting is saved, but the VM still reports its old memory size. A Rebuild will apply it.");
+  } finally {
+    powerBusy.delete(id);
+    if (location.hash === `#project/${id}`) await renderDetail(id);
+  }
+}
+
+// Change how many vCPUs a project's VM has. A running VM restarts to take it.
+async function changeCpus(id, name, currentCpus, running) {
+  const answer = prompt(
+    `CPUs for "${name}"${currentCpus ? ` (now ${currentCpus})` : ""}.\n\n` +
+    (running
+      ? "The VM restarts to apply it: agents and terminals running in it end. Its files, installed packages and logins are kept."
+      : "It applies the next time the VM starts."),
+    String(currentCpus && currentCpus >= 2 ? currentCpus : 4));
+  if (answer == null) return;
+  const cpus = Number(answer.trim().replace(/\s*(vcpus?|cpus?)$/i, ""));
+  if (!Number.isInteger(cpus) || cpus < 1 || cpus > 16) throw new Error("Enter a whole number of CPUs, 1–16");
+  if (cpus === currentCpus) return;
+  if (running) {
+    powerBusy.set(id, "Restarting…");
+    if (lastDetail?.id === id) paintDetail(lastDetail);
+  }
+  try {
+    const r = await api(`/api/projects/${id}/cpus`, { method: "PUT", body: { cpus } });
+    if (r.applied === false) alert("The setting is saved, but the VM still reports its old CPU count. A Rebuild will apply it.");
   } finally {
     powerBusy.delete(id);
     if (location.hash === `#project/${id}`) await renderDetail(id);
@@ -770,6 +796,8 @@ document.addEventListener("click", async (e) => {
       openProjectSecrets(b.dataset.secrets, b.dataset.name || b.closest(".card")?.querySelector("h3").textContent.trim() || "project");
     } else if (b.dataset.memory) {
       await changeMemory(b.dataset.memory, b.dataset.name, Number(b.dataset.mb) || null, b.dataset.running === "1");
+    } else if (b.dataset.cpus) {
+      await changeCpus(b.dataset.cpus, b.dataset.name, Number(b.dataset.cpuCount) || null, b.dataset.running === "1");
     } else if (b.dataset.installApp) {
       await changeApp(b.dataset.installApp, b.dataset.app, true, b.dataset.label || b.dataset.app);
     } else if (b.dataset.removeApp) {
@@ -1605,7 +1633,9 @@ function resourcePanelHtml() {
           <span class="rg-label">${m.label}</span>
           ${m.key === "mem"
             ? `<span class="rg-value"><span id="rg-mem-now">—</span><span id="rg-mem-action"></span></span>`
-            : `<span id="rg-${m.key}-now" class="rg-value">—</span>`}
+            : m.key === "cpu"
+              ? `<span class="rg-value"><span id="rg-cpu-now">—</span><span id="rg-cpu-action"></span></span>`
+              : `<span id="rg-${m.key}-now" class="rg-value">—</span>`}
         </div>
         <canvas id="rg-${m.key}" class="rg-canvas" width="360" height="97"></canvas>
         <div class="rg-axis">${axis}</div>
@@ -1775,7 +1805,13 @@ function paintResourceGraph(r, redraw = true) {
   const memAction = document.getElementById("rg-mem-action");
   if (memAction) {
     memAction.innerHTML = d && ["running", "stopped"].includes(d.state) && !powerBusy.has(d.id)
-      ? `<button class="mini" data-memory="${d.id}" data-name="${escapeHtml(d.name)}" data-mb="${d.resources.memoryMB ?? ""}" data-running="${d.state === "running" ? 1 : 0}" title="Give this VM more (or less) memory">Change…</button>`
+      ? `<button class="mini" data-memory="${d.id}" data-name="${escapeHtml(d.name)}" data-mb="${d.resources.memoryMB ?? ""}" data-running="${d.state === "running" ? 1 : 0}" title="Give this VM more (or less) memory" aria-label="Change memory">${ICON.edit}</button>`
+      : "";
+  }
+  const cpuAction = document.getElementById("rg-cpu-action");
+  if (cpuAction) {
+    cpuAction.innerHTML = d && ["running", "stopped"].includes(d.state) && !powerBusy.has(d.id)
+      ? `<button class="mini" data-cpus="${d.id}" data-name="${escapeHtml(d.name)}" data-cpu-count="${d.cpus ?? d.resources.cpus ?? ""}" data-running="${d.state === "running" ? 1 : 0}" title="Give this VM more (or fewer) CPUs" aria-label="Change CPUs">${ICON.edit}</button>`
       : "";
   }
   const netMax = redraw ? niceRateMax(samples("net"), windowMs) : 0;

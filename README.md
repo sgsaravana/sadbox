@@ -983,9 +983,10 @@ over vsock instead.
   **Rebuild** and **Destroy**; the project cards on the list carry the same
   ones. **Stop** (solid red) shuts the VM down and keeps its disk — files,
   installed packages and logins — while agents and terminals in it end;
-  **Start** (blue) boots it again. **Change…** next to Memory gives that one VM more (or less) memory:
-  a running VM is shut down and booted again with the new size, so agents and
-  terminals in it end, while its files, installed packages and logins stay.
+  **Start** (blue) boots it again. **Change…** next to Memory or CPUs gives
+  that one VM more (or less) memory or more/fewer vCPUs: a running VM is shut
+  down and booted again with the new size, so agents and terminals in it end,
+  while its files, installed packages and logins stay.
   A **Rebuild** action destroys the VM and recreates it from the
   project's original source (local folder re-copied at its current HEAD, or the
   git remote re-cloned), keeping the project's vault access, network rules,
@@ -1165,6 +1166,7 @@ On a project's detail view these are three tabs of one **Access** card:
 | GET | `/api/projects/:id/net/hosts?since=` | requests per host since a timestamp (default 24 h) |
 | GET | `/api/projects/:id/sync/status` | count of uncommitted files in the VM |
 | PUT | `/api/projects/:id/memory` | `{memoryMB}` — change this VM's memory; a running VM is restarted to take it (disk kept) |
+| PUT | `/api/projects/:id/cpus` | `{cpus}` — change this VM's vCPUs; a running VM is restarted to take it (disk kept) |
 | PUT/DELETE | `/api/projects/:id/sync-folder` | connect (`{path}`) / disconnect a local folder for a project cloned from a git URL |
 | GET/PUT | `/api/projects/:id/vault` | the items a project may use, with the placeholder its VM holds for each / set them (`{itemIds}`) |
 | GET/POST | `/api/vault` | list items (no secret values) / create (`{name, value, kind?: "secret"\|"variable", type?: "string"\|"number"\|"json", mode?: "proxy"\|"fetch", inEnv?, askOnFetch?, swapUrl?, swapBody?, bindings?, projectIds?}`) |

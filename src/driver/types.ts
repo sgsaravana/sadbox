@@ -112,6 +112,9 @@ export interface ProjectDriver {
   /** Change how much memory a stopped VM boots with next time. Its disk is
    *  untouched. Throws if this backend cannot do it for that VM. */
   setMemory(ref: string, memoryMB: number): Promise<void>;
+  /** Change how many vCPUs a stopped VM boots with next time. Its disk is
+   *  untouched. Throws if this backend cannot do it for that VM. */
+  setCpus(ref: string, cpus: number): Promise<void>;
   inspect(ref: string): Promise<ProjectInfo>;
   list(): Promise<ProjectInfo[]>;
   /** Live resource usage, or null if unavailable. */
