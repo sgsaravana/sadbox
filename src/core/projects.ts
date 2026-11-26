@@ -1,4 +1,4 @@
-import { existsSync, realpathSync, statSync } from "fs";
+import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from "fs";
 import { rm } from "fs/promises";
 import { join } from "path";
 import { config } from "../config";
@@ -86,6 +86,16 @@ async function imageExists(image: string): Promise<boolean> {
   return (await driver.images.recipe(image)) !== undefined;
 }
 
+/** Is `folder` itself the root of a git repository with a commit? A folder
+ *  inside another repository, a repository with nothing committed yet, and a
+ *  plain folder are all copied as plain files instead (and committed in the VM). */
+async function sourceIsRepo(folder: string): Promise<boolean> {
+  const top = await hostGit(folder, ["rev-parse", "--show-toplevel"]);
+  if (top.code !== 0) return false;
+  try { if (realpathSync(top.out) !== realpathSync(folder)) return false; } catch { return false; }
+  return (await hostGit(folder, ["rev-parse", "--verify", "HEAD"])).code === 0;
+}
+
 /** The image a new VM boots from: the base image, first brought up to date
  *  with its recipe (so tools added to it since reach the VM). Should that build
  *  fail — offline, say — the image there is still used, and `note` says so. */
@@ -101,25 +111,36 @@ async function resolveImage(note: (msg: string) => void): Promise<string> {
   return config.baseImage; // create() will surface a clear error if it's missing
 }
 
-/** Tar up the source folder respecting .gitignore (spike B + C recipes):
- *  tracked + untracked-but-not-ignored files, plus .git for full history —
- *  but never an env file, tracked or not (envfiles.ts). Returns the env files
- *  the repository tracks too: missing from the copy, they must be marked so
- *  git in the VM does not take them for deleted (see markEnvFilesSkipped).
+/** Tar up the source folder (spike B + C recipes). A repository: tracked +
+ *  untracked-but-not-ignored files, plus .git for full history. Any other
+ *  folder (plain, or a repository with no commit yet) is copied as every file
+ *  it holds. Never an env file, tracked or not (envfiles.ts). Returns the env
+ *  files the repository tracks too: missing from the copy, they must be marked
+ *  so git in the VM does not take them for deleted (see markEnvFilesSkipped),
+ *  and whether the folder was copied as plain files (provisionVM commits them
+ *  in the VM so its workdir is still a repository).
  *  The name list is materialized first — tar reads it from stdin (-T -)
  *  while the archive streams out on stdout. */
-export async function tarSource(sourcePath: string): Promise<{ bytes: Uint8Array; trackedEnv: string[] }> {
+export async function tarSource(sourcePath: string): Promise<{ bytes: Uint8Array; trackedEnv: string[]; plain: boolean }> {
+  const plain = !(await sourceIsRepo(sourcePath));
   const ls = async (...args: string[]) => {
     const list = Bun.spawn(["git", ...gitConfigFor(sourcePath), "-C", sourcePath, "ls-files", "-z", ...args], { stdout: "pipe", stderr: "ignore" });
     const out = await new Response(list.stdout).text();
     if ((await list.exited) !== 0) throw new Error("git ls-files failed on source folder");
     return out.split("\0").filter(Boolean);
   };
-  const tracked = await ls("-c");
-  const listed = [...new Set([...tracked, ...await ls("-o", "--exclude-standard")])];
+  const tracked = plain ? [] : await ls("-c");
+  const listed = plain
+    ? (readdirSync(sourcePath, { recursive: true }) as string[]).filter((n) => {
+        if (n === ".git" || n.startsWith(".git/")) return false;
+        try { const s = lstatSync(join(sourcePath, n)); return s.isFile() || s.isSymbolicLink(); } catch { return false; }
+      })
+    : [...new Set([...tracked, ...await ls("-o", "--exclude-standard")])];
   // .git rides in the NUL-separated name list — bsdtar stops option parsing
   // at the first positional arg, so everything must stay an option
-  const names = new TextEncoder().encode([...listed.filter((n) => !isEnvFile(n)), ".git"].map((n) => n + "\0").join(""));
+  const names = new TextEncoder().encode(
+    [...listed.filter((n) => !isEnvFile(n)), ...(plain ? [] : [".git"])].map((n) => n + "\0").join(""),
+  );
   const tar = Bun.spawn(
     ["tar", "--no-xattrs", "--null", "-C", sourcePath, "-T", "-", "-cf", "-"],
     {
@@ -131,7 +152,7 @@ export async function tarSource(sourcePath: string): Promise<{ bytes: Uint8Array
   );
   const bytes = await new Response(tar.stdout).bytes();
   if ((await tar.exited) !== 0) throw new Error("tar failed on source folder");
-  return { bytes, trackedEnv: tracked.filter(isEnvFile) };
+  return { bytes, trackedEnv: tracked.filter(isEnvFile), plain };
 }
 
 /** Env files the repository tracks are left out of the VM's copy. Marked
@@ -143,6 +164,26 @@ export async function markEnvFilesSkipped(ref: string, paths: string[]) {
     `cd ${config.guestWorkdir} && git update-index -z --skip-worktree --stdin`,
     new TextEncoder().encode(paths.map((n) => n + "\0").join("")));
   if (r.exitCode !== 0) throw new Error(`could not leave env files out of the VM's git: ${r.stderr.trim()}`);
+}
+
+/** Make a copied plain folder a repository in the VM: its first commit, then
+ *  the project's branch. An empty folder gets an empty commit, so the workdir
+ *  is a repository either way. Returns that commit and the branch it was on. */
+export async function commitPlainFolder(ref: string, name: string): Promise<{ base: string; branch: string }> {
+  const r = await driver.exec(ref, ["sh", "-c",
+    `cd ${config.guestWorkdir} && ` +
+    `git init -q && ` +
+    `git config user.name "sadbox project ${name}" && ` +
+    `git config user.email "project@sadbox.local" && ` +
+    `git add -A && git commit -q --allow-empty -m "sadbox: initial import" && ` +
+    `echo "base=$(git rev-parse HEAD)" && echo "defbr=$(git rev-parse --abbrev-ref HEAD)" && ` +
+    `git checkout -q -b ${branchFor(name)}`,
+  ]);
+  const base = /^base=([0-9a-f]{40,64})$/m.exec(r.stdout)?.[1];
+  if (r.exitCode !== 0 || !base) {
+    throw new Error(`could not commit the copied folder in the VM: ${r.stderr.trim() || r.stdout.trim()}`);
+  }
+  return { base, branch: /^defbr=(\S+)$/m.exec(r.stdout)?.[1] || "HEAD" };
 }
 
 export function listProjects(): ProjectRow[] {
@@ -371,13 +412,17 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
     db.query("UPDATE projects SET base_sha = ?, last_synced_sha = ?, source_branch = ? WHERE id = ?")
       .run(info.base, info.base, info.branch, p.id);
   } else {
-    // re-read the local repo's current HEAD so a rebuild picks up new work
-    const branch = await hostGit(p.source_path, ["branch", "--show-current"]);
-    const head = await hostGit(p.source_path, ["rev-parse", "HEAD"]);
-    if (head.code !== 0) throw new Error(`source folder is not a git repository with a commit: ${p.source_path}`);
-    db.query("UPDATE projects SET base_sha = ?, last_synced_sha = ?, source_branch = ? WHERE id = ?")
-      .run(head.out, head.out, branch.out || "HEAD", p.id);
-    const { bytes: tarBytes, trackedEnv } = await tarSource(p.source_path);
+    const { bytes: tarBytes, trackedEnv, plain } = await tarSource(p.source_path);
+    // a repository with a commit: its HEAD is the project's base and its branch
+    // the starting one. A plain folder gets a fresh commit after the copy below.
+    if (!plain) {
+      // re-read the local repo's current HEAD so a rebuild picks up new work
+      const branch = await hostGit(p.source_path, ["branch", "--show-current"]);
+      const head = await hostGit(p.source_path, ["rev-parse", "HEAD"]);
+      if (head.code !== 0) throw new Error(`source folder is not a git repository with a commit: ${p.source_path}`);
+      db.query("UPDATE projects SET base_sha = ?, last_synced_sha = ?, source_branch = ? WHERE id = ?")
+        .run(head.out, head.out, branch.out || "HEAD", p.id);
+    }
     const cp = await driver.execWithStdin(
       ref,
       `mkdir -p ${config.guestWorkdir} && tar -xf - -C ${config.guestWorkdir}`,
@@ -390,16 +435,24 @@ async function provisionVM(p: ProjectRow, opts: { assignSecretIds?: string[] } =
       throw new Error(`copy-in failed: ${cp.stderr}`);
     }
     await markEnvFilesSkipped(ref, trackedEnv);
-    const setup = await driver.exec(ref, ["sh", "-c",
-      `cd ${config.guestWorkdir} && ` +
-      `git config user.name "sadbox project ${p.name}" && ` +
-      `git config user.email "project@sadbox.local" && ` +
-      `git checkout -q -b ${branchFor(p.name)}`,
-    ]);
-    if (setup.exitCode !== 0) {
-      logLine(p.id, "git.error", `guest setup exited ${setup.exitCode}`);
-      logOutput(p.id, "git.error", setup.stderr || "(no output)");
-      throw new Error(`guest setup failed: ${setup.stderr}`);
+    if (plain) {
+      let seeded: { base: string; branch: string };
+      try { seeded = await commitPlainFolder(ref, p.name); }
+      catch (e) { logLine(p.id, "git.error", String(e)); throw e; }
+      db.query("UPDATE projects SET base_sha = ?, last_synced_sha = ?, source_branch = ? WHERE id = ?")
+        .run(seeded.base, seeded.base, seeded.branch, p.id);
+    } else {
+      const setup = await driver.exec(ref, ["sh", "-c",
+        `cd ${config.guestWorkdir} && ` +
+        `git config user.name "sadbox project ${p.name}" && ` +
+        `git config user.email "project@sadbox.local" && ` +
+        `git checkout -q -b ${branchFor(p.name)}`,
+      ]);
+      if (setup.exitCode !== 0) {
+        logLine(p.id, "git.error", `guest setup exited ${setup.exitCode}`);
+        logOutput(p.id, "git.error", setup.stderr || "(no output)");
+        throw new Error(`guest setup failed: ${setup.stderr}`);
+      }
     }
   }
   logEvent(p.id, "workdir.ready", empty ? "empty workdir ready" : cloneMode ? "repository cloned" : "source copied in");
@@ -485,11 +538,9 @@ export async function createProject(opts: {
     if (!opts.git?.remote) throw new Error("provide a local folder or a git repository URL");
   } else {
     if (!existsSync(sourcePath!)) throw new Error(`source folder not found: ${sourcePath}`);
-    // fail fast before booting a VM: the folder must be a git repo with a commit
-    const head = await hostGit(sourcePath!, ["rev-parse", "HEAD"]);
-    if (head.code !== 0) {
-      throw new Error("source folder must be a git repository with at least one commit (v0 limitation)");
-    }
+    if (!statSync(sourcePath!).isDirectory()) throw new Error(`not a folder: ${sourcePath}`);
+    // A git repository's history comes along; any other folder (plain, or a
+    // repository with no commit yet) is copied as files and committed in the VM.
   }
 
   // The name is unique among live projects (db.ts). A row left in error by a

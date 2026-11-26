@@ -27,13 +27,40 @@ describe("copying a folder in on create / rebuild", () => {
     run(src, "git", "add", "-A"); run(src, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base");
     put(src, ".env.local", "S=3\n"); // untracked, not ignored
 
-    const { bytes, trackedEnv } = await tarSource(src);
+    const { bytes, trackedEnv, plain } = await tarSource(src);
+    expect(plain).toBe(false);
     expect(trackedEnv.sort()).toEqual([".env", "api/.env.production"]);
     const out = mkdtempSync(join(tmpdir(), "sadbox-out-"));
     Bun.spawnSync(["tar", "-xf", "-", "-C", out], { stdin: bytes });
     expect(existsSync(join(out, "app.ts"))).toBe(true);
     expect(existsSync(join(out, ".git"))).toBe(true);
     for (const f of [".env", ".env.local", "api/.env.production"]) expect(existsSync(join(out, f))).toBe(false);
+    rmSync(src, { recursive: true, force: true }); rmSync(out, { recursive: true, force: true });
+  });
+
+  test("a plain folder — or a repository with no commit — is copied as files", async () => {
+    const src = mkdtempSync(join(tmpdir(), "sadbox-plain-"));
+    put(src, "app.ts", "1\n"); put(src, ".env", "S=1\n"); put(src, "src/a/b.ts", "2\n");
+    const out = mkdtempSync(join(tmpdir(), "sadbox-out-"));
+    const extract = (bytes: Uint8Array) => Bun.spawnSync(["tar", "-xf", "-", "-C", out], { stdin: bytes });
+
+    let tarred = await tarSource(src);
+    expect(tarred.plain).toBe(true);
+    expect(tarred.trackedEnv).toEqual([]);
+    extract(tarred.bytes);
+    expect(existsSync(join(out, "app.ts"))).toBe(true);
+    expect(existsSync(join(out, "src/a/b.ts"))).toBe(true);
+    expect(existsSync(join(out, ".env"))).toBe(false);
+    expect(existsSync(join(out, ".git"))).toBe(false);
+    rmSync(join(out, "app.ts")); rmSync(join(out, "src"), { recursive: true, force: true });
+
+    // a repository with nothing committed is copied the same way, without .git
+    run(src, "git", "init", "-q");
+    tarred = await tarSource(src);
+    expect(tarred.plain).toBe(true);
+    extract(tarred.bytes);
+    expect(existsSync(join(out, "app.ts"))).toBe(true);
+    expect(existsSync(join(out, ".git"))).toBe(false);
     rmSync(src, { recursive: true, force: true }); rmSync(out, { recursive: true, force: true });
   });
 

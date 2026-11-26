@@ -596,8 +596,9 @@ below). Use it to sign in, or set your own with `sadbox passwd`. Then, in the
 browser:
 
 1. **Create a project** under **Projects**: give it a name and either a local
-   folder that is a git repository with at least one commit, or a git URL to
-   clone. Tick any **vault** items it should use (add them under **Vaults**
+   folder (a git repository's history comes along; any other folder is copied in
+   and committed in the VM), or a git URL to clone. Tick any **vault** items it
+   should use (add them under **Vaults**
    first — API keys, tokens, settings). While it is created, the form shows the
    steps and a **Logs** tab with the real command output (git clone, proxy,
    vault and git errors); **copy logs** puts them on the clipboard for a bug
@@ -700,10 +701,13 @@ over vsock instead.
 
 ### Source, folder and sync
 
-- **Two source modes** at create: **(a) local folder** — `git ls-files
-  --exclude-standard` → tar over exec stdin (only gitignored paths excluded, full
-  history included; ~2 s for a 100 MB repo), with an optional git remote for
-  push/sync; or **(b) git repository** — omit the folder and give a remote URL
+- **Source modes** at create: **(a) local folder** — a git repository is
+  copied as `git ls-files --exclude-standard` + `.git` → tar over exec stdin
+  (only gitignored paths excluded, full history included; ~2 s for a 100 MB
+  repo), with an optional git remote for push/sync; a plain folder (or a
+  repository with no commit yet) is copied file by file and gets a first commit
+  in the VM, so its workdir is still a repository on a `sadbox/<name>` branch;
+  or **(b) git repository** — omit the folder and give a remote URL
   (+ token for private) and the VM **clones** it into the workdir. A cloned
   project starts with no local folder, so it pushes to the remote from inside
   the VM — or you **connect a local folder** to it later (detail page → Folder

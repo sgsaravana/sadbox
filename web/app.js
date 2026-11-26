@@ -959,11 +959,11 @@ async function loadDir(path) {
   pickerPath = d.path;
   pickerDisplayPath = d.displayPath || d.path;
   $("#picker-current").textContent = pickerDisplayPath;
-  // a folder being connected for sync may be any folder; a project's source must be a repo
-  const anyFolder = pickerOnSelect != null;
-  $("#picker-hint").textContent = d.isGitRepo ? "✓ git repository"
-    : anyFolder ? "plain folder — files will be copied in" : "not a git repo (projects need one)";
-  $("#picker-hint").style.color = d.isGitRepo || anyFolder ? "var(--ok)" : "var(--warn)";
+  // a project's source may be a repository (history comes along) or a plain
+  // folder (its files are copied in and committed in the VM)
+  $("#picker-hint").textContent = d.isGitRepo ? "✓ git repository — its history comes along"
+    : "plain folder — files will be copied in";
+  $("#picker-hint").style.color = "var(--ok)";
   const items = [];
   if (d.parent) items.push(`<li data-dir="${d.parent}" class="up">↩ ..</li>`);
   // WSL: jump between the Linux home and the Windows drives
