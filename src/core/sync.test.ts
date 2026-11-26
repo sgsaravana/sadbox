@@ -314,6 +314,20 @@ describe("sync back into a git repository", () => {
 });
 
 describe("sync back into a plain folder", () => {
+  test("a project created from a plain folder syncs only what the VM changed", async () => {
+    // the folder the project was created from: the VM's first commit is its content
+    const plain = dir(`plain-src-${n}`);
+    writeFileSync(join(plain, "README.md"), "hello\n");
+    writeFileSync(join(plain, "app.js"), "v1\n");
+    db.query("UPDATE projects SET source_path = ?, git_remote = NULL WHERE id = ?").run(plain, id);
+    writeFileSync(join(WD, "app.js"), "v2\n"); // changed in the VM, not in the folder
+
+    const r = await syncProject(id);
+    expect(r).toMatchObject({ kind: "folder", applied: "copied", blocking: [] });
+    expect(read(plain, "app.js")).toBe("v2\n");
+    expect(read(plain, "README.md")).toBe("hello\n");
+  });
+
   test("receives the files and mirrors later changes; other files are left alone", async () => {
     const plain = dir(`plain-${n}`);
     writeFileSync(join(plain, "keep-me.txt"), "nothing to do with the project\n");

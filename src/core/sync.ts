@@ -200,14 +200,18 @@ export async function syncProject(id: string, opts?: { force?: boolean }) {
   }
 
   // 3. the first time, say what the folder is expected to hold already. A
-  // repository that has the commit the project started from is taken to be a
-  // checkout of it, so only what the project changed is written (and its own
-  // newer files are left alone). Any other folder is taken to hold nothing of
-  // the project's, so every file is written.
+  // folder the project was created from holds the VM's base by definition (a
+  // plain folder's base is the first commit the VM made from it), so only what
+  // the project changed is written and the folder's own new files are left
+  // alone. A folder connected later is taken to hold it only when its
+  // repository has the commit; any other folder is taken to hold nothing of the
+  // project's, so every file is written.
   if (fresh) {
-    const folderHasBase = p.base_sha != null && await isGitRepo(folder) &&
-      (await hostGit(["-C", folder], ["cat-file", "-e", `${p.base_sha}^{commit}`])).code === 0;
-    if (folderHasBase && await has(p.base_sha!)) {
+    const baseKnown = p.base_sha != null && await has(p.base_sha);
+    const fromBase = baseKnown && (!!p.source_path ||
+      (await isGitRepo(folder) &&
+        (await hostGit(["-C", folder], ["cat-file", "-e", `${p.base_sha}^{commit}`])).code === 0));
+    if (fromBase) {
       await hostGit(at, ["read-tree", p.base_sha!]);
       await hostGit(at, ["update-ref", "--no-deref", "HEAD", p.base_sha!]);
     }
