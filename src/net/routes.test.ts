@@ -57,6 +57,17 @@ async function guestApp(body = "hello from the vm"): Promise<number> {
   return server.port!;
 }
 
+/** A stand-in for an app bound to IPv6 loopback only — what a dev server does
+ *  when "localhost" resolves to ::1 (seen on Intel Macs' VMs). Null when this
+ *  host has no IPv6 loopback. */
+async function guestAppV6(body = "hello over ipv6"): Promise<number | null> {
+  try {
+    const server = Bun.serve({ port: 0, hostname: "::1", fetch: () => new Response(body) });
+    closers.push(() => server.stop(true));
+    return server.port!;
+  } catch { return null; }
+}
+
 /** An HTTP request through the routes listener with a chosen Host. */
 function request(
   path: string,
@@ -195,6 +206,13 @@ describe("routing", () => {
     expect((await request("/", routeHost("two"))).body).toBe("two");
     expect((await request("/path?x=1", routeHost("one"))).body).toBe("/path?x=1");
     expect((await request("/host", routeHost("one"))).body).toBe(routeHost("one"));
+  });
+
+  test("reaches an app bound to IPv6 loopback only (localhost → ::1)", async () => {
+    const g = await guestAppV6();
+    if (g === null) return; // no IPv6 loopback on this host
+    await createNamedRoute(A, { name: "v6", guestPort: g, access: "open" });
+    expect((await request("/", routeHost("v6"))).body).toBe("hello over ipv6");
   });
 
   test("X-Forwarded-Host works too (what Caddy sends)", async () => {
