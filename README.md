@@ -1042,8 +1042,10 @@ over vsock instead.
   always knows exactly which project is asking. The proxy then decides
   everything:
   - **the internet** — by your rules and approvals, as above;
-  - **this machine** (loopback or any of its addresses) — never, whatever the
-    rules say;
+  - **this machine** (loopback or any of its addresses) — only with an allow
+    rule that names exactly that host; `*` and `*.suffix` do not count, and
+    loopback plus sadbox's own ports stay closed. This is what lets a VM reach
+    a service such as git that the host itself publishes through Caddy;
   - **your LAN** (private and link-local ranges) — only with a rule or approval
     that names that host; a catch-all `*` rule does not cover it.
 
@@ -1497,6 +1499,10 @@ Notes:
   Caddy (and so over TLS — the sign-in password should never cross the network
   in plain HTTP). Set `SADBOX_HOST` to another address only if Caddy runs on a
   different machine.
+- **A service on the Mac mini itself** (Forgejo/Gitea, a registry) is "this
+  machine" to a VM. Add an allow rule naming its **exact** hostname in
+  **Settings → Network allow / deny list**; `*` and wildcard rules do not open
+  this machine, and loopback or sadbox's own ports stay closed.
 - **A 502 from Caddy** means it reached the Mac but sadbox is not listening on
   the address it dialled: `lsof -nP -iTCP:7070 -sTCP:LISTEN` should show
   `127.0.0.1:7070` (not `[::1]`), and

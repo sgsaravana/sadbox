@@ -92,7 +92,9 @@ function splitHostPort(s: string, def: number): { host: string; port: number } {
 // they actually resolve to (not the name the VM asked for), and the connection
 // is then made to that same address, so a name cannot resolve one way for the
 // check and another way for the connect.
-//   self    — this machine (loopback, any of its interfaces): never allowed.
+//   self    — this machine (loopback, any of its interfaces): only an allow
+//             rule naming exactly that host may open it (never "*" or "*.x"),
+//             and loopback plus sadbox's own ports stay closed.
 //   private — LAN / link-local ranges: only with a rule naming that host;
 //             a catch-all "*" rule or the setup window does not cover them.
 //   public  — everything else: ordinary rules.
@@ -104,29 +106,41 @@ function ownAddresses(): Set<string> {
   return s;
 }
 
-export function classifyAddress(addr: string, own: Set<string> = ownAddresses()): Reach {
-  let a = addr.toLowerCase().replace(/^\[|\]$/g, "").replace(/%.*$/, "");
+/** An address without brackets, a zone suffix or an IPv4-mapped IPv6 prefix. */
+function bareAddress(addr: string): string {
+  const a = addr.toLowerCase().replace(/^\[|\]$/g, "").replace(/%.*$/, "");
   const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(a);
-  if (mapped) a = mapped[1];
-  if (own.has(a)) return "self";
+  return mapped ? mapped[1] : a;
+}
+
+/** Loopback/unspecified: the supervisor's own listeners live here. */
+function isLoopback(a: string): boolean {
+  if (a === "::1" || a === "::") return true;
+  if (!net.isIPv4(a)) return false;
+  const x = Number(a.split(".")[0]);
+  return x === 127 || x === 0;
+}
+
+export function classifyAddress(addr: string, own: Set<string> = ownAddresses()): Reach {
+  const a = bareAddress(addr);
+  if (own.has(a) || isLoopback(a)) return "self";
   if (net.isIPv4(a)) {
     const [x, y] = a.split(".").map(Number);
-    if (x === 127 || x === 0) return "self";
     if (x === 10 || (x === 172 && y >= 16 && y <= 31) || (x === 192 && y === 168)) return "private";
     if ((x === 169 && y === 254) || (x === 100 && y >= 64 && y <= 127)) return "private"; // link-local, CGNAT
     return "public";
   }
-  if (a === "::1" || a === "::") return "self";
   if (/^f[cd]/.test(a) || /^fe[89ab]/.test(a)) return "private"; // unique-local, link-local
   return "public";
 }
 
 const REACH_RANK: Record<Reach, number> = { public: 0, private: 1, self: 2 };
 
-/** Resolve a target and classify it by the most sensitive address it maps to. */
-export async function resolveTarget(host: string): Promise<{ address: string; reach: Reach } | null> {
+/** Resolve a target and classify it by the most sensitive address it maps to.
+ *  `loopback` is true when any of its addresses is loopback (or unspecified). */
+export async function resolveTarget(host: string): Promise<{ address: string; reach: Reach; loopback: boolean } | null> {
   const bare = host.replace(/^\[|\]$/g, "");
-  if (bare === "localhost" || bare.endsWith(".localhost")) return { address: "127.0.0.1", reach: "self" };
+  if (bare === "localhost" || bare.endsWith(".localhost")) return { address: "127.0.0.1", reach: "self", loopback: true };
   let addrs: string[];
   if (net.isIP(bare)) addrs = [bare];
   else {
@@ -134,9 +148,32 @@ export async function resolveTarget(host: string): Promise<{ address: string; re
   }
   if (!addrs.length) return null;
   const own = ownAddresses();
-  let reach: Reach = "public";
-  for (const a of addrs) { const r = classifyAddress(a, own); if (REACH_RANK[r] > REACH_RANK[reach]) reach = r; }
-  return { address: addrs.find((a) => net.isIPv4(a)) ?? addrs[0], reach };
+  let reach: Reach = "public", loopback = false;
+  for (const a of addrs) {
+    if (isLoopback(bareAddress(a))) loopback = true;
+    const r = classifyAddress(a, own);
+    if (REACH_RANK[r] > REACH_RANK[reach]) reach = r;
+  }
+  return { address: addrs.find((a) => net.isIPv4(a)) ?? addrs[0], reach, loopback };
+}
+
+const sadboxPorts = () => new Set([config.port, config.proxyPort, config.routesPort]);
+
+/** Whether an allow rule can open a destination that resolves to this machine.
+ *  Only a rule naming exactly this host counts — `*` and `*.suffix` do not —
+ *  and loopback plus sadbox's own listeners stay closed regardless. This is
+ *  for a service published on the supervisor's own host (a git server behind
+ *  the host's Caddy, for example), which is otherwise unreachable from a VM. */
+export function mayReachSelf(
+  verdict: { decision: "allow" | "block" | "ask"; rule?: { host: string } },
+  target: { address: string; loopback: boolean },
+  port: number,
+): boolean {
+  const rule = verdict.rule;
+  if (verdict.decision !== "allow" || !rule || !target.address) return false;
+  if (rule.host === "*" || rule.host.startsWith("*.")) return false;
+  if (target.loopback) return false;
+  return !sadboxPorts().has(port);
 }
 
 let seq = 0;
@@ -229,10 +266,19 @@ function makeHandler(scheme: "http" | "https") {
 
     // link names are handled before a request gets here (see acceptClient); one
     // arriving any other way — a Host header inside some other tunnel — is refused
-    const target = linkTarget(host) !== undefined ? { address: "", reach: "self" as Reach } : await resolveTarget(host);
+    const target = linkTarget(host) !== undefined
+      ? { address: "", reach: "self" as Reach, loopback: true }
+      : await resolveTarget(host);
     let verdict = evaluate(projectId, { host, path, method });
-    if (target?.reach === "self") verdict = { decision: "block" };
-    else {
+    // This machine, and any name that resolves to it, needs an explicit rule
+    // for exactly that host; loopback and sadbox's own ports are never opened.
+    let selfBlocked = false;
+    if (target?.reach === "self") {
+      if (verdict.decision !== "block" && !mayReachSelf(verdict, target, port)) {
+        verdict = { decision: "block" };
+        selfBlocked = true;
+      }
+    } else {
       // a LAN address needs a rule that names it — "*" was not written with it in mind
       const lan = target?.reach === "private";
       if (lan && verdict.decision === "allow" && verdict.rule?.host === "*") verdict = { decision: "ask" };
@@ -252,7 +298,10 @@ function makeHandler(scheme: "http" | "https") {
 
     if (verdict.decision === "block") {
       req.resume(); // drain body
-      try { res.writeHead(403, { "content-type": "text/plain" }); res.end(`sadbox: blocked ${host}\n`); } catch {}
+      const why = selfBlocked
+        ? `sadbox: blocked ${host} — it resolves to this machine, so add an allow rule for exactly this host under Settings (* and wildcards do not count; loopback and sadbox's own ports stay closed)\n`
+        : `sadbox: blocked ${host}\n`;
+      try { res.writeHead(403, { "content-type": "text/plain" }); res.end(why); } catch {}
       log(projectId, { id: rid(), ts: started, method, scheme, host, path, status: 403, decision: "blocked", reqBytes: 0, respBytes: 0, durationMs: Date.now() - started });
       return;
     }

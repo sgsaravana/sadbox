@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { classifyAddress, resolveTarget } from "./proxy";
+import { config } from "../config";
+import { classifyAddress, mayReachSelf, resolveTarget } from "./proxy";
 
 // the machine's own interface addresses, as os.networkInterfaces() would list them
 const own = new Set(["127.0.0.1", "::1", "192.168.50.48", "192.168.64.1", "fe80::1", "2001:db8::10"]);
@@ -32,6 +33,40 @@ describe("where a VM's request is allowed to go", () => {
                      "169.253.1.1", "100.63.255.255", "100.128.0.1", "11.0.0.1", "2606:4700:4700::1111"]) {
       expect(reach(a)).toBe("public");
     }
+  });
+});
+
+describe("this machine is opened only by a rule naming exactly that host", () => {
+  const allow = (host: string) => ({ decision: "allow" as const, rule: { host } });
+  const own = { address: "192.168.50.48", loopback: false };
+
+  test("an exact host rule may reach a service published on the supervisor's host", () => {
+    // the case this exists for: a git server behind the host's own Caddy
+    expect(mayReachSelf(allow("git.internal.example.com"), own, 443)).toBe(true);
+  });
+
+  test("a catch-all, a wildcard, ask or block does not", () => {
+    expect(mayReachSelf(allow("*"), own, 443)).toBe(false);
+    expect(mayReachSelf(allow("*.internal.example.com"), own, 443)).toBe(false);
+    expect(mayReachSelf({ decision: "ask" }, own, 443)).toBe(false);
+    expect(mayReachSelf({ decision: "block", rule: { host: "git.internal.example.com" } }, own, 443)).toBe(false);
+  });
+
+  test("loopback, an unresolved name and sadbox's own ports stay closed", () => {
+    expect(mayReachSelf(allow("git.internal.example.com"), { address: "127.0.0.1", loopback: true }, 443)).toBe(false);
+    expect(mayReachSelf(allow("git.internal.example.com"), { address: "", loopback: false }, 443)).toBe(false);
+    for (const p of [config.port, config.proxyPort, config.routesPort]) {
+      expect(mayReachSelf(allow("git.internal.example.com"), own, p)).toBe(false);
+    }
+  });
+
+  test("resolveTarget flags loopback separately from another own address", async () => {
+    expect(await resolveTarget("localhost")).toMatchObject({ reach: "self", loopback: true });
+    expect(await resolveTarget("127.0.0.1")).toMatchObject({ reach: "self", loopback: true });
+    const { networkInterfaces } = await import("node:os");
+    const own4 = Object.values(networkInterfaces()).flat()
+      .find((i) => i?.family === "IPv4" && !i.address.startsWith("127."))?.address;
+    if (own4) expect(await resolveTarget(own4)).toMatchObject({ reach: "self", loopback: false });
   });
 });
 
