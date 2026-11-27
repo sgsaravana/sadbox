@@ -178,7 +178,7 @@ export async function commitPlainFolder(ref: string, name: string): Promise<{ ba
     `git add -A && git commit -q --allow-empty -m "sadbox: initial import" && ` +
     `echo "base=$(git rev-parse HEAD)" && echo "defbr=$(git rev-parse --abbrev-ref HEAD)" && ` +
     `git checkout -q -b ${branchFor(name)}`,
-  ]);
+  ], { timeoutMs: LONG_TASK_MS });
   const base = /^base=([0-9a-f]{40,64})$/m.exec(r.stdout)?.[1];
   if (r.exitCode !== 0 || !base) {
     throw new Error(`could not commit the copied folder in the VM: ${r.stderr.trim() || r.stdout.trim()}`);
