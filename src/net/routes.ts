@@ -14,6 +14,7 @@ import { chmodSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { config, runDir } from "../config";
 import { db, logEvent } from "../db";
+import { getDriver } from "../driver";
 import { dropForwardPasses } from "../core/auth";
 import { createGate, text, type Gate } from "./httpgate";
 import { bridgeConnection } from "./forwards";
@@ -34,6 +35,34 @@ export interface NamedRoute {
 export const routeDomain = () => (config.routeDomain ?? "").trim().toLowerCase().replace(/^\.+|\.+$/g, "");
 /** The public host of a named route (empty when no domain is configured). */
 export const routeHost = (name: string) => `${name}.${routeDomain()}`;
+
+// local copy of core/projects' refFor to avoid an import cycle
+const refFor = (name: string) => `sadbox-${name}`;
+
+/** The shell export that lets a Vite dev server in a VM answer on every named-
+ *  route host without editing vite.config.js. Vite reads this env var and a
+ *  leading dot allows the domain itself and all of its subdomains, so a route
+ *  created later works without changing the VM. Null when routes are off. */
+export function viteAllowedHostsEnv(domain = routeDomain()): string | null {
+  return domain ? `export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=".${domain}"` : null;
+}
+
+/** Refresh `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` in a project's net.env, so
+ *  dev servers started from its shells know the route names. Best effort: a
+ *  stopped VM is brought up to date when it next starts (or is provisioned). */
+export async function syncProjectRouteHosts(projectId: string): Promise<void> {
+  const line = viteAllowedHostsEnv();
+  const p = db.query<{ name: string }, [string]>(
+    "SELECT name FROM projects WHERE id=? AND state != 'destroyed'").get(projectId);
+  if (!line || !p) return;
+  const quoted = `'${line.replace(/'/g, `'\\''`)}'`;
+  const file = config.guestNetEnvFile;
+  const script =
+    `f=${file}; mkdir -p $(dirname "$f"); touch "$f"; ` +
+    `grep -v '^export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=' "$f" > "$f.sadbox" || true; ` +
+    `printf '%s\\n' ${quoted} >> "$f.sadbox"; chmod 600 "$f.sadbox"; mv "$f.sadbox" "$f"`;
+  try { await getDriver().exec(refFor(p.name), ["sh", "-c", script]); } catch {}
+}
 
 // Names Caddy, browsers or the UI are likely to want for themselves. The first
 // label of the route domain (usually "sadbox") is reserved at create time too.
@@ -182,6 +211,7 @@ export async function createNamedRoute(projectId: string, o: { name: unknown; gu
     throw e;
   }
   logEvent(projectId, "route.add", `${routeHost(name)} → vm:${guestPort} (${access === "open" ? "open to anyone" : "sign-in"})`);
+  await syncProjectRouteHosts(projectId); // a running VM learns the name at once
   return listNamedRoutes(projectId).find((x) => x.id === r.id)!;
 }
 
@@ -244,6 +274,7 @@ export async function startRoutes(): Promise<number> {
     try { await listenRoute(r); }
     catch (e) { console.error(`⚠ named route ${routeHost(r.name)} not started: ${(e as Error).message}`); }
   }
+  for (const projectId of new Set(rows.map((r) => r.project_id))) await syncProjectRouteHosts(projectId);
   const addr = router.address();
   const port = typeof addr === "object" && addr ? addr.port : config.routesPort;
   console.log(`sadbox named routes: ${live.size}/${rows.length} under *.${routeDomain()} → ${config.routesHost}:${port}`);

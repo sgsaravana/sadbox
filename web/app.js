@@ -2335,6 +2335,7 @@ async function openRoutes(id, el = $("#conn-routes")) {
         <label class="hint" title="HTTP without a sadbox sign-in pass: anyone who can reach the hostname. For an API called from another app, not for a UI you want protected."><input name="open" type="checkbox"> open to anyone</label>
         <button type="submit">Add route</button>
       </form>
+      <div class="hint">Vite dev servers accept these names automatically — restart one that was already running (from a new shell).</div>
     </div>`;
   el.addEventListener("click", async (e) => {
     const acc = e.target.closest("[data-route-access]");

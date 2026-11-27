@@ -1,6 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import http from "node:http";
 import net from "node:net";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { config } from "../config";
 import { db } from "../db";
@@ -9,7 +11,7 @@ import { forwardTicket } from "../core/auth";
 import { AUTH_PATH } from "./httpgate";
 import {
   createNamedRoute, deleteNamedRoute, listNamedRoutes, purgeProjectNamedRoutes,
-  routeHost, setNamedRouteAccess, startRoutes, stopRoutes,
+  routeHost, setNamedRouteAccess, startRoutes, stopRoutes, viteAllowedHostsEnv,
 } from "./routes";
 
 // The preload stubs the `container` CLI so every VM resolves to 127.0.0.1 — the
@@ -194,6 +196,11 @@ describe("createNamedRoute validation", () => {
     expect(r.guest_port).toBe(3000);
     expect(routeHost(r.name)).toBe("my-app.sadbox.test");
   });
+
+  test("Vite is told about the route domain (nothing when routes are off)", () => {
+    expect(viteAllowedHostsEnv()).toBe('export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=".sadbox.test"');
+    expect(viteAllowedHostsEnv("")).toBeNull();
+  });
 });
 
 describe("routing", () => {
@@ -206,6 +213,16 @@ describe("routing", () => {
     expect((await request("/", routeHost("two"))).body).toBe("two");
     expect((await request("/path?x=1", routeHost("one"))).body).toBe("/path?x=1");
     expect((await request("/host", routeHost("one"))).body).toBe(routeHost("one"));
+  });
+
+  test("a route adds the Vite host allowance to the VM's env", async () => {
+    const g = await guestApp();
+    await createNamedRoute(A, { name: "vite-env", guestPort: g, access: "open" });
+    const file = join(process.env.SADBOX_TEST_GUEST_SADBOX!, "net.env");
+    expect(readFileSync(file, "utf8")).toContain('export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=".sadbox.test"');
+    // another route refreshes that line; it is never duplicated
+    await createNamedRoute(A, { name: "vite-env-2", guestPort: g, access: "open" });
+    expect(readFileSync(file, "utf8").match(/^export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=/gm)).toHaveLength(1);
   });
 
   test("reaches an app bound to IPv6 loopback only (localhost → ::1)", async () => {

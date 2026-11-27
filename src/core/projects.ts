@@ -15,7 +15,7 @@ import { purgeProjectNet } from "../net/rules";
 import { clearProjectApprovals } from "../net/approvals";
 import { clearProjectFeed } from "../net/events";
 import { purgeProjectForwards } from "../net/forwards";
-import { purgeProjectNamedRoutes } from "../net/routes";
+import { purgeProjectNamedRoutes, syncProjectRouteHosts } from "../net/routes";
 import { purgeProjectLinks } from "../net/links";
 import { duringSetup } from "../net/setup";
 import { type ToolInfo } from "./toolchain";
@@ -1133,6 +1133,7 @@ export async function startProject(id: string): Promise<ProjectRow> {
       await startGuestRelay(ref);
       redialProjectSocket(id); // carriers dialed before the shutdown are dead
     }
+    await syncProjectRouteHosts(id); // a route added while it was stopped still reaches Vite
     await migrateGitToken(p).catch((e) => logEvent(id, "vault.git.migrate.error", String(e)));
     await injectVault(id).catch((e) => logEvent(id, "vault.inject.error", String(e)));
     await applyLoginsQuietly(p);

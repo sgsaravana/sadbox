@@ -36,6 +36,7 @@ import { CUTOFF_MESSAGE, isCutOff } from "./cutoff";
 import { serveVault, VAULT_HOST } from "./vaultfetch";
 import { answerTokenRequest, CLAUDE_LOGIN_NAME, isClaudeTokenRequest } from "./claudeoauth";
 import { carryLink, linkTarget } from "./links";
+import { viteAllowedHostsEnv } from "./routes";
 
 const driver = getDriver();
 // local copy of core/projects' refFor to avoid a proxy<->projects import cycle
@@ -547,6 +548,7 @@ export async function installGuestProxy(ref: string): Promise<void> {
     url = `http://${info.gateway}:${config.proxyPort}`;
     noProxy += `,${info.gateway}`;
   }
+  const routeHosts = viteAllowedHostsEnv(); // Vite in the VM answers on named-route hosts
   const env = [
     `export HTTP_PROXY="${url}"`, `export HTTPS_PROXY="${url}"`, `export ALL_PROXY="${url}"`,
     `export http_proxy="${url}"`, `export https_proxy="${url}"`, `export all_proxy="${url}"`,
@@ -557,6 +559,7 @@ export async function installGuestProxy(ref: string): Promise<void> {
     `export REQUESTS_CA_BUNDLE="${config.guestCaBundle}"`,
     `export SSL_CERT_FILE="${config.guestCaBundle}"`,
     `export GIT_SSL_CAINFO="${config.guestCaBundle}"`,
+    ...(routeHosts ? [routeHosts] : []),
     "",
   ].join("\n");
   const write = await repeatableGuestExec(

@@ -13,6 +13,8 @@ const dir = mkdtempSync(join(tmpdir(), "sadbox-test-"));
 const workdir = join(dir, "workdir");
 mkdirSync(workdir);
 const guestTools = join(dir, "guest-tools"); // stands in for /usr/local/lib/sadbox in the VM
+const guestSadbox = join(dir, "sadbox-home"); // stands in for /home/agent/.sadbox in the VM
+mkdirSync(guestSadbox);
 const statsLog = join(dir, "stats.log");
 const containerData = join(dir, "container-data"); // the runtime's own files, per VM
 const bin = join(dir, "container");
@@ -59,16 +61,17 @@ case "$1" in
           sed -n 's/.*"cpus":\\([0-9]*\\).*/\\1/p' "${containerData}/containers/$2/runtime-configuration.json" 2>/dev/null | head -1
           exit 0
         fi
-        case "$last" in *"/home/agent/workdir"*|*"/usr/local/lib/sadbox"*) ;; *) echo "stub: script does not target the workdir or the guest tools" >&2; exit 97;; esac
+        case "$last" in *"/home/agent/workdir"*|*"/usr/local/lib/sadbox"*|*"/home/agent/.sadbox"*) ;; *) echo "stub: script does not target the workdir, guest tools or sadbox home" >&2; exit 97;; esac
         cd "${workdir}" || exit 98
         # tmux is stubbed out: the snippets must never reach a tmux on this machine
-        exec sh -c "tmux() { :; }; $(printf %s "$last" | sed -e "s#/home/agent/workdir#${workdir}#g" -e "s#/usr/local/lib/sadbox#${guestTools}#g" -e "s#/home/agent/.bun/bin/bun#${process.execPath}#g")";;
+        exec sh -c "tmux() { :; }; $(printf %s "$last" | sed -e "s#/home/agent/workdir#${workdir}#g" -e "s#/usr/local/lib/sadbox#${guestTools}#g" -e "s#/home/agent/.sadbox#${guestSadbox}#g" -e "s#/home/agent/.bun/bin/bun#${process.execPath}#g")";;
   *) exit 1;;
 esac
 `);
 chmodSync(bin, 0o755);
 
 process.env.SADBOX_TEST_WORKDIR = workdir; // for the tests themselves, to seed and inspect it
+process.env.SADBOX_TEST_GUEST_SADBOX = guestSadbox; // the stub's stand-in for /home/agent/.sadbox
 process.env.SADBOX_TEST_STATS_LOG = statsLog;
 process.env.SADBOX_TEST_IMAGE_RECIPE = join(dir, "image-recipe"); // the label on the stub's base image
 process.env.SADBOX_TEST_BUILDS_LOG = join(dir, "builds.log");

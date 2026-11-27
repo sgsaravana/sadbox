@@ -1077,9 +1077,14 @@ On a project's detail view these are three tabs of one **Access** card:
   exactly like a forward, and `/__sadbox/auth` is sadbox's path, not the app's.
   Names are DNS labels; `sadbox`, `www`, `api`, `admin` and a few others are
   reserved. HTTP and WebSockets only (a database or SSH still uses a port
-  forward). A **path** form (`sadbox.example.com/sample`) is deliberately not
-  offered: it breaks root-absolute URLs in normal apps and would put the app on
-  the UI's origin, where it could call sadbox's API with your session — see
+  forward). A Vite dev server in the VM is told the whole route domain through
+  `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` (in the project's `~/.sadbox/net.env`),
+  so `<name>.<domain>` is accepted without editing `vite.config.js`; a dev
+  server that was already running needs a restart from a shell that has read
+  `~/.sadbox/net.env` (a new terminal tab, or `source ~/.sadbox/net.env`).
+  A **path** form (`sadbox.example.com/sample`) is deliberately not offered:
+  it breaks root-absolute URLs in normal apps and would put the app on the
+  UI's origin, where it could call sadbox's API with your session — see
   [`docs/research/17-named-routes.md`](docs/research/17-named-routes.md).
 - **Port forwards** (inbound): on the detail view, map a port on the supervisor
   host to a port inside the VM (e.g. host `8080` → VM `8000`) and open the app
