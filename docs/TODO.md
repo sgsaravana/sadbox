@@ -45,6 +45,9 @@ Built on `feature/named-routes` (host-based routes):
 - [x] **Host routes** `<name>.<SADBOX_ROUTE_DOMAIN>` → a VM port. One listener
       (`SADBOX_ROUTES_PORT`, loopback 7072), sign-in/open passes, WebSockets,
       the **Named routes** panel, API, tests and docs.
+- [x] **Vite host check.** Route creation/provisioning puts the route domain in
+      the VM's `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, so a Vite dev server
+      answers on `<name>.<domain>` without a `vite.config.js` edit.
 - [ ] **Decide the public shape.** Add `SADBOX_ROUTE_DOMAIN` and a wildcard
       DNS record + certificate; add the Caddy block from
       [`packaging/caddy/Caddyfile.example`](../packaging/caddy/Caddyfile.example).
