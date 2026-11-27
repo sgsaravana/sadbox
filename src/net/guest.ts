@@ -58,17 +58,31 @@ net.createServer((c) => {                       // a program in this VM
 `;
 
 const CONNECT_JS = `const net = require("node:net");
-const s = net.connect(Number(process.argv[2]), "127.0.0.1");
-s.on("connect", () => {
-  process.stdin.on("data", (d) => { if (!s.write(d)) process.stdin.pause(); });
-  s.on("drain", () => process.stdin.resume());
-  process.stdin.on("end", () => s.end());
-  s.on("data", (d) => { if (!process.stdout.write(d)) s.pause(); });
-  process.stdout.on("drain", () => s.resume());
-});
-s.on("error", () => process.exit(1));
-// let stdout flush what the app sent before exiting
-s.on("close", () => process.stdout.write("", () => process.exit(0)));
+const port = Number(process.argv[2]);
+// A dev server told to listen on "localhost" can end up on either loopback
+// family (Bun/Node bind whichever address this VM's localhost resolves to), so
+// try IPv4 first and then IPv6. An app on ::1 only is otherwise unreachable.
+const hosts = ["127.0.0.1", "::1"];
+let next = 0;
+function connect() {
+  const s = net.connect(port, hosts[next]);
+  let up = false;
+  s.on("connect", () => {
+    up = true;
+    process.stdin.on("data", (d) => { if (!s.write(d)) process.stdin.pause(); });
+    s.on("drain", () => process.stdin.resume());
+    process.stdin.on("end", () => s.end());
+    s.on("data", (d) => { if (!process.stdout.write(d)) s.pause(); });
+    process.stdout.on("drain", () => s.resume());
+    // let stdout flush what the app sent before exiting
+    s.on("close", () => process.stdout.write("", () => process.exit(0)));
+  });
+  s.on("error", () => {
+    if (!up && ++next < hosts.length) return connect();
+    process.exit(1);
+  });
+}
+connect();
 `;
 
 // `sadbox-vault`: the vault from inside the VM (docs/research/12, V5). It asks
