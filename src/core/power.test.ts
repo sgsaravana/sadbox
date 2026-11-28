@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync, writeFileSync } from "fs";
+import { join } from "path";
 import { getDriver } from "../driver";
 import { makeProject } from "../../test/helpers";
 import { getProject, projectDetails, refFor, startProject, stopProject } from "./projects";
@@ -17,6 +19,20 @@ describe("stop / start", () => {
 
     expect((await startProject(id)).state).toBe("running");
     expect((await driver.inspect(ref)).state).toBe("running");
+  });
+
+  test("start rewrites net.env, so a supervisor upgrade reaches an older VM", async () => {
+    const id = makeProject("pw5", "stopped");
+    const netEnv = join(process.env.SADBOX_TEST_GUEST_SADBOX!, "net.env");
+    writeFileSync(netEnv, 'export HTTPS_PROXY="http://old.example:1"\n');
+
+    await startProject(id);
+
+    const env = readFileSync(netEnv, "utf8");
+    const proxy = /^export HTTPS_PROXY="([^"]+)"/m.exec(env)?.[1];
+    expect(proxy).toBeTruthy();
+    expect(env).toContain(`export PI_PROXY="${proxy}"`);
+    expect(env).not.toContain("old.example");
   });
 
   test("a VM stopped behind sadbox's back is noticed", async () => {

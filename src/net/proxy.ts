@@ -582,16 +582,27 @@ export async function installGuestProxy(ref: string): Promise<void> {
   );
   if (install.exitCode !== 0) throw new Error(`CA install failed: ${install.stderr}`);
 
+  const info = await driver.inspect(ref);
+  await ensureGuestTools(ref); // the relay, and sadbox-vault — on a network or not
+  if (info.isolated) {
+    await startGuestRelay(ref);
+    const owner = [...ipMapRows()].find((p) => refFor(p.name) === ref);
+    if (owner) redialProjectSocket(owner.id); // carriers dialed before the relay was up are dead
+  }
+  await writeGuestNetEnv(ref);
+}
+
+/** Write the VM's proxy environment file (and the named-route export Vite
+ *  reads). Also refreshed when a VM starts: the file is written at create, so
+ *  a supervisor upgrade that adds a variable (PI_PROXY, say) would otherwise
+ *  never reach a project created before it. */
+export async function writeGuestNetEnv(ref: string): Promise<void> {
   // A network-less VM reaches the proxy through the relay on its own loopback;
   // a legacy VM on a real network dials the host's address on that network.
   const info = await driver.inspect(ref);
-  await ensureGuestTools(ref); // the relay, and sadbox-vault — on a network or not
   let url: string, noProxy = "localhost,127.0.0.1,::1";
   if (info.isolated) {
-    await startGuestRelay(ref);
     url = `http://127.0.0.1:${config.guestProxyPort}`;
-    const owner = [...ipMapRows()].find((p) => refFor(p.name) === ref);
-    if (owner) redialProjectSocket(owner.id); // carriers dialed before the relay was up are dead
   } else {
     if (!info.gateway) throw new Error("VM has no network gateway (is it running?)");
     url = `http://${info.gateway}:${config.proxyPort}`;
