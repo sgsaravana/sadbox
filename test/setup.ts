@@ -61,7 +61,7 @@ case "$1" in
           sed -n 's/.*"cpus":\\([0-9]*\\).*/\\1/p' "${containerData}/containers/$2/runtime-configuration.json" 2>/dev/null | head -1
           exit 0
         fi
-        case "$last" in *"/home/agent/workdir"*|*"/usr/local/lib/sadbox"*|*"/home/agent/.sadbox"*) ;; *) echo "stub: script does not target the workdir, guest tools or sadbox home" >&2; exit 97;; esac
+        case "$last" in *"/home/agent/workdir"*|*"/usr/local/lib/sadbox"*|*"/home/agent/.sadbox"*|true) ;; *) echo "stub: script does not target the workdir, guest tools or sadbox home" >&2; exit 97;; esac
         cd "${workdir}" || exit 98
         # tmux is stubbed out: the snippets must never reach a tmux on this machine
         exec sh -c "tmux() { :; }; $(printf %s "$last" | sed -e "s#/home/agent/workdir#${workdir}#g" -e "s#/usr/local/lib/sadbox#${guestTools}#g" -e "s#/home/agent/.sadbox#${guestSadbox}#g" -e "s#/home/agent/.bun/bin/bun#${process.execPath}#g")";;

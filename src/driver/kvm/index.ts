@@ -363,6 +363,10 @@ export const kvmDriver: ProjectDriver = {
     return s;
   },
 
+  async ping(ref, timeoutMs = 3_000) {
+    try { await client(ref).ping(timeoutMs); return true; } catch { return false; }
+  },
+
   exec(ref, cmd, opts) { return client(ref).exec(cmd, opts); },
   execWithStdin(ref, shellCmd, stdin, opts) { return client(ref).execWithStdin(shellCmd, stdin, opts); },
   stream(ref, shellCmd) { return client(ref).stream(shellCmd); },

@@ -327,6 +327,16 @@ export const containerDriver: ProjectDriver = {
     }
   },
 
+  async ping(ref, timeoutMs = 3_000) {
+    // Apple's container CLI has no agent to ping: the cheapest shell command
+    // that proves the VM answers is `true`.
+    try {
+      return (await run(["exec", ref, "true"], undefined, timeoutMs)).exitCode === 0;
+    } catch {
+      return false;
+    }
+  },
+
   async exec(ref, cmd, opts) {
     const user = opts?.user ? ["-u", opts.user] : [];
     return run(["exec", ...user, ref, ...cmd], undefined, opts?.timeoutMs);

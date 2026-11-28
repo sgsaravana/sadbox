@@ -119,6 +119,10 @@ export interface ProjectDriver {
   list(): Promise<ProjectInfo[]>;
   /** Live resource usage, or null if unavailable. */
   stats(ref: string, timeoutMs?: number): Promise<ProjectStats | null>;
+  /** Does the guest answer? A tiny request that starts no process where the
+   *  backend has an agent (vz, kvm), so a busy VM that misses a shell probe
+   *  still answers. Never throws. */
+  ping(ref: string, timeoutMs?: number): Promise<boolean>;
 
   // Guest commands are given up on (exit 124) if the VM has not answered within
   // `timeoutMs` — 30 s unless stated; pass more for work that really takes long.

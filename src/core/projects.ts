@@ -24,7 +24,7 @@ import { isEnvFile } from "./envfiles";
 import { displayHostPath, gitConfigFor, normalizeHostPath } from "./wsl";
 import { copyOutHistory, historyOf, linkHistory, prepareHistory } from "./history";
 import { applyLoginsQuietly, purgeProjectLogins } from "./logins";
-import { forgetVitals, liveStats, liveToolchain, QUERY_TIMEOUT_MS } from "./vitals";
+import { forgetVitals, kv, liveStats, liveToolchain, QUERY_TIMEOUT_MS, slowGuestProbe } from "./vitals";
 import { gitTokenForCreate, hasGitToken, migrateGitToken, setProjectGitToken } from "./gittoken";
 import {
   guestAppVersion, installAppInGuest, normalizeAppIds, optionalApp, optionalAppProbe,
@@ -625,29 +625,22 @@ export async function createProject(opts: {
   return getProject(id)!;
 }
 
+// The cheap half of the detail probe: everything here answers in milliseconds,
+// so a busy VM is not mistaken for a dead one. The whole-workdir `du` and
+// `git status` are refreshed behind the request (vitals.slowGuestProbe).
 const GUEST_PROBE = [
   'echo "nproc=$(nproc)"',
   "free -b 2>/dev/null | awk '/Mem:/{print \"mem_total=\"$2; print \"mem_used=\"$3}'",
   // df on the workdir mount reflects the sized volume (the disk allocation)
   `df -B1 ${config.guestWorkdir} 2>/dev/null | tail -1 | awk '{print "disk_total="$2; print "disk_used="$3}'`,
-  'echo "workdir_bytes=$(du -sb ~/workdir 2>/dev/null | cut -f1)"',
   'echo "tmux_sessions=$(tmux list-sessions 2>/dev/null | wc -l | tr -d \\ )"',
   'echo "tmux_windows=$(tmux list-windows -t main 2>/dev/null | wc -l | tr -d \\ )"',
   'echo "tmux_clients=$(tmux list-clients -t main 2>/dev/null | wc -l | tr -d \\ )"',
   'echo "uptime=$(cut -d. -f1 /proc/uptime)"',
-  `cd ${config.guestWorkdir} 2>/dev/null && echo "git_dirty=$(git status --porcelain 2>/dev/null | wc -l | tr -d \\ )" && echo "git_branch=$(git branch --show-current 2>/dev/null)"`,
+  `cd ${config.guestWorkdir} 2>/dev/null && echo "git_branch=$(git branch --show-current 2>/dev/null)"`,
   optionalAppProbe(),
   "true", // a missing optional app must not make the whole probe look like a dead VM
 ].join("; ");
-
-function kv(text: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const line of text.split("\n")) {
-    const i = line.indexOf("=");
-    if (i > 0) out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
-  }
-  return out;
-}
 
 /** Full detail view for one project: DB record + live VM state, resource
  *  usage (incl. CPU %), and in-guest probes (disk, workdir, tmux). Requests for
@@ -772,13 +765,20 @@ async function loadDetails(id: string) {
     ]);
     if (g) guest = kv(g.stdout);
     if (guestUnreachable(g)) {
-      // A big workdir or git status can outrun the probe's 8 s. Ask the agent
-      // something trivial before calling a running VM "not responding".
-      const alive = await driver.exec(ref, ["true"], { timeoutMs: 3_000 })
-        .then((r) => !guestUnreachable(r)).catch(() => false);
+      // Ask the agent something trivial, twice, before calling a running VM
+      // "not responding": a busy guest can miss the probe's 8 s without being
+      // dead, and the fix (Stop/Start) is disruptive enough to be sure.
+      let alive = false;
+      for (let attempt = 0; attempt < 2 && !alive; attempt++) {
+        if (attempt) await Bun.sleep(300);
+        alive = await driver.ping(ref, 5_000).catch(() => false);
+      }
       unresponsive = !alive;
       probeIncomplete = alive;
     }
+    // the expensive readings (workdir size, dirty files) come from a cache the
+    // refresh fills in when it can; the cheap ones above always win
+    if (!unresponsive) guest = { ...slowGuestProbe(ref), ...guest };
     ({ stats, cpuPercent } = live);
     toolchain = tc.tools;
     partial = live.pending || tc.pending;
