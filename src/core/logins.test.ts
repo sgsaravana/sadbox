@@ -9,6 +9,8 @@ import { db } from "../db";
 import { getDriver } from "../driver";
 import { makeProject } from "../../test/helpers";
 import { claudeLogin, claudePlaceholders, saveClaudeLogin } from "../net/claudeoauth";
+import { existingPlaceholder, placeholderFor } from "./placeholders";
+import { itemValue, listItems } from "./vault";
 import { applyLogins, captureLogins, forgetLogin, listLogins, loginTick } from "./logins";
 
 const A = { id: makeProject("lg-a"), name: "proj-lg-a" };
@@ -48,7 +50,10 @@ const ompKeys = (home: string) => {
 
 const driver = getDriver();
 const scripts: string[] = [];
-const exec = spyOn(driver, "execWithStdin").mockImplementation(async (ref, shellCmd, stdin) => {
+const realExec = driver.execWithStdin.bind(driver);
+const exec = spyOn(driver, "execWithStdin").mockImplementation(async (ref, shellCmd, stdin, opts) => {
+  // vault env-file writes etc. go through the stub VM like any other guest exec
+  if (!shellCmd.startsWith("exec ")) return realExec(ref, shellCmd, stdin, opts);
   expect(shellCmd).toBe("exec /home/agent/.bun/bin/bun run -"); // nothing secret on the command line
   const script = new TextDecoder().decode(stdin as Uint8Array);
   scripts.push(script);
@@ -59,6 +64,8 @@ afterAll(() => { exec.mockRestore(); for (const h of Object.values(homes)) rmSyn
 
 beforeEach(() => {
   for (const t of ["agent_logins", "login_placeholders", "login_seen"]) db.run(`DELETE FROM ${t}`);
+  // vault items captured from a login (cascades to bindings and placeholders)
+  db.run("DELETE FROM secrets WHERE name IN ('DEEPSEEK_API_KEY', 'ANTHROPIC_API_KEY')");
   for (const p of [A, B]) {
     const ref = `sadbox-${p.name}`;
     if (homes[ref]) rmSync(homes[ref], { recursive: true, force: true });
@@ -70,22 +77,59 @@ beforeEach(() => {
 describe("API-key logins", () => {
   test("a login in one VM is kept, and copied into another — OAuth ones are not", async () => {
     put(homeOf(A), ".local/share/opencode/auth.json", JSON.stringify({ minimax: { type: "api", key: "mm-key-1" }, github: { type: "oauth", refresh: "r", access: "a", expires: 1 } }));
-    ompDb(homeOf(A), [["deepseek", "api_key", { key: "ds-key-1" }], ["anthropic", "oauth", { access: "x", refresh: "y" }]]);
+    ompDb(homeOf(A), [["cerebras", "api_key", { key: "cb-key-1" }], ["anthropic", "oauth", { access: "x", refresh: "y" }]]);
     const r = await captureLogins(A);
-    expect(r.captured.sort()).toEqual(["omp:deepseek", "opencode:minimax"]);
+    expect(r.captured.sort()).toEqual(["omp:cerebras", "opencode:minimax"]);
     expect(listLogins().map((l) => [l.tool, l.provider, l.shared, l.fromProject])).toEqual([
-      ["omp", "deepseek", "copied", A.name], ["opencode", "minimax", "copied", A.name],
+      ["omp", "cerebras", "copied", A.name], ["opencode", "minimax", "copied", A.name],
     ]);
     expect((await captureLogins(A)).captured).toEqual([]); // nothing new
 
     ompDb(homeOf(B), []);
-    expect((await applyLogins(B)).sort()).toEqual(["omp (deepseek)", "opencode (minimax)"]);
+    expect((await applyLogins(B)).sort()).toEqual(["omp (cerebras)", "opencode (minimax)"]);
     expect(json(homeOf(B), ".local/share/opencode/auth.json")).toEqual({ minimax: { type: "api", key: "mm-key-1" } });
     expect(statSync(join(homeOf(B), ".local/share/opencode/auth.json")).mode & 0o777).toBe(0o600);
-    expect(ompKeys(homeOf(B))).toEqual([["deepseek", "api_key", "ds-key-1"]]);
+    expect(ompKeys(homeOf(B))).toEqual([["cerebras", "api_key", "cb-key-1"]]);
     expect(await applyLogins(B)).toEqual([]); // already current
     // the secrets went in through the script's stdin, in it only as base64
-    expect(scripts.at(-1)).not.toContain("ds-key-1");
+    expect(scripts.at(-1)).not.toContain("cb-key-1");
+  });
+
+  test("a known provider's key is kept in the vault, and another VM gets a placeholder", async () => {
+    ompDb(homeOf(A), [["deepseek", "api_key", { key: "sk-deepseek-real-1" }]]);
+    expect((await captureLogins(A)).captured).toEqual(["omp:deepseek"]);
+
+    // the key is not copied readable: it is a proxy item, and the VM holds a
+    // placeholder shaped like the key, which the proxy swaps out on its host
+    const item = listItems().find((i) => i.name === "DEEPSEEK_API_KEY")!;
+    expect(item).toMatchObject({ kind: "secret", mode: "proxy", projectIds: [A.id] });
+    expect(item.bindings.map((b) => b.host)).toEqual(["api.deepseek.com"]);
+    expect(listLogins().map((l) => [l.provider, l.shared])).toEqual([["deepseek", "placeholders"]]);
+
+    ompDb(homeOf(B), []);
+    expect(await applyLogins(B)).toEqual(["omp (deepseek)"]);
+    const [[, , key]] = ompKeys(homeOf(B));
+    expect(key).toMatch(/^sk-sbx/);
+    expect(key).not.toBe("sk-deepseek-real-1");
+    expect(existingPlaceholder(B.id, item.id)).toBe(key);
+    // B now has the item too, so its shells get the placeholder
+    expect(listItems().find((i) => i.id === item.id)!.projectIds.sort()).toEqual([A.id, B.id].sort());
+
+    // the placeholder is not taken for a new login (it would overwrite the key)
+    expect((await captureLogins(B)).captured).toEqual([]);
+  });
+
+  test("a newer key from the VM updates the vault item, and the placeholder stands", async () => {
+    ompDb(homeOf(A), [["deepseek", "api_key", { key: "sk-deepseek-real-1" }]]);
+    await captureLogins(A);
+    const item = listItems().find((i) => i.name === "DEEPSEEK_API_KEY")!;
+    const first = placeholderFor(A.id, item.id, "sk-deepseek-real-1");
+
+    ompDb(homeOf(A), [["deepseek", "api_key", { key: "sk-deepseek-real-2" }]]);
+    expect((await captureLogins(A)).captured).toEqual(["omp:deepseek"]);
+    expect(itemValue(item.id)).toBe("sk-deepseek-real-2");
+    // a same-prefix key keeps the placeholder, so VMs already holding it keep working
+    expect(placeholderFor(A.id, item.id, "sk-deepseek-real-2")).toBe(first);
   });
 
   test("the newest login wins; a VM still holding the old one does not bring it back", async () => {
