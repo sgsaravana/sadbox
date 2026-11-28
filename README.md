@@ -86,7 +86,7 @@ KVM, and on **Windows 11 x64 through WSL 2** (beta; see
 ## Releases
 
 <!-- LATEST_RELEASE:START -->
-**Latest release: [v0.6.14](https://github.com/sgsaravana/sadbox/releases/tag/v0.6.14)** · published 2026-11-28 · [release notes →](https://github.com/sgsaravana/sadbox/releases/tag/v0.6.14)
+**Latest release: [v0.6.15](https://github.com/sgsaravana/sadbox/releases/tag/v0.6.15)** · published 2026-11-28 · [release notes →](https://github.com/sgsaravana/sadbox/releases/tag/v0.6.15)
 <!-- LATEST_RELEASE:END -->
 
 Every release ships prebuilt binaries for macOS/Linux (arm64/x64), the Windows
