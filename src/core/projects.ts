@@ -9,7 +9,7 @@ import { injectVault, setProjectItems, purgeProjectVault } from "./vault";
 import { repeatableGuestExec } from "./guestops";
 import { recordResourceSample, resourceSamples, RESOURCE_RANGE_MS } from "./resources";
 import { getSettings, validCpus, validMemoryMB } from "./settings";
-import { installGuestProxy, openProjectSocket, closeProjectSocket, redialProjectSocket } from "../net/proxy";
+import { installGuestProxy, writeGuestNetEnv, openProjectSocket, closeProjectSocket, redialProjectSocket } from "../net/proxy";
 import { forgetGuestTools, startGuestRelay } from "../net/guest";
 import { purgeProjectNet } from "../net/rules";
 import { clearProjectApprovals } from "../net/approvals";
@@ -1128,10 +1128,23 @@ export async function startProject(id: string): Promise<ProjectRow> {
     }
     if (!up) throw new Error("the VM started but is not responding");
 
-    if ((await driver.inspect(ref)).isolated) {
+    const info = await driver.inspect(ref);
+    if (info.isolated) {
       openProjectSocket(id);
       await startGuestRelay(ref);
       redialProjectSocket(id); // carriers dialed before the shutdown are dead
+    }
+    // Rewrite the proxy env for every start: a project created before a
+    // supervisor upgrade (one that added PI_PROXY, say) picks the current
+    // variables up without a rebuild. An isolated VM cannot work without it,
+    // so there it fails the start; on the unenforced NAT network it is
+    // best-effort, as at create.
+    try {
+      await writeGuestNetEnv(ref);
+      logEvent(id, "proxy.configure", info.isolated ? "egress only via supervisor" : "egress routed via supervisor (not enforced)");
+    } catch (e) {
+      logEvent(id, "proxy.configure.error", String(e));
+      if (info.isolated) throw new Error(`could not connect the VM to the egress proxy: ${e instanceof Error ? e.message : e}`);
     }
     await syncProjectRouteHosts(id); // a route added while it was stopped still reaches Vite
     await migrateGitToken(p).catch((e) => logEvent(id, "vault.git.migrate.error", String(e)));

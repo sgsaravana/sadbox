@@ -913,9 +913,16 @@ over vsock instead.
     within about 30 s. If a refresh is refused, the Agents page says so — log in
     again in any VM. **Refresh now** and **Forget** are on the page.
   - **API keys** you enter in `omp` or `opencode` are captured from running VMs
-    (about every 30 s) and copied into the others — these are readable in the
-    VM, like a key you typed there. Their **OAuth** logins are not shared (a
-    copy stops working once another VM refreshes it): log in per VM.
+    (about every 30 s) and put into the others. For a provider sadbox knows the
+    host of (Anthropic, OpenAI, DeepSeek, OpenRouter, Groq, xAI, Mistral,
+    Moonshot, Together) the key is kept in the **vault** as a proxy item for
+    that host, and VMs get a placeholder — the proxy swaps the real key in on
+    the provider's own requests, so the key is never readable in a VM. Any
+    other provider's key is copied in readable, like a key you typed there.
+    A provider's item is named after its usual variable (`DEEPSEEK_API_KEY`,
+    …), and also serves any project it is applied to. Their **OAuth** logins
+    are not shared (a copy stops working once another VM refreshes it): log in
+    per VM.
   - **Apply to running VMs** copies the current logins in now.
 - **Updating the agents**: the base image carries the versions — `sadbox update`
   (or `sadbox setup`) refreshes it for the next create or rebuild. In a running
@@ -1581,7 +1588,8 @@ Notes:
 - Claude Code auth: `/login` once in any VM (see Agent logins). A
   `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or `ANTHROPIC_API_KEY`
   proxy item with the Anthropic preset still works instead. omp and opencode
-  OAuth logins are per VM; their API keys are copied in readable.
+  OAuth logins are per VM; a known provider's API key becomes a vault proxy
+  item (placeholders in VMs), an unknown one is copied in readable.
 - Agent history is matched by exact project name: renaming means starting
   fresh (the old name's history stays until deleted). Two agents writing the
   same history at once is not possible, since a name is one live project.

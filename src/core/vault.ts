@@ -127,6 +127,15 @@ export function revealItem(id: string): { value: string } {
   return { value: decrypt(r.value_enc) };
 }
 
+/** An item's value for the supervisor's own use (a placeholder has to be
+ *  shaped like it). Unlike revealItem this is not a reveal by a person, so it
+ *  writes no event — callers never return it to the UI. */
+export function itemValue(id: string): string {
+  const r = itemRow(id);
+  if (!r) throw new Error("vault item not found");
+  return decrypt(r.value_enc);
+}
+
 /** Check `value` against `type`; returns it as stored (json and numbers trimmed). */
 function checkedValue(type: ValueType, value: unknown): string {
   if (typeof value !== "string") throw new Error("value must be a string");

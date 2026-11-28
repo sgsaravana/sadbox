@@ -234,6 +234,9 @@ const SECRET_PRESETS = {
   github: { name: "GITHUB_TOKEN", hosts: ["api.github.com", "github.com", "uploads.github.com"] },
   anthropic: { name: "ANTHROPIC_API_KEY", hosts: ["api.anthropic.com"] },
   openai: { name: "OPENAI_API_KEY", hosts: ["api.openai.com"] },
+  deepseek: { name: "DEEPSEEK_API_KEY", hosts: ["api.deepseek.com"] },
+  openrouter: { name: "OPENROUTER_API_KEY", hosts: ["openrouter.ai"] },
+  xai: { name: "XAI_API_KEY", hosts: ["api.x.ai"] },
 };
 
 function modeBadges(s) {

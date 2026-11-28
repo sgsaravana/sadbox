@@ -3,9 +3,11 @@
 //
 //   - API-key logins (omp's `auth_credentials` api_key rows, opencode's
 //     auth.json `api` entries) are captured from running VMs — about every
-//     30 s, the newest login wins — and copied into a VM when it is created,
-//     rebuilt or started, or on "Apply to running VMs". They are readable in
-//     the VM (A5: omp and opencode need the real key there).
+//     30 s, the newest login wins — and put into a VM when it is created,
+//     rebuilt or started, or on "Apply to running VMs". For a provider with a
+//     known host (core/apikeyvault.ts) the key is kept in the vault as a proxy
+//     item and the VM holds a placeholder, like Claude's login; otherwise it
+//     is copied readable (A5: omp and opencode need the real key there).
 //   - Claude's OAuth login is owned by sadbox (A7, net/claudeoauth.ts): a VM
 //     gets placeholders in ~/.claude/.credentials.json. A VM found holding a
 //     real Claude login (one from before this) has it taken over: kept by
@@ -26,6 +28,7 @@ import {
   CLAUDE_LOGIN_NAME, CLAUDE_PROVIDER, CLAUDE_TOOL, claudeLogin, claudePlaceholders, forgetClaude,
   isLoginPlaceholder, noteClaudeDetails, saveClaudeLogin, vmOauth,
 } from "../net/claudeoauth";
+import { apiKeyPlaceholder, isVaultBacked, keepApiKeyInVault } from "./apikeyvault";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 const hash = (tool: string, provider: string, data: unknown) =>
@@ -120,27 +123,32 @@ function setSeen(projectId: string, tool: string, provider: string, h: string) {
             ON CONFLICT(project_id, tool, provider) DO UPDATE SET hash = excluded.hash`).run(projectId, tool, provider, h);
 }
 
-/** The API-key logins a VM holds, as the store keeps them. */
+/** Shaped like a sadbox placeholder (prefix, then "sbx"): one that is no longer
+ *  in use, say — never mistaken for a real login. */
+const placeholderShaped = (t: string) => t.startsWith(prefixOf(t) + "sbx");
+
+/** The API-key logins a VM holds, as the store keeps them. A placeholder sadbox
+ *  itself wrote is not a login: it must never replace the real key kept here. */
 function vmApiLogins(out: any): ApiLogin[] {
   const list: ApiLogin[] = [];
   for (const r of Array.isArray(out.omp) ? out.omp : []) {
     if (r?.type !== "api_key" || typeof r.provider !== "string") continue;
     try {
       const d = JSON.parse(r.data);
-      if (typeof d?.key === "string" && d.key) list.push({ tool: "omp", provider: r.provider, data: { key: d.key, ...(d.source ? { source: d.source } : {}) } });
+      if (typeof d?.key === "string" && d.key && !placeholderShaped(d.key)) {
+        list.push({ tool: "omp", provider: r.provider, data: { key: d.key, ...(d.source ? { source: d.source } : {}) } });
+      }
     } catch {}
   }
   if (out.opencode && typeof out.opencode === "object") {
     for (const [k, v] of Object.entries(out.opencode as Record<string, any>)) {
-      if (v?.type === "api" && typeof v.key === "string" && v.key) list.push({ tool: "opencode", provider: k, data: v });
+      if (v?.type === "api" && typeof v.key === "string" && v.key && !placeholderShaped(v.key)) {
+        list.push({ tool: "opencode", provider: k, data: v });
+      }
     }
   }
   return list;
 }
-
-/** Shaped like a sadbox placeholder (prefix, then "sbx"): one that is no longer
- *  in use, say — never mistaken for a real login. */
-const placeholderShaped = (t: string) => t.startsWith(prefixOf(t) + "sbx");
 
 export interface Project { id: string; name: string }
 const refOf = (p: Project) => `sadbox-${p.name}`;
@@ -163,6 +171,10 @@ export async function captureLogins(p: Project): Promise<{ captured: string[]; r
                   from_project = excluded.from_project, captured_at = excluded.captured_at, status = NULL`)
         .run(l.tool, l.provider, encrypt(JSON.stringify(l.data)), p.name);
       logEvent(p.id, "login.capture", `${l.tool} (${l.provider}): API key kept by sadbox`);
+      // For a provider we know (core/apikeyvault.ts) the key also becomes a
+      // proxy vault item, so VMs it is applied to hold a placeholder.
+      const key = typeof (l.data as { key?: unknown }).key === "string" ? (l.data as { key: string }).key : "";
+      if (key) await keepApiKeyInVault(p, l.tool, l.provider, key);
       captured.push(`${l.tool}:${l.provider}`);
     }
     setSeen(p.id, l.tool, l.provider, h);
@@ -201,16 +213,26 @@ export async function captureLogins(p: Project): Promise<{ captured: string[]; r
   return { captured, replaceClaude };
 }
 
+/** A login as this VM will hold it: its placeholder when the key is vault-backed
+ *  (the proxy swaps the real key in on the provider's hosts), else the key. */
+async function forVm(p: Project, l: ApiLogin): Promise<Record<string, unknown>> {
+  const key = typeof l.data.key === "string" ? l.data.key : "";
+  const placeholder = key ? await apiKeyPlaceholder(p, l.provider).catch(() => null) : null;
+  return placeholder ? { ...l.data, key: placeholder } : l.data;
+}
+
 /** Put the kept logins into a running VM. Returns what was written. */
 export async function applyLogins(p: Project): Promise<string[]> {
   const claude = claudeLogin() ? vmOauth(p.id) : null;
   const api = apiLogins();
+  const data = new Map<ApiLogin, Record<string, unknown>>();
+  for (const l of api) data.set(l, await forVm(p, l));
   const payload: Record<string, unknown> = {};
   if (claude) payload.claude = claude;
   const oc = api.filter((l) => l.tool === "opencode");
-  if (oc.length) payload.opencode = Object.fromEntries(oc.map((l) => [l.provider, l.data]));
+  if (oc.length) payload.opencode = Object.fromEntries(oc.map((l) => [l.provider, data.get(l)!]));
   const omp = api.filter((l) => l.tool === "omp");
-  if (omp.length) payload.omp = omp.map((l) => ({ provider: l.provider, ...l.data }));
+  if (omp.length) payload.omp = omp.map((l) => ({ provider: l.provider, ...data.get(l)! }));
   if (!Object.keys(payload).length) return [];
 
   const out = await runGuest(refOf(p), WRITE_JS.replace("__PAYLOAD__", Buffer.from(JSON.stringify(payload)).toString("base64")));
@@ -218,9 +240,10 @@ export async function applyLogins(p: Project): Promise<string[]> {
   if (out.claude === "written") wrote.push(CLAUDE_LOGIN_NAME);
   for (const k of out.opencode ?? []) wrote.push(`opencode (${k})`);
   for (const k of out.omp ?? []) wrote.push(`omp (${k})`);
-  // the VM now holds what sadbox keeps: not a new login of its own
-  for (const l of oc) setSeen(p.id, l.tool, l.provider, hash(l.tool, l.provider, l.data));
-  if (!out.ompError) for (const l of omp) setSeen(p.id, l.tool, l.provider, hash(l.tool, l.provider, l.data));
+  // the VM now holds what sadbox keeps: not a new login of its own (a
+  // placeholder's hash included, so it is never captured as a new key)
+  for (const l of oc) setSeen(p.id, l.tool, l.provider, hash(l.tool, l.provider, data.get(l)));
+  if (!out.ompError) for (const l of omp) setSeen(p.id, l.tool, l.provider, hash(l.tool, l.provider, data.get(l)));
   if (out.ompError) logEvent(p.id, "login.apply.error", `omp: ${out.ompError}`);
   if (wrote.length) logEvent(p.id, "login.apply", wrote.join(", "));
   return wrote;
@@ -281,13 +304,15 @@ export interface LoginView {
 
 export function listLogins(): LoginView[] {
   return db.query<LoginRow, []>("SELECT * FROM agent_logins ORDER BY tool, provider").all().map((r) => ({
-    tool: r.tool, provider: r.provider, kind: r.kind as LoginView["kind"], shared: r.kind === "oauth" ? "placeholders" : "copied",
+    tool: r.tool, provider: r.provider, kind: r.kind as LoginView["kind"],
+    shared: r.kind === "oauth" || (r.kind === "api" && isVaultBacked(r.provider)) ? "placeholders" : "copied",
     fromProject: r.from_project, capturedAt: r.captured_at, expiresAt: r.expires_at, refreshedAt: r.refreshed_at, status: r.status,
   }));
 }
 
-/** Forget a login. A copied API key stays in the VMs that have it; Claude's
- *  placeholders stop working everywhere. */
+/** Forget a login. A copied API key stays in the VMs that have it; a
+ *  vault-backed one keeps working through its vault item (delete that item on
+ *  the Vault page to stop it); Claude's placeholders stop working everywhere. */
 export function forgetLogin(tool: string, provider: string): boolean {
   const had = !!db.query("SELECT 1 FROM agent_logins WHERE tool = ? AND provider = ?").get(tool, provider);
   if (tool === CLAUDE_TOOL && provider === CLAUDE_PROVIDER) forgetClaude();

@@ -21,7 +21,7 @@ const bin = join(dir, "container");
 writeFileSync(bin, `#!/bin/sh
 case "$1" in
   inspect) if [ -e "${dir}/stopped-$2" ]; then st=stopped; else st=running; fi
-           echo '[{"configuration":{"id":"'"$2"'"},"status":{"state":"'"$st"'","networks":[{"ipv4Address":"127.0.0.1/24"}]}}]';;
+           echo '[{"configuration":{"id":"'"$2"'"},"status":{"state":"'"$st"'","networks":[{"ipv4Address":"127.0.0.1/24","ipv4Gateway":"127.0.0.1"}]}}]';;
   # stop [--time N] <ref> / start <ref>: remembered in a marker file
   stop) for last; do :; done; : > "${dir}/stopped-$last";;
   start) rm -f "${dir}/stopped-$2";;
