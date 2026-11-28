@@ -1,9 +1,13 @@
 const $ = (s) => document.querySelector(s);
 const api = async (path, opts = {}) => {
+  // timeoutMs keeps a hung request (a slow probe, a stalled proxy) from
+  // holding up the page's refresh loop forever
+  const { timeoutMs, signal, ...rest } = opts;
   const r = await fetch(path, {
     headers: { "content-type": "application/json" },
-    ...opts,
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
+    ...rest,
+    signal: signal ?? (timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined),
+    body: rest.body ? JSON.stringify(rest.body) : undefined,
   });
   if (r.status === 401) { // session ended — back to the login page, then return here
     location.href = `/login?next=${encodeURIComponent(location.pathname + location.search + location.hash)}`;
@@ -33,12 +37,41 @@ $("#nav-scrim").onclick = () => setNav(false);
 $("#sidenav").addEventListener("click", (e) => { if (e.target.closest("a")) setNav(false); });
 addEventListener("keydown", (e) => { if (e.key === "Escape") setNav(false); });
 
+// A tab that comes back (or a machine that slept) refreshes at once instead of
+// waiting for the next poll, and re-fetches the nav after the network returns.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  const m = location.hash.match(/^#project\/([\w-]+)$/);
+  if (m && lastDetail?.id === m[1]) renderDetail(m[1]).catch(() => {});
+});
+addEventListener("online", () => {
+  const m = location.hash.match(/^#project\/([\w-]+)$/);
+  if (m) renderDetail(m[1]).catch(() => {});
+  refreshNavTree();
+});
+
+// The detail view polls itself rather than running on a fixed interval: the
+// next request starts only after the last one answered, so a slow VM probe
+// never stacks requests (which is what made a busy VM look dead).
+function stopDetailPolling() {
+  if (detailTimer) { clearTimeout(detailTimer); detailTimer = null; }
+}
+function startDetailPolling(id) {
+  stopDetailPolling();
+  const tick = async () => {
+    if (location.hash !== `#project/${id}`) { detailTimer = null; return; }
+    if (!document.hidden) await renderDetail(id).catch(() => {});
+    if (location.hash === `#project/${id}`) detailTimer = setTimeout(tick, 4000);
+  };
+  detailTimer = setTimeout(tick, 4000);
+}
+
 function route() {
   if (location.hash === "#secrets") { location.replace("#vaults"); return; } // the page's old name
   setNav(false);
   const hash = location.hash.slice(1);
   const [head, arg] = hash.split("/");
-  clearInterval(detailTimer); detailTimer = null;
+  stopDetailPolling();
   if (!(head === "project" && arg)) closeNet();
 
   const detail = head === "project" && arg;
@@ -1531,6 +1564,7 @@ function skeletonNet() {
   </div>`;
 }
 function showDetailSkeleton() {
+  clearDetailStale();
   $("#detail-name").innerHTML = `<span class="sk sk-line" style="width:90px;display:inline-block"></span>`;
   $("#detail-actions").innerHTML = Array.from({ length: 4 }, () =>
     `<span class="sk sk-btn"></span>`).join("");
@@ -1989,10 +2023,7 @@ async function openDetail(id) {
   openConnections(id);
   openNet(id);
   await renderDetail(id);
-  clearInterval(detailTimer);
-  detailTimer = setInterval(() => {
-    if (location.hash === `#project/${id}`) renderDetail(id); else clearInterval(detailTimer);
-  }, 4000);
+  startDetailPolling(id);
 }
 
 // Loading a project's details takes a few seconds (live VM stats), so a change
@@ -2004,12 +2035,35 @@ let lastDetail = null;
 let folderPending = null; // { id, label }
 let folderKnown = null;   // { id, path: string | null, at: ms }
 
+/** A poll that failed (a proxy hiccup, a laptop waking, a timeout) is not a
+ *  dead project: keep the last reading up and say it is being retried. */
+function showDetailStale(msg) {
+  let el = document.getElementById("detail-stale");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "detail-stale";
+    el.style.cssText = "margin:0 0 10px;padding:7px 11px;border-radius:8px;background:#3a2f1d;color:#f0dcae;" +
+      "border:1px solid #7a6a45;font:12px system-ui";
+    const body = document.getElementById("detail-body");
+    body?.parentElement?.insertBefore(el, body);
+  }
+  el.textContent = `⚠ ${msg} — showing the last reading, retrying…`;
+}
+function clearDetailStale() { document.getElementById("detail-stale")?.remove(); }
+
 async function renderDetail(id) {
   let d;
   const stats = $("#detail-stats") || $("#detail-body");
   const asked = Date.now();
-  try { d = await api(`/api/projects/${id}/details`); }
-  catch (e) { stats.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  try { d = await api(`/api/projects/${id}/details`, { timeoutMs: 20000 }); }
+  catch (e) {
+    if (location.hash !== `#project/${id}`) return; // the page moved on meanwhile
+    if (lastDetail?.id === id) { showDetailStale(`connection lost (${e.message})`); return; }
+    stats.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  if (location.hash !== `#project/${id}`) return; // a slow answer for a page we left
+  clearDetailStale();
   if (folderKnown && folderKnown.id === id && asked < folderKnown.at) {
     d.sync_path = folderKnown.path;
     d.sync_folder = d.source_path || folderKnown.path || "";
@@ -2269,7 +2323,7 @@ function paintDetail(d) {
                <button class="mini" data-link-folder="${d.id}" title="Pick a local folder (a git repository or any other folder) to sync this project's work into">Connect a folder…</button>`}</dd>`}
           <dt>Workdir (in VM)</dt><dd class="mono">${escapeHtml(d.workdir)}</dd>
           ${d.empty ? "" : `<dt>Work branch</dt><dd class="mono">${escapeHtml(d.branch)}</dd>
-          <dt>Uncommitted</dt><dd>${d.git.dirty ?? 0} file(s)</dd>
+          <dt>Uncommitted</dt><dd>${d.git.dirty == null ? `<span class="dim">reading…</span>` : `${d.git.dirty} file(s)`}</dd>
           <dt>Git remote</dt><dd>${d.git_remote
             ? `<span class="mono">${escapeHtml(d.git_remote)}${d.has_git_token ? " 🔑" : ""}</span>`
             : `<span class="dim">none</span>`}

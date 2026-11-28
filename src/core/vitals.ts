@@ -4,6 +4,7 @@
 // seconds, and each refresh is handed the reading the previous one kicked off.
 // Only the first look at a VM has to wait, and then only briefly — whatever is
 // not ready by then is reported as pending and filled in by the next refresh.
+import { config } from "../config";
 import { getDriver } from "../driver";
 import type { ProjectStats } from "../driver/types";
 import { vmToolchain, type ToolInfo } from "./toolchain";
@@ -36,6 +37,48 @@ const of = (ref: string): Vitals => {
 /** Drop what is known about a VM (it was destroyed or rebuilt). */
 export function forgetVitals(ref: string): void {
   vitals.delete(ref);
+  slows.delete(ref);
+}
+
+/** Split `key=value` lines (the guest probes print one per line). */
+export function kv(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of text.split("\n")) {
+    const i = line.indexOf("=");
+    if (i > 0) out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  return out;
+}
+
+// The expensive half of the detail view's guest probe — walking the whole
+// workdir and running `git status` — is refreshed here, behind the request.
+// On a big or busy repository it can outrun any sane timeout, and that used to
+// make a perfectly healthy VM show as "not responding"; the status page now
+// answers from the cheap probe and this fills in when it can.
+const SLOW_TTL_MS = 15_000;
+const SLOW_TIMEOUT_MS = 60_000;
+const SLOW_PROBE = [
+  `echo "workdir_bytes=$(du -sb ${config.guestWorkdir} 2>/dev/null | cut -f1)"`,
+  `cd ${config.guestWorkdir} 2>/dev/null && echo "git_dirty=$(git status --porcelain 2>/dev/null | wc -l | tr -d \\ )"`,
+  "true", // a missing repo must not make the probe look dead
+].join("; ");
+
+interface Slow { at: number; guest: Record<string, string>; busy: boolean }
+const slows = new Map<string, Slow>();
+
+/** The last expensive readings (empty until there is one). Never waits: the
+ *  caller paints what it has and asks again on its next refresh. */
+export function slowGuestProbe(ref: string): Record<string, string> {
+  let s = slows.get(ref);
+  if (!s) slows.set(ref, s = { at: 0, guest: {}, busy: false });
+  if (!s.busy && Date.now() - s.at > SLOW_TTL_MS) {
+    s.busy = true;
+    getDriver().exec(ref, ["sh", "-c", SLOW_PROBE], { timeoutMs: SLOW_TIMEOUT_MS })
+      .then((r) => { if (r.exitCode === 0) { s!.guest = kv(r.stdout); s!.at = Date.now(); } })
+      .catch(() => {})
+      .finally(() => { s!.busy = false; });
+  }
+  return s.guest;
 }
 
 /** Forget the cached tool versions after an in-VM update; the next detail
