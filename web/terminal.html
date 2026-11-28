@@ -171,25 +171,72 @@
     });
 
     const enc = new TextEncoder();
-    let ws;
+    let ws = null;
+    let retryTimer = null;
+    let attempts = 0;
+    let everConnected = false;
+    let stopped = false;
+    // a dropped socket (a proxy hiccup, a laptop waking, a supervisor restart)
+    // reconnects on its own, backing off so a dead VM is not hammered
+    const RETRY_MS = [500, 1000, 2000, 4000, 8000, 15000];
+    const reconnectBtn = document.getElementById("reconnect");
+
+    function note(line) { term.write(`\r\n\x1b[31m${line}\x1b[0m\r\n`); }
+    function scheduleReconnect() {
+      if (stopped || retryTimer || document.hidden) return;
+      const wait = RETRY_MS[Math.min(attempts, RETRY_MS.length - 1)];
+      attempts++;
+      reconnectBtn.style.display = "inline-block";
+      note(`[disconnected — reconnecting in ${wait % 1000 ? (wait / 1000).toFixed(1) : wait / 1000}s]`);
+      retryTimer = setTimeout(() => { retryTimer = null; connect(); }, wait);
+    }
     function connect() {
-      document.getElementById("reconnect").style.display = "none";
+      clearTimeout(retryTimer); retryTimer = null;
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+      reconnectBtn.style.display = "none";
       // match the page scheme so it works behind a TLS reverse proxy (wss on https)
       const wsScheme = location.protocol === "https:" ? "wss" : "ws";
-      ws = new WebSocket(`${wsScheme}://${location.host}/projects/${projectId}/term?cols=${term.cols}&rows=${term.rows}`);
-      ws.binaryType = "arraybuffer";
-      ws.onopen = () => term.focus();
-      ws.onmessage = (ev) => term.write(new Uint8Array(ev.data));
-      ws.onclose = (ev) => {
-        term.write(`\r\n\x1b[31m[disconnected: ${ev.reason || ev.code}]\x1b[0m\r\n`);
-        document.getElementById("reconnect").style.display = "inline-block";
-        if (ev.code === 4010) {
-          term.write("This project's VM is not running. Press \x1b[1mstart VM\x1b[0m above to boot it — files are as you left them.\r\n");
+      const sock = new WebSocket(`${wsScheme}://${location.host}/projects/${projectId}/term?cols=${term.cols}&rows=${term.rows}`);
+      ws = sock;
+      sock.binaryType = "arraybuffer";
+      let openedAt = 0;
+      sock.onopen = () => {
+        openedAt = Date.now();
+        reconnectBtn.style.display = "none";
+        if (everConnected) term.write("\r\n\x1b[90m[reconnected]\x1b[0m\r\n");
+        everConnected = true;
+        term.focus();
+      };
+      sock.onmessage = (ev) => term.write(new Uint8Array(ev.data));
+      sock.onerror = () => {}; // onclose follows and does the work
+      sock.onclose = (ev) => {
+        if (ws === sock) ws = null;
+        if (openedAt && Date.now() - openedAt > 5_000) attempts = 0; // it was healthy
+        if (ev.code === 4010) { // the VM is stopped: no point retrying
+          stopped = true;
+          term.write("\r\nThis project's VM is not running. Press \x1b[1mstart VM\x1b[0m above to boot it — files are as you left them.\r\n");
           startBtn.style.display = "inline-block";
+          return;
         }
+        if (ev.code === 4004) { stopped = true; note("[this project no longer exists]"); return; }
+        note(`[disconnected: ${ev.reason || ev.code}]`);
+        scheduleReconnect();
       };
     }
-    document.getElementById("reconnect").onclick = connect;
+    reconnectBtn.onclick = () => { attempts = 0; clearTimeout(retryTimer); retryTimer = null; connect(); };
+    // a tab that was in the background (or a machine that slept) gets a fresh
+    // socket as soon as it is visible again
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) return;
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        attempts = 0; clearTimeout(retryTimer); retryTimer = null; connect();
+      }
+    });
+    addEventListener("online", () => {
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        attempts = 0; clearTimeout(retryTimer); retryTimer = null; connect();
+      }
+    });
     const startBtn = document.getElementById("startvm");
     startBtn.onclick = async () => {
       startBtn.disabled = true; startBtn.textContent = "starting…";
@@ -198,6 +245,7 @@
         const r = await fetch(`/api/projects/${projectId}/start`, { method: "POST" });
         if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
         startBtn.style.display = "none";
+        stopped = false; attempts = 0;
         connect();
       } catch (e) {
         term.write(`\x1b[31mCould not start it: ${e.message}\x1b[0m\r\n`);

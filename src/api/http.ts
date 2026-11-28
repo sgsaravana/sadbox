@@ -72,7 +72,9 @@ export function startServer() {
   const server = Bun.serve<TermConn>({
     port: config.port,
     hostname: config.host,
-    idleTimeout: 120,
+    // Comfortably longer than a reverse proxy's upstream keep-alive, so Caddy
+    // (or nginx) never reuses a connection this side has just dropped.
+    idleTimeout: 255,
     async fetch(req, server) {
       const url = new URL(req.url);
       const p = url.pathname;
@@ -586,19 +588,33 @@ export function startServer() {
         // than the CLI's error text (checked from the row: the project list
         // keeps it in step with the VM)
         if (proj.state === "stopped" || proj.state === "stopping") { ws.close(4010, "the VM is stopped"); return; }
-        // -A: attach to the existing session (create it only if missing) — never
-        // a second session. -D: detach any other client on attach, so orphaned
-        // clients (e.g. a browser tab closed without a clean detach) don't pile
-        // up mirroring the same session and fighting over its size.
-        const term = driver.terminal(
-          refFor(proj.name),
-          // -c: if the session has to be created here (the last shell was exited,
-          // or the VM was restarted), start it in the workdir like the original
-          ["tmux", "new-session", "-A", "-D", "-s", config.tmuxSession, "-c", config.guestWorkdir],
-          { cols: ws.data.cols, rows: ws.data.rows },
-        );
-        term.onData((chunk) => ws.send(chunk));
-        term.onExit(() => { try { ws.close(1000, "terminal closed"); } catch {} });
+        let term: TerminalHandle;
+        try {
+          // -A: attach to the existing session (create it only if missing) — never
+          // a second session. -D: detach any other client on attach, so orphaned
+          // clients (e.g. a browser tab closed without a clean detach) don't pile
+          // up mirroring the same session and fighting over its size.
+          term = driver.terminal(
+            refFor(proj.name),
+            // -c: if the session has to be created here (the last shell was exited,
+            // or the VM was restarted), start it in the workdir like the original
+            ["tmux", "new-session", "-A", "-D", "-s", config.tmuxSession, "-c", config.guestWorkdir],
+            { cols: ws.data.cols, rows: ws.data.rows },
+          );
+        } catch (e) {
+          console.error(`terminal ${proj.name}: ${e instanceof Error ? e.message : e}`);
+          try { ws.close(1013, "the VM did not answer"); } catch {}
+          return;
+        }
+        const openedAt = Date.now();
+        let gotOutput = false;
+        term.onData((chunk) => { gotOutput = true; ws.send(chunk); });
+        term.onExit(() => {
+          // An immediate exit with no output is the agent not answering, not
+          // tmux finishing: 1013 tells the page to reconnect on its own.
+          const quick = !gotOutput && Date.now() - openedAt < 1_500;
+          try { ws.close(quick ? 1013 : 1000, quick ? "the VM did not answer" : "terminal closed"); } catch {}
+        });
         ws.data.term = term;
       },
       message(ws, msg) {

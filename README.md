@@ -1498,6 +1498,12 @@ Notes:
   no extra config. The terminal picks `wss://` on an HTTPS page, so it works
   through TLS. `flush_interval -1` is what keeps the live **network feed** (SSE)
   streaming instead of buffering.
+- **Dropped connections recover themselves.** The terminal reconnects with a
+  backoff (and stops only when the VM is stopped), the detail view keeps its
+  last reading while a failed poll is retried, and the SSE network feed
+  reconnects by itself. sadbox's own idle timeout is 255 s and pings keep the
+  WebSocket alive; if terminals still drop after a fixed number of seconds,
+  look for a read/write timeout in the proxy in front.
 - **Its own favicon.** Every page links `/favicon.svg` and `/favicon.ico`
   (plus an Apple touch icon), so a subdomain behind Caddy shows the sadbox mark
   instead of falling back to the primary domain's icon. No Caddy rule is needed.
